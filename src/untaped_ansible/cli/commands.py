@@ -33,7 +33,7 @@ from untaped_ansible.infrastructure import (
     ScopeRepository,
     SqliteDependencyIndex,
 )
-from untaped_ansible.settings import AnsibleSettings, ScopeDefinition
+from untaped_ansible.settings import AnsibleSettings, ScopeDefinition, normalize_team_refs
 
 GraphDirectionOption = Annotated[
     Literal["deps", "impact", "both"],
@@ -177,7 +177,11 @@ def alias_remove_command(alias: str) -> None:
 def scope_add_command(
     name: str,
     orgs: list[str] | None = typer.Option(None, "--org", help="GitHub org to scan."),
-    teams: list[str] | None = typer.Option(None, "--team", help="GitHub team as ORG/SLUG."),
+    teams: list[str] | None = typer.Option(
+        None,
+        "--team",
+        help="GitHub team slug with one --org, or ORG/SLUG.",
+    ),
     repos: list[str] | None = typer.Option(None, "--repo", help="GitHub repo as owner/name."),
     paths: list[str] | None = typer.Option(None, "--path", help="Dependency file path."),
     ref_kinds: list[str] | None = typer.Option(
@@ -193,10 +197,15 @@ def scope_add_command(
 ) -> None:
     """Create or replace a named index scope."""
     with report_errors():
+        normalized_orgs = orgs or []
+        try:
+            normalized_teams = normalize_team_refs(teams or [], normalized_orgs)
+        except ValueError as exc:
+            raise UntapedError(str(exc)) from exc
         scope = ScopeDefinition(
             name=name,
-            orgs=orgs or [],
-            teams=teams or [],
+            orgs=normalized_orgs,
+            teams=normalized_teams,
             repos=repos or [],
             dependency_paths=paths or [],
             ref_kinds=ref_kinds or ["heads", "tags"],

@@ -74,7 +74,7 @@ def test_scope_add_show_remove_updates_config(tmp_path: Path, monkeypatch) -> No
             "--org",
             "acme",
             "--team",
-            "acme/platform",
+            "platform",
             "--repo",
             "acme/site",
             "--path",

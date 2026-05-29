@@ -43,6 +43,10 @@ GitHub URL and `owner/repo` targets read declared dependencies live from
 GitHub for `deps` graphs; reverse impact still comes from a refreshed
 named scope index.
 
+When a scope has exactly one `--org`, `--team` accepts a bare team slug
+and stores it as `org/slug`. Use `--team org/slug` when a scope has no
+org or multiple orgs.
+
 ## Development
 
 ```bash

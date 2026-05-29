@@ -17,7 +17,7 @@ from untaped_ansible.application.ports import (
 )
 from untaped_ansible.domain.identity import IdentityResolver
 from untaped_ansible.domain.parser import parse_dependency_file
-from untaped_ansible.settings import ScopeDefinition
+from untaped_ansible.settings import ScopeDefinition, normalize_team_refs
 
 
 class RefreshResult(BaseModel):
@@ -100,7 +100,7 @@ class RefreshIndex:
         repos = list(scope.repos)
         for org in scope.orgs:
             repos.extend(_repo_names(self._github.list_org_repos(org)))
-        for team in scope.teams:
+        for team in normalize_team_refs(scope.teams, scope.orgs):
             org, slug = _split_team(team)
             repos.extend(_repo_names(self._github.list_team_repos(org, slug)))
         return sorted(dict.fromkeys(repos))
