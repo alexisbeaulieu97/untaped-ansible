@@ -1,0 +1,114 @@
+[project]
+name = "untaped-ansible"
+version = "0.1.0"
+description = "Ansible dependency graph plugin for untaped."
+readme = "README.md"
+authors = [
+    { name = "Alexis Beaulieu", email = "alexisbeaulieu97@gmail.com" }
+]
+requires-python = ">=3.14"
+dependencies = [
+    "pydantic>=2.13.3",
+    "pyyaml>=6.0.3",
+    "typer>=0.25.1",
+    "untaped",
+    "untaped-github>=0.2.0",
+]
+
+[project.entry-points."untaped.plugins"]
+ansible = "untaped_ansible.plugin:plugin"
+
+[build-system]
+requires = ["uv_build>=0.11.16,<0.12.0"]
+build-backend = "uv_build"
+
+[tool.uv.sources]
+untaped = { git = "https://github.com/alexisbeaulieu97/untaped" }
+untaped-github = { git = "https://github.com/alexisbeaulieu97/untaped-github" }
+
+[dependency-groups]
+dev = [
+    "mypy>=1.20.2",
+    "pre-commit>=4.6.0",
+    "pytest>=9.0.3",
+    "pytest-cov>=7.1.0",
+    "respx>=0.23.1",
+    "ruff>=0.15.12",
+    "types-pyyaml>=6.0.12.20260408",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py314"
+
+[tool.ruff.lint]
+select = [
+    "E",
+    "F",
+    "I",
+    "UP",
+    "B",
+    "SIM",
+    "TID",
+    "C90",
+    "RUF",
+]
+extend-select = ["PLC0415"]
+ignore = []
+
+[tool.ruff.lint.flake8-tidy-imports]
+ban-relative-imports = "all"
+
+[tool.ruff.lint.mccabe]
+max-complexity = 12
+
+[tool.ruff.lint.per-file-ignores]
+"**/tests/**" = ["S101", "PLC0415"]
+"**/cli/*.py" = ["B008"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.mypy]
+python_version = "3.14"
+strict = true
+warn_unused_configs = true
+warn_unreachable = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+disallow_any_generics = true
+disallow_untyped_defs = true
+no_implicit_optional = true
+plugins = ["pydantic.mypy"]
+packages = ["untaped_ansible"]
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+addopts = [
+    "-ra",
+    "--strict-markers",
+    "--strict-config",
+    "--cov",
+    "--cov-report=term-missing",
+    "--import-mode=importlib",
+]
+markers = [
+    "integration: tests that exercise GitHub or filesystem integration flows",
+]
+
+[tool.coverage.run]
+branch = true
+source = ["src"]
+omit = ["**/tests/**", "**/__main__.py"]
+
+[tool.coverage.report]
+fail_under = 80
+show_missing = true
+skip_covered = false
+exclude_also = [
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "@(abc\\.)?abstractmethod",
+]
