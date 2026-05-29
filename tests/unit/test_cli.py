@@ -237,6 +237,109 @@ def test_graph_command_fetches_remote_target_dependencies_from_github(
     assert "|   +-- acme/common" in result.stdout
 
 
+def test_graph_command_resolves_remote_branch_ref_before_tree_read(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    cfg = _write_config(
+        tmp_path,
+        index_path=tmp_path / "index.sqlite3",
+        extra_profile={"github": {"token": "ghp_test"}},
+    )
+    monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
+
+    with respx.mock(base_url="https://api.github.com") as mock:
+        mock.get("/repos/acme/site/git/matching-refs/heads/release/1").mock(
+            return_value=httpx.Response(
+                200,
+                json=[{"ref": "refs/heads/release/1", "object": {"sha": "sha-release-1"}}],
+            )
+        )
+        mock.get("/repos/acme/site/git/trees/sha-release-1").mock(
+            return_value=httpx.Response(
+                200,
+                json={"tree": [{"path": "roles/requirements.yml", "type": "blob"}]},
+            )
+        )
+        content = mock.get("/repos/acme/site/contents/roles/requirements.yml").mock(
+            return_value=httpx.Response(
+                200,
+                text="- src: https://github.com/acme/base\n",
+            )
+        )
+
+        result = CliRunner().invoke(
+            app,
+            [
+                "graph",
+                "https://github.com/acme/site",
+                "--direction",
+                "deps",
+                "--ref",
+                "release/1",
+                "--depth",
+                "1",
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    assert content.calls[0].request.url.params["ref"] == "sha-release-1"
+    assert "acme/site@release/1" in result.stdout
+    assert "|   +-- acme/base" in result.stdout
+
+
+def test_remote_graph_without_scope_does_not_include_global_index_impact(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    index_path = tmp_path / "index.sqlite3"
+    SqliteDependencyIndex(index_path).replace_scope_scan(
+        IndexScan(
+            scope="prod",
+            scanned_at=datetime.now(UTC),
+            dependencies=(
+                IndexedDependency(
+                    source_repo="acme/app",
+                    source_ref="main",
+                    dependency_repo="acme/site",
+                    dependency_name="site",
+                    dependency_version=None,
+                    source_path="roles/requirements.yml",
+                ),
+            ),
+        )
+    )
+    cfg = _write_config(
+        tmp_path,
+        index_path=index_path,
+        extra_profile={"github": {"token": "ghp_test"}},
+    )
+    monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
+
+    with respx.mock(base_url="https://api.github.com") as mock:
+        mock.get("/repos/acme/site").mock(
+            return_value=httpx.Response(200, json={"default_branch": "main"})
+        )
+        mock.get("/repos/acme/site/git/trees/main").mock(
+            return_value=httpx.Response(
+                200,
+                json={"tree": [{"path": "roles/requirements.yml", "type": "blob"}]},
+            )
+        )
+        mock.get("/repos/acme/site/contents/roles/requirements.yml").mock(
+            return_value=httpx.Response(200, text="- src: https://github.com/acme/base\n")
+        )
+
+        result = CliRunner().invoke(
+            app,
+            ["graph", "https://github.com/acme/site", "--depth", "1"],
+        )
+
+    assert result.exit_code == 0, result.output
+    assert "|   +-- acme/base" in result.stdout
+    assert "acme/app" not in result.stdout
+
+
 def test_graph_command_parses_local_target_dependencies(tmp_path: Path, monkeypatch) -> None:
     target = tmp_path / "role"
     (target / "roles").mkdir(parents=True)

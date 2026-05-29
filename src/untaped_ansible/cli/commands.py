@@ -114,6 +114,7 @@ def graph_command(
             github_settings = get_config_section("github", GithubSettings)
             core = get_core_settings()
             with GithubClient(github_settings, http=core.http) as github:
+                graph_direction = _live_graph_direction(scope=scope, direction=direction)
                 index = GithubDependencyIndex(
                     github=github,
                     wrapped=index,
@@ -126,7 +127,7 @@ def graph_command(
                     ref=ref,
                     to_ref=to_ref,
                     scope=scope,
-                    direction=direction,
+                    direction=graph_direction,
                     depth=depth,
                     stale_after=settings.stale_after,
                 )
@@ -436,6 +437,16 @@ def _should_read_live_dependencies(
     if direction == "impact":
         return False
     return scope is None or target.startswith(("https://github.com/", "git@github.com:"))
+
+
+def _live_graph_direction(
+    *,
+    scope: str | None,
+    direction: Literal["deps", "impact", "both"],
+) -> Literal["deps", "impact", "both"]:
+    if scope is None and direction == "both":
+        return "deps"
+    return direction
 
 
 def _parse_depth(value: str) -> int | None:

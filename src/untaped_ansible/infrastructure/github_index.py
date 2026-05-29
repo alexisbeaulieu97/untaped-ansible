@@ -54,7 +54,7 @@ class GithubDependencyIndex:
 
     def _live_dependencies(self, repo: str, ref: str | None) -> list[IndexedDependency]:
         owner, name = _split_repo(repo)
-        read_ref = ref or _default_branch(self._github.get_repository(owner, name))
+        read_ref = self._read_ref(owner, name, ref)
         paths = self._tree_paths(owner, name, read_ref)
         resolver = IdentityResolver(self._aliases)
         edges: list[IndexedDependency] = []
@@ -79,6 +79,25 @@ class GithubDependencyIndex:
                     )
                 )
         return edges
+
+    def _read_ref(self, owner: str, repo: str, ref: str | None) -> str:
+        if ref is None:
+            return _default_branch(self._github.get_repository(owner, repo))
+        return self._resolved_ref_sha(owner, repo, ref) or ref
+
+    def _resolved_ref_sha(self, owner: str, repo: str, ref: str) -> str | None:
+        for namespace in ("heads", "tags"):
+            expected_ref = f"refs/{namespace}/{ref}"
+            for row in self._github.list_matching_refs(owner, repo, f"{namespace}/{ref}"):
+                if not isinstance(row, dict) or row.get("ref") != expected_ref:
+                    continue
+                ref_object = row.get("object")
+                if not isinstance(ref_object, dict):
+                    continue
+                sha = ref_object.get("sha")
+                if isinstance(sha, str) and sha:
+                    return sha
+        return None
 
     def _tree_paths(self, owner: str, repo: str, ref: str) -> set[str]:
         tree = self._github.get_tree(owner, repo, ref, recursive=True).get("tree")
