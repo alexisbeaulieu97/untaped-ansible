@@ -27,8 +27,13 @@ from untaped_ansible.domain.identity import IdentityResolver
 from untaped_ansible.domain.models import DependencyDeclaration
 from untaped_ansible.domain.parser import parse_dependency_file
 from untaped_ansible.domain.renderers import GraphFormat, render_graph
-from untaped_ansible.infrastructure import AliasRepository, ScopeRepository, SqliteDependencyIndex
-from untaped_ansible.settings import AnsibleSettings, ScopeDefinition
+from untaped_ansible.infrastructure import (
+    AliasRepository,
+    GithubDependencyIndex,
+    ScopeRepository,
+    SqliteDependencyIndex,
+)
+from untaped_ansible.settings import AnsibleSettings, ScopeDefinition, normalize_team_refs
 
 GraphDirectionOption = Annotated[
     Literal["deps", "impact", "both"],
@@ -91,18 +96,52 @@ def graph_command(
                 dependency_paths=settings.dependency_paths,
             )
             index = _OverlayIndex(index, local_edges)
-        graph = _build_graph(
-            index,
-            GraphRequest(
+            graph = _graph_from_index(
+                index,
                 repo=target_repo,
-                ref=to_ref or ref,
+                ref=ref,
+                to_ref=to_ref,
                 scope=scope,
                 direction=direction,
-                depth=_parse_depth(depth),
+                depth=depth,
                 stale_after=settings.stale_after,
-            ),
-            old_ref=ref if to_ref is not None else None,
-        )
+            )
+        elif _should_read_live_dependencies(
+            target=target,
+            scope=scope,
+            direction=direction,
+        ):
+            github_settings = get_config_section("github", GithubSettings)
+            core = get_core_settings()
+            with GithubClient(github_settings, http=core.http) as github:
+                graph_direction = _live_graph_direction(scope=scope, direction=direction)
+                index = GithubDependencyIndex(
+                    github=github,
+                    wrapped=index,
+                    aliases=aliases,
+                    dependency_paths=settings.dependency_paths,
+                )
+                graph = _graph_from_index(
+                    index,
+                    repo=target_repo,
+                    ref=ref,
+                    to_ref=to_ref,
+                    scope=scope,
+                    direction=graph_direction,
+                    depth=depth,
+                    stale_after=settings.stale_after,
+                )
+        else:
+            graph = _graph_from_index(
+                index,
+                repo=target_repo,
+                ref=ref,
+                to_ref=to_ref,
+                scope=scope,
+                direction=direction,
+                depth=depth,
+                stale_after=settings.stale_after,
+            )
         typer.echo(render_graph(graph, fmt))
 
 
@@ -139,7 +178,11 @@ def alias_remove_command(alias: str) -> None:
 def scope_add_command(
     name: str,
     orgs: list[str] | None = typer.Option(None, "--org", help="GitHub org to scan."),
-    teams: list[str] | None = typer.Option(None, "--team", help="GitHub team as ORG/SLUG."),
+    teams: list[str] | None = typer.Option(
+        None,
+        "--team",
+        help="GitHub team slug with one --org, or ORG/SLUG.",
+    ),
     repos: list[str] | None = typer.Option(None, "--repo", help="GitHub repo as owner/name."),
     paths: list[str] | None = typer.Option(None, "--path", help="Dependency file path."),
     ref_kinds: list[str] | None = typer.Option(
@@ -155,10 +198,15 @@ def scope_add_command(
 ) -> None:
     """Create or replace a named index scope."""
     with report_errors():
+        normalized_orgs = orgs or []
+        try:
+            normalized_teams = normalize_team_refs(teams or [], normalized_orgs)
+        except ValueError as exc:
+            raise UntapedError(str(exc)) from exc
         scope = ScopeDefinition(
             name=name,
-            orgs=orgs or [],
-            teams=teams or [],
+            orgs=normalized_orgs,
+            teams=normalized_teams,
             repos=repos or [],
             dependency_paths=paths or [],
             ref_kinds=ref_kinds or ["heads", "tags"],
@@ -353,6 +401,52 @@ def _build_graph(
         edges=tuple(edge_map.values()),
         warnings=tuple(dict.fromkeys((*deps_graph.warnings, *impact_graph.warnings))),
     )
+
+
+def _graph_from_index(
+    index: DependencyIndex,
+    *,
+    repo: str,
+    ref: str | None,
+    to_ref: str | None,
+    scope: str | None,
+    direction: Literal["deps", "impact", "both"],
+    depth: str,
+    stale_after: int,
+) -> DependencyGraph:
+    return _build_graph(
+        index,
+        GraphRequest(
+            repo=repo,
+            ref=to_ref or ref,
+            scope=scope,
+            direction=direction,
+            depth=_parse_depth(depth),
+            stale_after=stale_after,
+        ),
+        old_ref=ref if to_ref is not None else None,
+    )
+
+
+def _should_read_live_dependencies(
+    *,
+    target: str,
+    scope: str | None,
+    direction: Literal["deps", "impact", "both"],
+) -> bool:
+    if direction == "impact":
+        return False
+    return scope is None or target.startswith(("https://github.com/", "git@github.com:"))
+
+
+def _live_graph_direction(
+    *,
+    scope: str | None,
+    direction: Literal["deps", "impact", "both"],
+) -> Literal["deps", "impact", "both"]:
+    if scope is None and direction == "both":
+        return "deps"
+    return direction
 
 
 def _parse_depth(value: str) -> int | None:

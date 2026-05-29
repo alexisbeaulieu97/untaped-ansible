@@ -42,3 +42,17 @@ class AnsibleState(BaseModel):
 
     scopes: list[ScopeDefinition] = Field(default_factory=list)
     aliases: dict[str, str] = Field(default_factory=dict)
+
+
+def normalize_team_refs(teams: list[str], orgs: list[str]) -> list[str]:
+    """Expand bare team slugs when the scope has one unambiguous org."""
+    normalized: list[str] = []
+    for team in teams:
+        if "/" in team:
+            normalized.append(team)
+            continue
+        if len(orgs) == 1:
+            normalized.append(f"{orgs[0]}/{team}")
+            continue
+        raise ValueError(f"team {team!r} must be ORG/SLUG unless the scope has exactly one org")
+    return normalized

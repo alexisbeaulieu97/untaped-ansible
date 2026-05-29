@@ -97,3 +97,28 @@ def test_refresh_index_expands_scope_refs_parses_dependencies_and_aliases() -> N
         "acme-site-heads-sha",
     }
     assert result.ignored_collections == ("community.general",)
+
+
+def test_refresh_index_expands_bare_team_slug_with_single_scope_org() -> None:
+    index = CapturingIndex()
+    scope = ScopeDefinition(
+        name="prod",
+        orgs=["acme"],
+        teams=["platform"],
+        ref_kinds=["heads"],
+        ref_patterns=["main"],
+    )
+
+    result = RefreshIndex(
+        github=FakeGitHub(),
+        index=index,
+        aliases={"common": "acme/common"},
+        default_dependency_paths=["roles/requirements.yml"],
+    )(scope)
+
+    assert result.repos == 2
+    assert index.scan is not None
+    assert {edge.source_repo for edge in index.scan.dependencies} == {
+        "acme/site",
+        "acme/platform-playbook",
+    }
