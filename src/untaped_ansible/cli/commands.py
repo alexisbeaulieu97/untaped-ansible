@@ -27,7 +27,12 @@ from untaped_ansible.domain.identity import IdentityResolver
 from untaped_ansible.domain.models import DependencyDeclaration
 from untaped_ansible.domain.parser import parse_dependency_file
 from untaped_ansible.domain.renderers import GraphFormat, render_graph
-from untaped_ansible.infrastructure import AliasRepository, ScopeRepository, SqliteDependencyIndex
+from untaped_ansible.infrastructure import (
+    AliasRepository,
+    GithubDependencyIndex,
+    ScopeRepository,
+    SqliteDependencyIndex,
+)
 from untaped_ansible.settings import AnsibleSettings, ScopeDefinition
 
 GraphDirectionOption = Annotated[
@@ -91,18 +96,51 @@ def graph_command(
                 dependency_paths=settings.dependency_paths,
             )
             index = _OverlayIndex(index, local_edges)
-        graph = _build_graph(
-            index,
-            GraphRequest(
+            graph = _graph_from_index(
+                index,
                 repo=target_repo,
-                ref=to_ref or ref,
+                ref=ref,
+                to_ref=to_ref,
                 scope=scope,
                 direction=direction,
-                depth=_parse_depth(depth),
+                depth=depth,
                 stale_after=settings.stale_after,
-            ),
-            old_ref=ref if to_ref is not None else None,
-        )
+            )
+        elif _should_read_live_dependencies(
+            target=target,
+            scope=scope,
+            direction=direction,
+        ):
+            github_settings = get_config_section("github", GithubSettings)
+            core = get_core_settings()
+            with GithubClient(github_settings, http=core.http) as github:
+                index = GithubDependencyIndex(
+                    github=github,
+                    wrapped=index,
+                    aliases=aliases,
+                    dependency_paths=settings.dependency_paths,
+                )
+                graph = _graph_from_index(
+                    index,
+                    repo=target_repo,
+                    ref=ref,
+                    to_ref=to_ref,
+                    scope=scope,
+                    direction=direction,
+                    depth=depth,
+                    stale_after=settings.stale_after,
+                )
+        else:
+            graph = _graph_from_index(
+                index,
+                repo=target_repo,
+                ref=ref,
+                to_ref=to_ref,
+                scope=scope,
+                direction=direction,
+                depth=depth,
+                stale_after=settings.stale_after,
+            )
         typer.echo(render_graph(graph, fmt))
 
 
@@ -353,6 +391,42 @@ def _build_graph(
         edges=tuple(edge_map.values()),
         warnings=tuple(dict.fromkeys((*deps_graph.warnings, *impact_graph.warnings))),
     )
+
+
+def _graph_from_index(
+    index: DependencyIndex,
+    *,
+    repo: str,
+    ref: str | None,
+    to_ref: str | None,
+    scope: str | None,
+    direction: Literal["deps", "impact", "both"],
+    depth: str,
+    stale_after: int,
+) -> DependencyGraph:
+    return _build_graph(
+        index,
+        GraphRequest(
+            repo=repo,
+            ref=to_ref or ref,
+            scope=scope,
+            direction=direction,
+            depth=_parse_depth(depth),
+            stale_after=stale_after,
+        ),
+        old_ref=ref if to_ref is not None else None,
+    )
+
+
+def _should_read_live_dependencies(
+    *,
+    target: str,
+    scope: str | None,
+    direction: Literal["deps", "impact", "both"],
+) -> bool:
+    if direction == "impact":
+        return False
+    return scope is None or target.startswith(("https://github.com/", "git@github.com:"))
 
 
 def _parse_depth(value: str) -> int | None:

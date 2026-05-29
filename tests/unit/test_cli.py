@@ -180,6 +180,63 @@ def test_graph_command_without_ref_reads_indexed_repo_refs(
     assert "|   +-- acme/base@v1" in result.stdout
 
 
+def test_graph_command_fetches_remote_target_dependencies_from_github(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    cfg = _write_config(
+        tmp_path,
+        index_path=tmp_path / "index.sqlite3",
+        extra_profile={"github": {"token": "ghp_test"}},
+    )
+    monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
+
+    with respx.mock(base_url="https://api.github.com") as mock:
+        mock.get("/repos/acme/site").mock(
+            return_value=httpx.Response(200, json={"default_branch": "main"})
+        )
+        mock.get("/repos/acme/site/git/trees/main").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "tree": [
+                        {"path": "roles/requirements.yml", "type": "blob"},
+                        {"path": "meta/main.yml", "type": "blob"},
+                    ]
+                },
+            )
+        )
+        mock.get("/repos/acme/site/contents/roles/requirements.yml").mock(
+            return_value=httpx.Response(
+                200,
+                text="""
+                roles:
+                  - src: https://github.com/acme/base
+                    version: v1
+                """,
+            )
+        )
+        mock.get("/repos/acme/site/contents/meta/main.yml").mock(
+            return_value=httpx.Response(
+                200,
+                text="""
+                dependencies:
+                  - src: https://github.com/acme/common
+                """,
+            )
+        )
+
+        result = CliRunner().invoke(
+            app,
+            ["graph", "https://github.com/acme/site", "--direction", "deps", "--depth", "1"],
+        )
+
+    assert result.exit_code == 0, result.output
+    assert "acme/site" in result.stdout
+    assert "|   +-- acme/base@v1" in result.stdout
+    assert "|   +-- acme/common" in result.stdout
+
+
 def test_graph_command_parses_local_target_dependencies(tmp_path: Path, monkeypatch) -> None:
     target = tmp_path / "role"
     (target / "roles").mkdir(parents=True)

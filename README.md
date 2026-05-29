@@ -39,6 +39,9 @@ untaped ansible alias add common acme/common
 `graph` uses `tree` output by default and also supports `mermaid` and
 `json`. Local targets infer `owner/repo` from the checkout's GitHub
 remote, with `--repo owner/name` available as an override.
+GitHub URL and `owner/repo` targets read declared dependencies live from
+GitHub for `deps` graphs; reverse impact still comes from a refreshed
+named scope index.
 
 ## Development
 
