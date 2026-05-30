@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from pydantic import ValidationError
 from untaped.config_file import (
     get_at_path,
     mutate_config,
@@ -11,6 +12,7 @@ from untaped.config_file import (
     set_at_path,
     unset_at_path,
 )
+from untaped.errors import ConfigError, first_validation_error
 
 from untaped_ansible.settings import SourceDefinition
 
@@ -108,4 +110,8 @@ def _source_rows(data: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _source_from_raw(raw: dict[str, Any]) -> SourceDefinition:
-    return SourceDefinition.model_validate(raw)
+    try:
+        return SourceDefinition.model_validate(raw)
+    except ValidationError as exc:
+        name = raw.get("name", "<unknown>")
+        raise ConfigError(f"invalid source {name!r}: {first_validation_error(exc)}") from exc

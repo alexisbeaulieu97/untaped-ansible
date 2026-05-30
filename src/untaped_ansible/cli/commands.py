@@ -35,7 +35,7 @@ from untaped_ansible.infrastructure import (
     SourceRepository,
     SqliteDependencyIndex,
 )
-from untaped_ansible.settings import AnsibleSettings, SourceDefinition, normalize_team_refs
+from untaped_ansible.settings import AnsibleSettings, SourceDefinition
 
 GraphDirection = Literal["deps", "impact", "both"]
 GraphFormatOption = Annotated[
@@ -478,35 +478,18 @@ def _source_definition(
     ref_kinds: list[str] | None,
     ref_patterns: list[str] | None,
 ) -> SourceDefinition:
-    normalized_orgs = orgs or []
     try:
-        normalized_teams = normalize_team_refs(teams or [], normalized_orgs)
+        return SourceDefinition(
+            name=name,
+            orgs=orgs or [],
+            teams=teams or [],
+            repos=repos or [],
+            dependency_paths=paths or [],
+            ref_kinds=ref_kinds or ["heads", "tags"],
+            ref_patterns=ref_patterns or [],
+        )
     except ValueError as exc:
         raise UntapedError(str(exc)) from exc
-    normalized_repos = repos or []
-    if not any((normalized_orgs, normalized_teams, normalized_repos)):
-        raise UntapedError("source requires --org, --team, or --repo")
-    for repo in normalized_repos:
-        if not _is_repo_name(repo):
-            raise UntapedError(f"repo must be owner/name: {repo!r}")
-    normalized_ref_kinds = ref_kinds or ["heads", "tags"]
-    invalid_ref_kinds = sorted(set(normalized_ref_kinds) - {"heads", "tags"})
-    if invalid_ref_kinds:
-        raise UntapedError("ref-kind must be heads or tags")
-    return SourceDefinition(
-        name=name,
-        orgs=normalized_orgs,
-        teams=normalized_teams,
-        repos=normalized_repos,
-        dependency_paths=paths or [],
-        ref_kinds=normalized_ref_kinds,
-        ref_patterns=ref_patterns or [],
-    )
-
-
-def _is_repo_name(value: str) -> bool:
-    owner, separator, repo = value.partition("/")
-    return bool(owner and separator and repo and "/" not in repo)
 
 
 def _source_row(source: SourceDefinition) -> dict[str, object]:

@@ -434,6 +434,82 @@ def test_source_save_validates_search_boundary_repo_and_ref_kind(
         assert message in result.output
 
 
+def test_config_loaded_source_uses_same_validation(tmp_path: Path, monkeypatch) -> None:
+    cfg = _write_config(
+        tmp_path,
+        top_level_ansible={"sources": [{"name": "bad", "repos": ["not-a-repo"]}]},
+    )
+    monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
+
+    result = CliRunner().invoke(app, ["source", "refresh", "bad"])
+
+    assert result.exit_code == 1
+    assert "repo must be owner/name" in result.output
+
+
+def test_inline_source_cache_key_is_order_insensitive(tmp_path: Path, monkeypatch) -> None:
+    index_path = tmp_path / "index.sqlite3"
+    cfg = _write_config(
+        tmp_path,
+        index_path=index_path,
+        extra_profile={"github": {"token": "ghp_test"}},
+    )
+    monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
+    runner = CliRunner()
+
+    with respx.mock(base_url="https://api.github.com") as mock:
+        _mock_refresh_repo(
+            mock,
+            "acme/a",
+            sha="sha-a",
+            content="- src: https://github.com/acme/base\n",
+        )
+        _mock_refresh_repo(
+            mock,
+            "acme/b",
+            sha="sha-b",
+            content="- src: https://github.com/acme/base\n",
+        )
+        first = runner.invoke(
+            app,
+            [
+                "graph",
+                "acme/base",
+                "--repo",
+                "acme/a",
+                "--repo",
+                "acme/b",
+                "--ref-kind",
+                "heads",
+                "--upstream",
+                "--refresh",
+            ],
+        )
+
+    assert first.exit_code == 0, first.output
+
+    with respx.mock(base_url="https://api.github.com", assert_all_called=False) as mock:
+        second = runner.invoke(
+            app,
+            [
+                "graph",
+                "acme/base",
+                "--repo",
+                "acme/b",
+                "--repo",
+                "acme/a",
+                "--ref-kind",
+                "heads",
+                "--upstream",
+            ],
+        )
+        assert len(mock.calls) == 0
+
+    assert second.exit_code == 0, second.output
+    assert "acme/a@main" in second.stdout
+    assert "acme/b@main" in second.stdout
+
+
 def test_graph_repo_is_source_selector_and_target_repo_overrides_local_identity(
     tmp_path: Path,
     monkeypatch,
