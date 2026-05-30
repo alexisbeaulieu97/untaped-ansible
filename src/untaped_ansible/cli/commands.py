@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -21,7 +23,7 @@ from untaped_github import GithubClient, GithubSettings
 
 from untaped_ansible.application import BuildGraph, GraphRequest
 from untaped_ansible.application.ports import DependencyIndex, IndexedDependency
-from untaped_ansible.application.refresh_index import RefreshIndex
+from untaped_ansible.application.refresh_index import RefreshResult, RefreshSourceIndex
 from untaped_ansible.domain.graph import DependencyGraph
 from untaped_ansible.domain.identity import IdentityResolver
 from untaped_ansible.domain.models import DependencyDeclaration
@@ -30,15 +32,12 @@ from untaped_ansible.domain.renderers import GraphFormat, render_graph
 from untaped_ansible.infrastructure import (
     AliasRepository,
     GithubDependencyIndex,
-    ScopeRepository,
+    SourceRepository,
     SqliteDependencyIndex,
 )
-from untaped_ansible.settings import AnsibleSettings, ScopeDefinition, normalize_team_refs
+from untaped_ansible.settings import AnsibleSettings, SourceDefinition, normalize_team_refs
 
-GraphDirectionOption = Annotated[
-    Literal["deps", "impact", "both"],
-    typer.Option("--direction", help="Graph direction to include."),
-]
+GraphDirection = Literal["deps", "impact", "both"]
 GraphFormatOption = Annotated[
     GraphFormat,
     typer.Option("--format", "-f", help="Graph output format."),
@@ -46,8 +45,11 @@ GraphFormatOption = Annotated[
 
 app = typer.Typer(name="ansible", help="Analyze Ansible dependency graphs.", no_args_is_help=True)
 alias_app = typer.Typer(name="alias", help="Manage dependency aliases.", no_args_is_help=True)
-scope_app = typer.Typer(name="scope", help="Manage dependency index scopes.", no_args_is_help=True)
-index_app = typer.Typer(name="index", help="Manage the dependency index.", no_args_is_help=True)
+source_app = typer.Typer(
+    name="source",
+    help="Manage reusable GitHub sources.",
+    no_args_is_help=True,
+)
 
 
 @app.callback()
@@ -56,93 +58,188 @@ def _callback() -> None:
 
 
 app.add_typer(alias_app, name="alias")
-app.add_typer(scope_app, name="scope")
-app.add_typer(index_app, name="index")
+app.add_typer(source_app, name="source")
 
 
-@app.command("graph", no_args_is_help=True)
+@app.command(
+    "graph",
+    no_args_is_help=True,
+    epilog=(
+        "Examples:\n"
+        "  untaped ansible graph acme/site --downstream\n"
+        "  untaped ansible graph acme/base --org acme --team platform --upstream --refresh\n"
+        "  untaped ansible source save platform --org acme --team platform\n"
+        "  untaped ansible graph acme/base --source platform --upstream\n"
+        "  untaped ansible graph acme/base --source platform --both --format mermaid "
+        "--output deps.mmd"
+    ),
+)
 def graph_command(
-    target: str = typer.Argument(..., help="Target repo, GitHub URL, or local path."),
-    ref: str | None = typer.Option(None, "--ref", help="Target branch, tag, or SHA."),
-    to_ref: str | None = typer.Option(None, "--to-ref", help="Reserved for old/new comparison."),
-    scope: str | None = typer.Option(None, "--scope", help="Named impact index scope."),
-    direction: GraphDirectionOption = "both",
+    target: str = typer.Argument(..., help="Target repo, GitHub URL, alias, or local path."),
+    ref: str | None = typer.Option(
+        None,
+        "--ref",
+        help="Target branch, tag, or SHA for live dependency reads and cached upstream lookup.",
+    ),
+    source: str | None = typer.Option(
+        None,
+        "--source",
+        help="Saved source to use for upstream impact.",
+    ),
+    upstream: bool = typer.Option(False, "--upstream", help="Show who depends on TARGET."),
+    downstream: bool = typer.Option(False, "--downstream", help="Show what TARGET depends on."),
+    both: bool = typer.Option(False, "--both", help="Show upstream and downstream."),
+    refresh: bool = typer.Option(False, "--refresh", help="Refresh source data before graphing."),
     depth: str = typer.Option("3", "--depth", help="Traversal depth or 'unlimited'."),
     kind: Literal["auto", "playbook", "role"] = typer.Option(
         "auto",
         "--kind",
         help="Target kind hint.",
     ),
-    repo: str | None = typer.Option(None, "--repo", help="Canonical owner/repo override."),
+    target_repo: str | None = typer.Option(
+        None,
+        "--target-repo",
+        help="Canonical owner/repo override for local targets.",
+    ),
+    orgs: list[str] | None = typer.Option(None, "--org", help="Inline source GitHub org."),
+    teams: list[str] | None = typer.Option(
+        None,
+        "--team",
+        help="Inline source GitHub team slug with one --org, or ORG/SLUG.",
+    ),
+    source_repos: list[str] | None = typer.Option(
+        None,
+        "--repo",
+        help="Inline source GitHub repo as owner/name.",
+    ),
+    paths: list[str] | None = typer.Option(None, "--path", help="Inline source dependency path."),
+    ref_kinds: list[str] | None = typer.Option(
+        None,
+        "--ref-kind",
+        help="Inline source ref namespace to scan: heads or tags.",
+    ),
+    ref_patterns: list[str] | None = typer.Option(
+        None,
+        "--ref-pattern",
+        help="Inline source fnmatch pattern for branch/tag names.",
+    ),
     fmt: GraphFormatOption = "tree",
+    output: Path | None = typer.Option(None, "--output", help="Write graph data to a file."),
     profile: ProfileOverrideOption = None,
 ) -> None:
-    """Render dependency and impact graph for a target."""
+    """Graph Ansible dependency relationships for a role, repo, or playbook."""
     del kind
     with report_errors(), profile_override(profile):
         settings = get_config_section("ansible", AnsibleSettings)
         aliases = AliasRepository().entries()
-        target_repo = repo or _resolve_target_repo(target, aliases)
-        if target_repo is None:
+        target_repo_name = target_repo or _resolve_target_repo(target, aliases)
+        if target_repo_name is None:
             raise UntapedError(f"could not resolve target to a GitHub repo: {target!r}")
-        index: DependencyIndex = SqliteDependencyIndex(settings.index_path)
+
+        direction = _graph_direction(upstream=upstream, downstream=downstream, both=both)
+        graph_source = _graph_source(
+            source_name=source,
+            orgs=orgs,
+            teams=teams,
+            repos=source_repos,
+            paths=paths,
+            ref_kinds=ref_kinds,
+            ref_patterns=ref_patterns,
+        )
+        sqlite_index = SqliteDependencyIndex(settings.index_path)
+        if refresh:
+            if graph_source.definition is None:
+                raise typer.BadParameter("--refresh requires --source or inline source selectors")
+            if graph_source.key is None or graph_source.label is None:
+                raise typer.BadParameter("--refresh requires --source or inline source selectors")
+            result = _refresh_source(
+                graph_source.definition,
+                source_key=graph_source.key,
+                index=sqlite_index,
+                aliases=aliases,
+                dependency_paths=settings.dependency_paths,
+            )
+            typer.echo(
+                f"refreshed {graph_source.label}: {result.repos} repos, "
+                f"{result.refs} refs, {result.edges} edges",
+                err=True,
+            )
+
+        direction, graph_warnings = _effective_direction(
+            target=target,
+            source_state=graph_source,
+            index=sqlite_index,
+            direction=direction,
+        )
+
+        index: DependencyIndex = sqlite_index
         target_path = Path(target).expanduser()
         if target_path.exists():
             local_edges = _local_dependencies(
                 target_path,
-                repo=target_repo,
-                ref=to_ref or ref,
+                repo=target_repo_name,
+                ref=ref,
                 aliases=aliases,
                 dependency_paths=settings.dependency_paths,
             )
             index = _OverlayIndex(index, local_edges)
             graph = _graph_from_index(
                 index,
-                repo=target_repo,
+                repo=target_repo_name,
                 ref=ref,
-                to_ref=to_ref,
-                scope=scope,
+                source_key=graph_source.key,
                 direction=direction,
                 depth=depth,
                 stale_after=settings.stale_after,
             )
-        elif _should_read_live_dependencies(
-            target=target,
-            scope=scope,
-            direction=direction,
-        ):
+        else:
             github_settings = get_config_section("github", GithubSettings)
-            core = get_core_settings()
-            with GithubClient(github_settings, http=core.http) as github:
-                graph_direction = _live_graph_direction(scope=scope, direction=direction)
-                index = GithubDependencyIndex(
-                    github=github,
-                    wrapped=index,
-                    aliases=aliases,
-                    dependency_paths=settings.dependency_paths,
-                )
+            if _should_use_live_dependencies(
+                direction=direction,
+                source_key=graph_source.key,
+                github_settings=github_settings,
+            ):
+                core = get_core_settings()
+                with GithubClient(github_settings, http=core.http) as github:
+                    index = GithubDependencyIndex(
+                        github=github,
+                        wrapped=index,
+                        aliases=aliases,
+                        dependency_paths=settings.dependency_paths,
+                    )
+                    graph = _graph_from_index(
+                        index,
+                        repo=target_repo_name,
+                        ref=ref,
+                        source_key=graph_source.key,
+                        direction=direction,
+                        depth=depth,
+                        stale_after=settings.stale_after,
+                    )
+            else:
                 graph = _graph_from_index(
                     index,
-                    repo=target_repo,
+                    repo=target_repo_name,
                     ref=ref,
-                    to_ref=to_ref,
-                    scope=scope,
-                    direction=graph_direction,
+                    source_key=graph_source.key,
+                    direction=direction,
                     depth=depth,
                     stale_after=settings.stale_after,
                 )
-        else:
-            graph = _graph_from_index(
-                index,
-                repo=target_repo,
-                ref=ref,
-                to_ref=to_ref,
-                scope=scope,
-                direction=direction,
-                depth=depth,
-                stale_after=settings.stale_after,
-            )
-        typer.echo(render_graph(graph, fmt))
+
+        graph = _with_graph_warnings(
+            graph,
+            [
+                *graph_warnings,
+                *_empty_graph_warnings(
+                    graph,
+                    direction=direction,
+                    dependency_paths=settings.dependency_paths,
+                    source_label=graph_source.label,
+                ),
+            ],
+        )
+        _emit_graph(graph, fmt=fmt, output=output)
 
 
 @alias_app.command("add", no_args_is_help=True)
@@ -174,8 +271,8 @@ def alias_remove_command(alias: str) -> None:
         typer.echo(f"removed alias {alias!r}", err=True)
 
 
-@scope_app.command("add", no_args_is_help=True)
-def scope_add_command(
+@source_app.command("save", no_args_is_help=True)
+def source_save_command(
     name: str,
     orgs: list[str] | None = typer.Option(None, "--org", help="GitHub org to scan."),
     teams: list[str] | None = typer.Option(
@@ -196,121 +293,305 @@ def scope_add_command(
         help="fnmatch pattern for branch/tag names.",
     ),
 ) -> None:
-    """Create or replace a named index scope."""
+    """Save a reusable GitHub source."""
     with report_errors():
-        normalized_orgs = orgs or []
-        try:
-            normalized_teams = normalize_team_refs(teams or [], normalized_orgs)
-        except ValueError as exc:
-            raise UntapedError(str(exc)) from exc
-        scope = ScopeDefinition(
+        source = _source_definition(
             name=name,
-            orgs=normalized_orgs,
-            teams=normalized_teams,
-            repos=repos or [],
-            dependency_paths=paths or [],
-            ref_kinds=ref_kinds or ["heads", "tags"],
-            ref_patterns=ref_patterns or [],
+            orgs=orgs,
+            teams=teams,
+            repos=repos,
+            paths=paths,
+            ref_kinds=ref_kinds,
+            ref_patterns=ref_patterns,
         )
-        ScopeRepository().upsert(scope)
-        typer.echo(f"saved scope {name!r}", err=True)
+        SourceRepository().upsert(source)
+        typer.echo(f"saved source {name!r}", err=True)
 
 
-@scope_app.command("list")
-def scope_list_command(fmt: FormatOption = "table", columns: ColumnsOption = None) -> None:
-    """List named index scopes."""
+@source_app.command("list")
+def source_list_command(fmt: FormatOption = "table", columns: ColumnsOption = None) -> None:
+    """List saved sources."""
     with report_errors():
-        rows = [_scope_row(scope) for scope in ScopeRepository().entries()]
+        rows = [_source_row(source) for source in SourceRepository().entries()]
         typer.echo(format_output(rows, fmt=fmt, columns=columns))
 
 
-@scope_app.command("show", no_args_is_help=True)
-def scope_show_command(
+@source_app.command("show", no_args_is_help=True)
+def source_show_command(
     name: str,
     fmt: FormatOption = "table",
     columns: ColumnsOption = None,
 ) -> None:
-    """Show one named index scope."""
+    """Show one saved source."""
     with report_errors():
-        scope = ScopeRepository().get(name)
-        if scope is None:
-            raise UntapedError(f"unknown scope: {name!r}")
-        typer.echo(format_output([_scope_row(scope)], fmt=fmt, columns=columns))
+        source = SourceRepository().get(name)
+        if source is None:
+            raise UntapedError(f"unknown source: {name!r}")
+        typer.echo(format_output([_source_row(source)], fmt=fmt, columns=columns))
 
 
-@scope_app.command("remove", no_args_is_help=True)
-def scope_remove_command(name: str) -> None:
-    """Remove a named index scope."""
+@source_app.command("remove", no_args_is_help=True)
+def source_remove_command(name: str) -> None:
+    """Remove a saved source."""
     with report_errors():
-        removed = ScopeRepository().remove(name)
+        removed = SourceRepository().remove(name)
         if not removed:
-            raise UntapedError(f"unknown scope: {name!r}")
-        typer.echo(f"removed scope {name!r}", err=True)
+            raise UntapedError(f"unknown source: {name!r}")
+        typer.echo(f"removed source {name!r}", err=True)
 
 
-@index_app.command("status")
-def index_status_command(
-    scope: str | None = typer.Option(None, "--scope", help="Scope to inspect."),
+@source_app.command("status")
+def source_status_command(
+    name: str | None = typer.Argument(None, help="Source to inspect."),
     fmt: FormatOption = "table",
     columns: ColumnsOption = None,
     profile: ProfileOverrideOption = None,
 ) -> None:
-    """Show index status."""
+    """Show cached source data status."""
     with report_errors(), profile_override(profile):
         settings = get_config_section("ansible", AnsibleSettings)
         index = SqliteDependencyIndex(settings.index_path)
-        statuses = []
-        scopes = [scope] if scope is not None else [s.name for s in ScopeRepository().entries()]
-        for name in scopes:
-            status = index.status(name)
-            if status is not None:
-                statuses.append(status.model_dump())
-        typer.echo(format_output(statuses, fmt=fmt, columns=columns))
+        source_repo = SourceRepository()
+        configured = {source.name: source for source in source_repo.entries()}
+        names = [name] if name is not None else sorted(configured)
+        rows = [
+            _source_status_row(
+                source_name,
+                index=index,
+                configured_sources=configured,
+                stale_after=settings.stale_after,
+            )
+            for source_name in names
+        ]
+        typer.echo(format_output(rows, fmt=fmt, columns=columns))
 
 
-@index_app.command("clear")
-def index_clear_command(
-    scope: str | None = typer.Option(None, "--scope", help="Scope to clear."),
+@source_app.command("refresh", no_args_is_help=True)
+def source_refresh_command(
+    name: str,
     profile: ProfileOverrideOption = None,
 ) -> None:
-    """Clear indexed dependency data."""
+    """Refresh a saved source from GitHub."""
     with report_errors(), profile_override(profile):
-        settings = get_config_section("ansible", AnsibleSettings)
-        SqliteDependencyIndex(settings.index_path).clear(scope)
-        target = scope or "all scopes"
-        typer.echo(f"cleared index for {target}", err=True)
-
-
-@index_app.command("refresh")
-def index_refresh_command(
-    scope: str = typer.Option(..., "--scope", help="Scope to refresh."),
-    profile: ProfileOverrideOption = None,
-) -> None:
-    """Refresh a named scope from GitHub."""
-    with report_errors(), profile_override(profile):
-        scope_definition = ScopeRepository().get(scope)
-        if scope_definition is None:
-            raise UntapedError(f"unknown scope: {scope!r}")
+        source = SourceRepository().get(name)
+        if source is None:
+            raise UntapedError(f"unknown source: {name!r}")
         settings = get_config_section("ansible", AnsibleSettings)
         aliases = AliasRepository().entries()
-        github_settings = get_config_section("github", GithubSettings)
-        core = get_core_settings()
-        with GithubClient(github_settings, http=core.http) as github:
-            result = RefreshIndex(
-                github=github,
-                index=SqliteDependencyIndex(settings.index_path),
-                aliases=aliases,
-                default_dependency_paths=settings.dependency_paths,
-            )(scope_definition)
+        result = _refresh_source(
+            source,
+            source_key=_saved_source_key(name),
+            index=SqliteDependencyIndex(settings.index_path),
+            aliases=aliases,
+            dependency_paths=settings.dependency_paths,
+        )
         typer.echo(
-            f"refreshed scope {scope!r}: {result.repos} repos, "
+            f"refreshed source {name!r}: {result.repos} repos, "
             f"{result.refs} refs, {result.edges} edges",
             err=True,
         )
 
 
-def _scope_row(scope: ScopeDefinition) -> dict[str, object]:
-    return scope.model_dump()
+class _GraphSource:
+    def __init__(
+        self,
+        *,
+        definition: SourceDefinition | None,
+        key: str | None,
+        label: str | None,
+        saved: bool,
+    ) -> None:
+        self.definition = definition
+        self.key = key
+        self.label = label
+        self.saved = saved
+
+
+def _graph_direction(*, upstream: bool, downstream: bool, both: bool) -> GraphDirection:
+    selected = [upstream, downstream, both].count(True)
+    if selected > 1:
+        raise typer.BadParameter("choose only one of --upstream, --downstream, or --both")
+    if upstream:
+        return "impact"
+    if downstream:
+        return "deps"
+    return "both"
+
+
+def _graph_source(
+    *,
+    source_name: str | None,
+    orgs: list[str] | None,
+    teams: list[str] | None,
+    repos: list[str] | None,
+    paths: list[str] | None,
+    ref_kinds: list[str] | None,
+    ref_patterns: list[str] | None,
+) -> _GraphSource:
+    has_inline = any((orgs, teams, repos, paths, ref_kinds, ref_patterns))
+    if source_name is not None and has_inline:
+        raise typer.BadParameter(
+            "--source cannot be combined with --org, --team, --repo, --path, "
+            "--ref-kind, or --ref-pattern"
+        )
+    if source_name is not None:
+        source = SourceRepository().get(source_name)
+        if source is None:
+            raise UntapedError(f"unknown source: {source_name!r}")
+        return _GraphSource(
+            definition=source,
+            key=_saved_source_key(source_name),
+            label=source_name,
+            saved=True,
+        )
+    if has_inline:
+        source = _source_definition(
+            name="<inline>",
+            orgs=orgs,
+            teams=teams,
+            repos=repos,
+            paths=paths,
+            ref_kinds=ref_kinds,
+            ref_patterns=ref_patterns,
+        )
+        key = _inline_source_key(source)
+        return _GraphSource(
+            definition=source,
+            key=key,
+            label=f"inline source {key.removeprefix('inline:')}",
+            saved=False,
+        )
+    return _GraphSource(definition=None, key=None, label=None, saved=False)
+
+
+def _source_definition(
+    *,
+    name: str,
+    orgs: list[str] | None,
+    teams: list[str] | None,
+    repos: list[str] | None,
+    paths: list[str] | None,
+    ref_kinds: list[str] | None,
+    ref_patterns: list[str] | None,
+) -> SourceDefinition:
+    normalized_orgs = orgs or []
+    try:
+        normalized_teams = normalize_team_refs(teams or [], normalized_orgs)
+    except ValueError as exc:
+        raise UntapedError(str(exc)) from exc
+    return SourceDefinition(
+        name=name,
+        orgs=normalized_orgs,
+        teams=normalized_teams,
+        repos=repos or [],
+        dependency_paths=paths or [],
+        ref_kinds=ref_kinds or ["heads", "tags"],
+        ref_patterns=ref_patterns or [],
+    )
+
+
+def _source_row(source: SourceDefinition) -> dict[str, object]:
+    return source.model_dump()
+
+
+def _saved_source_key(name: str) -> str:
+    return f"source:{name}"
+
+
+def _inline_source_key(source: SourceDefinition) -> str:
+    payload = source.model_dump(exclude={"name"})
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    return f"inline:{hashlib.sha256(encoded).hexdigest()[:16]}"
+
+
+def _refresh_source(
+    source: SourceDefinition,
+    *,
+    source_key: str,
+    index: SqliteDependencyIndex,
+    aliases: dict[str, str],
+    dependency_paths: list[str],
+) -> RefreshResult:
+    github_settings = get_config_section("github", GithubSettings)
+    core = get_core_settings()
+    with GithubClient(github_settings, http=core.http) as github:
+        result = RefreshSourceIndex(
+            github=github,
+            index=index,
+            aliases=aliases,
+            default_dependency_paths=dependency_paths,
+        )(source, source_key=source_key)
+    return result
+
+
+def _effective_direction(
+    *,
+    target: str,
+    source_state: _GraphSource,
+    index: SqliteDependencyIndex,
+    direction: GraphDirection,
+) -> tuple[GraphDirection, list[str]]:
+    if direction == "deps":
+        return direction, []
+    if source_state.key is None:
+        message = (
+            "upstream requires --source NAME or inline selectors like --org, --team, or --repo"
+        )
+        if direction == "impact":
+            raise UntapedError(message)
+        return "deps", ["upstream omitted: pass --source NAME or inline selectors"]
+    if index.status(source_state.key) is not None:
+        return direction, []
+    message = _missing_source_index_message(target, source_state)
+    if direction == "impact":
+        raise UntapedError(message)
+    return "deps", [f"upstream omitted: {message}"]
+
+
+def _missing_source_index_message(target: str, source_state: _GraphSource) -> str:
+    if source_state.saved:
+        label = source_state.label or "unknown"
+        return (
+            f"no cached source data found for source {label!r}. Run: "
+            f"`untaped ansible source refresh {label}`. Or re-run graph with: "
+            f"`untaped ansible graph {target} --source {label} --upstream --refresh`."
+        )
+    return (
+        "no cached source data found for inline source. Re-run this graph command with "
+        "`--refresh` to scan GitHub and cache the result."
+    )
+
+
+def _source_status_row(
+    name: str,
+    *,
+    index: SqliteDependencyIndex,
+    configured_sources: dict[str, SourceDefinition],
+    stale_after: int,
+) -> dict[str, object]:
+    key = _saved_source_key(name)
+    status = index.status(key)
+    configured = name in configured_sources
+    if status is None:
+        return {
+            "source": name,
+            "source_key": key,
+            "state": "not-refreshed" if configured else "missing-source",
+            "configured": configured,
+            "scanned_at": None,
+            "repos": 0,
+            "refs": 0,
+            "edges": 0,
+            "stale": None,
+        }
+    stale = index.is_stale(key, max_age_seconds=stale_after)
+    return {
+        "source": name,
+        **status.model_dump(),
+        "state": "stale" if stale else "fresh",
+        "configured": configured,
+        "stale": stale,
+    }
 
 
 def _resolve_target_repo(target: str, aliases: dict[str, str]) -> str | None:
@@ -379,74 +660,83 @@ def _local_dependencies(
     return edges
 
 
-def _build_graph(
-    index: DependencyIndex, request: GraphRequest, *, old_ref: str | None
-) -> DependencyGraph:
-    if old_ref is None or request.direction == "deps":
-        return BuildGraph(index)(request)
-    if request.direction == "impact":
-        return BuildGraph(index)(request.model_copy(update={"ref": old_ref}))
-    deps_graph = BuildGraph(index)(request.model_copy(update={"direction": "deps"}))
-    impact_graph = BuildGraph(index)(
-        request.model_copy(update={"ref": old_ref, "direction": "impact"})
-    )
-    node_map = {node.id: node for node in (*deps_graph.nodes, *impact_graph.nodes)}
-    edge_map = {
-        (edge.source_id, edge.target_id, edge.relation): edge
-        for edge in (*deps_graph.edges, *impact_graph.edges)
-    }
-    return DependencyGraph(
-        target_id=deps_graph.target_id,
-        nodes=tuple(node_map.values()),
-        edges=tuple(edge_map.values()),
-        warnings=tuple(dict.fromkeys((*deps_graph.warnings, *impact_graph.warnings))),
-    )
-
-
 def _graph_from_index(
     index: DependencyIndex,
     *,
     repo: str,
     ref: str | None,
-    to_ref: str | None,
-    scope: str | None,
-    direction: Literal["deps", "impact", "both"],
+    source_key: str | None,
+    direction: GraphDirection,
     depth: str,
     stale_after: int,
 ) -> DependencyGraph:
-    return _build_graph(
-        index,
+    return BuildGraph(index)(
         GraphRequest(
             repo=repo,
-            ref=to_ref or ref,
-            scope=scope,
+            ref=ref,
+            source_key=source_key,
             direction=direction,
             depth=_parse_depth(depth),
             stale_after=stale_after,
-        ),
-        old_ref=ref if to_ref is not None else None,
+        )
     )
 
 
-def _should_read_live_dependencies(
+def _with_graph_warnings(graph: DependencyGraph, warnings: list[str]) -> DependencyGraph:
+    if not warnings:
+        return graph
+    return graph.model_copy(update={"warnings": tuple(dict.fromkeys((*graph.warnings, *warnings)))})
+
+
+def _empty_graph_warnings(
+    graph: DependencyGraph,
     *,
-    target: str,
-    scope: str | None,
-    direction: Literal["deps", "impact", "both"],
+    direction: GraphDirection,
+    dependency_paths: list[str],
+    source_label: str | None,
+) -> list[str]:
+    if graph.edges:
+        return []
+    paths = ", ".join(dependency_paths)
+    if direction == "deps":
+        return [
+            f"no declared downstream dependencies found for {graph.target_id}; "
+            f"checked configured dependency paths: {paths}"
+        ]
+    if direction == "impact":
+        label = source_label or "source"
+        return [f"no cached upstream dependents found for {graph.target_id} in {label}"]
+    label = source_label or "source"
+    return [
+        f"no declared downstream dependencies or cached upstream dependents found for "
+        f"{graph.target_id} in {label}; checked configured dependency paths: {paths}"
+    ]
+
+
+def _should_use_live_dependencies(
+    *,
+    direction: GraphDirection,
+    source_key: str | None,
+    github_settings: GithubSettings,
 ) -> bool:
     if direction == "impact":
         return False
-    return scope is None or target.startswith(("https://github.com/", "git@github.com:"))
+    return source_key is None or _has_github_token(github_settings)
 
 
-def _live_graph_direction(
-    *,
-    scope: str | None,
-    direction: Literal["deps", "impact", "both"],
-) -> Literal["deps", "impact", "both"]:
-    if scope is None and direction == "both":
-        return "deps"
-    return direction
+def _has_github_token(settings: GithubSettings) -> bool:
+    if settings.token is None:
+        return False
+    return bool(settings.token.get_secret_value().strip())
+
+
+def _emit_graph(graph: DependencyGraph, *, fmt: GraphFormat, output: Path | None) -> None:
+    rendered = render_graph(graph, fmt)
+    if output is None:
+        typer.echo(rendered)
+        return
+    output.expanduser().parent.mkdir(parents=True, exist_ok=True)
+    output.expanduser().write_text(rendered)
 
 
 def _parse_depth(value: str) -> int | None:
@@ -471,23 +761,23 @@ class _OverlayIndex:
         repo: str,
         ref: str | None,
         *,
-        scope: str | None,
+        source_key: str | None,
     ) -> list[IndexedDependency]:
         local = [
             edge
             for edge in self._local_edges
             if edge.source_repo == repo and edge.source_ref == ref
         ]
-        return local or self._wrapped.dependencies(repo, ref, scope=scope)
+        return local or self._wrapped.dependencies(repo, ref, source_key=source_key)
 
     def dependents(
         self,
         repo: str,
         ref: str | None,
         *,
-        scope: str | None,
+        source_key: str | None,
     ) -> list[IndexedDependency]:
-        return self._wrapped.dependents(repo, ref, scope=scope)
+        return self._wrapped.dependents(repo, ref, source_key=source_key)
 
-    def is_stale(self, scope: str | None, *, max_age_seconds: int) -> bool:
-        return self._wrapped.is_stale(scope, max_age_seconds=max_age_seconds)
+    def is_stale(self, source_key: str | None, *, max_age_seconds: int) -> bool:
+        return self._wrapped.is_stale(source_key, max_age_seconds=max_age_seconds)

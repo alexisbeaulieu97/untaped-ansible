@@ -17,8 +17,8 @@ DEFAULT_DEPENDENCY_PATHS = (
 )
 
 
-class ScopeDefinition(BaseModel):
-    """Named repository/ref scope for index refresh and impact queries."""
+class SourceDefinition(BaseModel):
+    """Named GitHub search boundary for index refresh and impact queries."""
 
     name: str
     orgs: list[str] = Field(default_factory=list)
@@ -40,12 +40,12 @@ class AnsibleSettings(BaseModel):
 class AnsibleState(BaseModel):
     """Top-level Ansible plugin app state."""
 
-    scopes: list[ScopeDefinition] = Field(default_factory=list)
+    sources: list[SourceDefinition] = Field(default_factory=list)
     aliases: dict[str, str] = Field(default_factory=dict)
 
 
 def normalize_team_refs(teams: list[str], orgs: list[str]) -> list[str]:
-    """Expand bare team slugs when the scope has one unambiguous org."""
+    """Expand bare team slugs when the source has one unambiguous org."""
     normalized: list[str] = []
     for team in teams:
         if "/" in team:
@@ -54,5 +54,5 @@ def normalize_team_refs(teams: list[str], orgs: list[str]) -> list[str]:
         if len(orgs) == 1:
             normalized.append(f"{orgs[0]}/{team}")
             continue
-        raise ValueError(f"team {team!r} must be ORG/SLUG unless the scope has exactly one org")
+        raise ValueError(f"team {team!r} must be ORG/SLUG unless the source has exactly one org")
     return normalized

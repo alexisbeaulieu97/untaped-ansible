@@ -19,14 +19,14 @@ class GraphRequest(BaseModel):
 
     repo: str
     ref: str | None = None
-    scope: str | None = None
+    source_key: str | None = None
     direction: GraphDirection = "both"
     depth: int | None = 3
     stale_after: int = 86_400
 
 
 class BuildGraph:
-    """Build a dependency graph from an indexed dependency read port."""
+    """Build a dependency graph from a cached dependency read port."""
 
     def __init__(self, index: DependencyIndex) -> None:
         self._index = index
@@ -65,9 +65,11 @@ class _GraphBuilder:
                 stack={target_id},
             )
         warnings: list[str] = []
-        if self._index.is_stale(self._request.scope, max_age_seconds=self._request.stale_after):
-            scope = self._request.scope or "default"
-            warnings.append(f"scope index is stale: {scope}")
+        if self._index.is_stale(
+            self._request.source_key,
+            max_age_seconds=self._request.stale_after,
+        ):
+            warnings.append("source data is stale; refresh it before relying on upstream impact")
         warnings.extend(self._warnings)
         return DependencyGraph(
             target_id=target_id,
@@ -88,7 +90,7 @@ class _GraphBuilder:
             return
         next_remaining = None if remaining is None else remaining - 1
         source_id = _node_id(repo, ref)
-        for indexed in self._index.dependencies(repo, ref, scope=self._request.scope):
+        for indexed in self._index.dependencies(repo, ref, source_key=self._request.source_key):
             target_id = self._target_node_for_dependency(indexed)
             if target_id in stack:
                 continue
@@ -114,7 +116,7 @@ class _GraphBuilder:
             return
         next_remaining = None if remaining is None else remaining - 1
         target_id = _node_id(repo, ref)
-        for indexed in self._index.dependents(repo, ref, scope=self._request.scope):
+        for indexed in self._index.dependents(repo, ref, source_key=self._request.source_key):
             source_id = self._add_node(indexed.source_repo, indexed.source_ref)
             if source_id in stack:
                 continue

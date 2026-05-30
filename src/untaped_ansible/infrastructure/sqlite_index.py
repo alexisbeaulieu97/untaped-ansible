@@ -1,4 +1,4 @@
-"""SQLite-backed dependency index for reverse-impact queries."""
+"""SQLite-backed source index for reverse-impact queries."""
 
 from __future__ import annotations
 
@@ -14,11 +14,11 @@ from untaped_ansible.application.ports import IndexedDependency, IndexScan
 
 
 class IndexStatus(BaseModel):
-    """Summary of one indexed scope."""
+    """Summary of one indexed source."""
 
     model_config = ConfigDict(frozen=True)
 
-    scope: str
+    source_key: str
     scanned_at: datetime
     repos: int
     refs: int
@@ -31,26 +31,26 @@ class SqliteDependencyIndex:
     def __init__(self, path: Path) -> None:
         self._path = path.expanduser()
 
-    def replace_scope_scan(self, scan: IndexScan) -> None:
+    def replace_source_scan(self, scan: IndexScan) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         with self._db() as db:
             _ensure_schema(db)
-            db.execute("delete from dependency_edges where scope = ?", (scan.scope,))
-            db.execute("delete from scan_runs where scope = ?", (scan.scope,))
+            db.execute("delete from dependency_edges where source_key = ?", (scan.source_key,))
+            db.execute("delete from source_runs where source_key = ?", (scan.source_key,))
             db.execute(
-                "insert into scan_runs(scope, scanned_at) values (?, ?)",
-                (scan.scope, _dump_dt(scan.scanned_at)),
+                "insert into source_runs(source_key, scanned_at) values (?, ?)",
+                (scan.source_key, _dump_dt(scan.scanned_at)),
             )
             db.executemany(
                 """
                 insert into dependency_edges(
-                    scope, source_repo, source_ref, source_sha, dependency_repo, dependency_name,
-                    dependency_version, source_path, unresolved
+                    source_key, source_repo, source_ref, source_sha, dependency_repo,
+                    dependency_name, dependency_version, source_path, unresolved
                 ) values (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     (
-                        scan.scope,
+                        scan.source_key,
                         edge.source_repo,
                         edge.source_ref,
                         edge.source_sha,
@@ -69,16 +69,16 @@ class SqliteDependencyIndex:
         repo: str,
         ref: str | None,
         *,
-        scope: str | None,
+        source_key: str | None,
     ) -> list[IndexedDependency]:
         clauses = ["source_repo = ?"]
         params: list[object] = [repo]
         if ref is not None:
             clauses.append("source_ref = ?")
             params.append(ref)
-        if scope is not None:
-            clauses.append("scope = ?")
-            params.append(scope)
+        if source_key is not None:
+            clauses.append("source_key = ?")
+            params.append(source_key)
         return self._select_edges(clauses, params)
 
     def dependents(
@@ -86,24 +86,24 @@ class SqliteDependencyIndex:
         repo: str,
         ref: str | None,
         *,
-        scope: str | None,
+        source_key: str | None,
     ) -> list[IndexedDependency]:
         clauses = ["dependency_repo = ?"]
         params: list[object] = [repo]
         if ref is not None:
             clauses.append("dependency_version = ?")
             params.append(ref)
-        if scope is not None:
-            clauses.append("scope = ?")
-            params.append(scope)
+        if source_key is not None:
+            clauses.append("source_key = ?")
+            params.append(source_key)
         return self._select_edges(clauses, params)
 
-    def status(self, scope: str) -> IndexStatus | None:
+    def status(self, source_key: str) -> IndexStatus | None:
         with self._db() as db:
             _ensure_schema(db)
             row = db.execute(
-                "select scanned_at from scan_runs where scope = ?",
-                (scope,),
+                "select scanned_at from source_runs where source_key = ?",
+                (source_key,),
             ).fetchone()
             if row is None:
                 return None
@@ -114,36 +114,36 @@ class SqliteDependencyIndex:
                     count(distinct source_repo || '@' || coalesce(source_ref, '')) as refs,
                     count(*) as edges
                 from dependency_edges
-                where scope = ?
+                where source_key = ?
                 """,
-                (scope,),
+                (source_key,),
             ).fetchone()
         return IndexStatus(
-            scope=scope,
+            source_key=source_key,
             scanned_at=_load_dt(row["scanned_at"]),
             repos=int(counts["repos"]),
             refs=int(counts["refs"]),
             edges=int(counts["edges"]),
         )
 
-    def is_stale(self, scope: str | None, *, max_age_seconds: int) -> bool:
-        if scope is None:
+    def is_stale(self, source_key: str | None, *, max_age_seconds: int) -> bool:
+        if source_key is None:
             return False
-        status = self.status(scope)
+        status = self.status(source_key)
         if status is None:
             return False
         age = datetime.now(UTC) - status.scanned_at
         return age.total_seconds() > max_age_seconds
 
-    def clear(self, scope: str | None = None) -> None:
+    def clear(self, source_key: str | None = None) -> None:
         with self._db() as db:
             _ensure_schema(db)
-            if scope is None:
+            if source_key is None:
                 db.execute("delete from dependency_edges")
-                db.execute("delete from scan_runs")
+                db.execute("delete from source_runs")
                 return
-            db.execute("delete from dependency_edges where scope = ?", (scope,))
-            db.execute("delete from scan_runs where scope = ?", (scope,))
+            db.execute("delete from dependency_edges where source_key = ?", (source_key,))
+            db.execute("delete from source_runs where source_key = ?", (source_key,))
 
     def _select_edges(self, clauses: list[str], params: list[object]) -> list[IndexedDependency]:
         where = " and ".join(clauses)
@@ -177,16 +177,17 @@ class SqliteDependencyIndex:
 
 
 def _ensure_schema(db: sqlite3.Connection) -> None:
+    _drop_legacy_scope_schema(db)
     db.executescript(
         """
-        create table if not exists scan_runs (
-            scope text primary key,
+        create table if not exists source_runs (
+            source_key text primary key,
             scanned_at text not null
         );
 
         create table if not exists dependency_edges (
             id integer primary key autoincrement,
-            scope text not null,
+            source_key text not null,
             source_repo text not null,
             source_ref text,
             source_sha text,
@@ -198,12 +199,24 @@ def _ensure_schema(db: sqlite3.Connection) -> None:
         );
 
         create index if not exists idx_dependency_edges_source
-            on dependency_edges(scope, source_repo, source_ref);
+            on dependency_edges(source_key, source_repo, source_ref);
         create index if not exists idx_dependency_edges_dependency
-            on dependency_edges(scope, dependency_repo, dependency_version);
+            on dependency_edges(source_key, dependency_repo, dependency_version);
         """
     )
     _ensure_column(db, "dependency_edges", "source_sha", "text")
+
+
+def _drop_legacy_scope_schema(db: sqlite3.Connection) -> None:
+    columns = _table_columns(db, "dependency_edges")
+    if not columns or "source_key" in columns:
+        return
+    db.executescript(
+        """
+        drop table if exists dependency_edges;
+        drop table if exists scan_runs;
+        """
+    )
 
 
 def _edge_from_row(row: sqlite3.Row) -> IndexedDependency:
@@ -228,6 +241,10 @@ def _load_dt(value: str) -> datetime:
 
 
 def _ensure_column(db: sqlite3.Connection, table: str, column: str, definition: str) -> None:
-    columns = {row["name"] for row in db.execute(f"pragma table_info({table})")}
+    columns = _table_columns(db, table)
     if column not in columns:
         db.execute(f"alter table {table} add column {column} {definition}")
+
+
+def _table_columns(db: sqlite3.Connection, table: str) -> set[str]:
+    return {row["name"] for row in db.execute(f"pragma table_info({table})")}

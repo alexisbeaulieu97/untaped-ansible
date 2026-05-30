@@ -25,11 +25,11 @@ class IndexedDependency(BaseModel):
 
 
 class IndexScan(BaseModel):
-    """Complete replacement payload for one named scope scan."""
+    """Complete replacement payload for one source scan."""
 
     model_config = ConfigDict(frozen=True)
 
-    scope: str
+    source_key: str
     scanned_at: datetime
     dependencies: tuple[IndexedDependency, ...] = ()
 
@@ -42,7 +42,7 @@ class DependencyIndex(Protocol):
         repo: str,
         ref: str | None,
         *,
-        scope: str | None,
+        source_key: str | None,
     ) -> list[IndexedDependency]: ...
 
     def dependents(
@@ -50,16 +50,16 @@ class DependencyIndex(Protocol):
         repo: str,
         ref: str | None,
         *,
-        scope: str | None,
+        source_key: str | None,
     ) -> list[IndexedDependency]: ...
 
-    def is_stale(self, scope: str | None, *, max_age_seconds: int) -> bool: ...
+    def is_stale(self, source_key: str | None, *, max_age_seconds: int) -> bool: ...
 
 
 class DependencyIndexWriter(Protocol):
-    """Write port for replacing a scope scan."""
+    """Write port for replacing a source scan."""
 
-    def replace_scope_scan(self, scan: IndexScan) -> None: ...
+    def replace_source_scan(self, scan: IndexScan) -> None: ...
 
 
 class GitHubDependencyReader(Protocol):

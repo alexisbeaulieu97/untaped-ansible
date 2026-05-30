@@ -1,5 +1,5 @@
 from untaped_ansible.application.ports import IndexScan
-from untaped_ansible.infrastructure.config_repo import AliasRepository, ScopeRepository
+from untaped_ansible.infrastructure.config_repo import AliasRepository, SourceRepository
 from untaped_ansible.infrastructure.github_index import GithubDependencyIndex
 from untaped_ansible.infrastructure.sqlite_index import (
     IndexStatus,
@@ -11,6 +11,6 @@ __all__ = [
     "GithubDependencyIndex",
     "IndexScan",
     "IndexStatus",
-    "ScopeRepository",
+    "SourceRepository",
     "SqliteDependencyIndex",
 ]
