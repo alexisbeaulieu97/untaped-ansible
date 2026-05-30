@@ -293,6 +293,43 @@ def test_graph_source_upstream_requires_refresh_when_index_missing(
     assert "untaped ansible graph acme/base --source platform --upstream --refresh" in result.output
 
 
+def test_source_save_clears_cached_data_for_redefined_source(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    index_path = tmp_path / "index.sqlite3"
+    SqliteDependencyIndex(index_path).replace_source_scan(
+        IndexScan(
+            source_key="source:platform",
+            scanned_at=datetime.now(UTC),
+            dependencies=(
+                IndexedDependency(
+                    source_repo="acme/old-site",
+                    source_ref="main",
+                    dependency_repo="acme/base",
+                    dependency_name="base",
+                    dependency_version=None,
+                    source_path="roles/requirements.yml",
+                ),
+            ),
+        )
+    )
+    cfg = _write_config(
+        tmp_path,
+        index_path=index_path,
+        top_level_ansible={"sources": [{"name": "platform", "repos": ["acme/old-site"]}]},
+    )
+    monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
+    runner = CliRunner()
+
+    result = runner.invoke(app, ["source", "save", "platform", "--repo", "acme/new-site"])
+    assert result.exit_code == 0, result.output
+
+    result = runner.invoke(app, ["graph", "acme/base", "--source", "platform", "--upstream"])
+    assert result.exit_code == 1
+    assert "no cached source data found for source 'platform'" in result.output
+
+
 def test_graph_both_renders_downstream_and_warns_when_upstream_unavailable(
     tmp_path: Path,
     monkeypatch,
@@ -311,6 +348,37 @@ def test_graph_both_renders_downstream_and_warns_when_upstream_unavailable(
     assert result.exit_code == 0, result.output
     assert "|   +-- acme/base" in result.stdout
     assert "warning: upstream omitted: pass --source NAME or inline selectors" in result.stdout
+
+
+def test_graph_downstream_ignores_stale_source_data(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    index_path = tmp_path / "index.sqlite3"
+    SqliteDependencyIndex(index_path).replace_source_scan(
+        IndexScan(source_key="source:platform", scanned_at=datetime(2026, 1, 1, tzinfo=UTC))
+    )
+    cfg = _write_config(
+        tmp_path,
+        index_path=index_path,
+        extra_profile={"github": {"token": "ghp_test"}},
+        top_level_ansible={
+            "stale_after": 60,
+            "sources": [{"name": "platform", "repos": ["acme/site"]}],
+        },
+    )
+    monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
+
+    with respx.mock(base_url="https://api.github.com") as mock:
+        _mock_dependency_file(mock, "acme/site")
+        result = CliRunner().invoke(
+            app,
+            ["graph", "acme/site", "--source", "platform", "--downstream", "--depth", "1"],
+        )
+
+    assert result.exit_code == 0, result.output
+    assert "|   +-- acme/base" in result.stdout
+    assert "source data is stale" not in result.stdout
 
 
 def test_graph_direction_flags_are_mutually_exclusive(tmp_path: Path, monkeypatch) -> None:
@@ -338,6 +406,32 @@ def test_graph_source_conflicts_with_inline_selectors(tmp_path: Path, monkeypatc
 
     assert result.exit_code == 2
     assert "--source cannot be combined with --org, --team, --repo, --path" in output
+
+
+def test_source_save_validates_search_boundary_repo_and_ref_kind(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    cfg = _write_config(tmp_path)
+    monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
+    runner = CliRunner()
+
+    cases = [
+        (
+            ["source", "save", "prod", "--path", "roles/requirements.yml"],
+            "requires --org, --team, or --repo",
+        ),
+        (["source", "save", "prod", "--repo", "not-a-repo"], "repo must be owner/name"),
+        (
+            ["source", "save", "prod", "--repo", "acme/site", "--ref-kind", "pulls"],
+            "ref-kind must be heads or tags",
+        ),
+    ]
+
+    for args, message in cases:
+        result = runner.invoke(app, args)
+        assert result.exit_code == 1
+        assert message in result.output
 
 
 def test_graph_repo_is_source_selector_and_target_repo_overrides_local_identity(

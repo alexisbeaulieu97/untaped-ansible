@@ -106,6 +106,26 @@ def test_status_staleness_and_clear_source(tmp_path) -> None:
     assert not index.is_stale("source:prod", max_age_seconds=60)
 
 
+def test_status_uses_scan_metadata_when_source_has_no_edges(tmp_path) -> None:
+    index = SqliteDependencyIndex(tmp_path / "index.sqlite3")
+    index.replace_source_scan(
+        IndexScan(
+            source_key="source:prod",
+            scanned_at=datetime.now(UTC),
+            repos=2,
+            refs=5,
+            dependencies=(),
+        )
+    )
+
+    status = index.status("source:prod")
+
+    assert status is not None
+    assert status.repos == 2
+    assert status.refs == 5
+    assert status.edges == 0
+
+
 def test_legacy_scope_schema_is_replaced(tmp_path) -> None:
     db_path = tmp_path / "index.sqlite3"
     db = sqlite3.connect(db_path)

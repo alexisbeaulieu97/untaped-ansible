@@ -85,6 +85,8 @@ class RefreshSourceIndex:
         scan = IndexScan(
             source_key=source_key,
             scanned_at=datetime.now(UTC),
+            repos=len(repos),
+            refs=ref_count,
             dependencies=tuple(dependencies),
         )
         self._index.replace_source_scan(scan)

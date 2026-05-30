@@ -33,13 +33,27 @@ class SqliteDependencyIndex:
 
     def replace_source_scan(self, scan: IndexScan) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
+        repos = (
+            scan.repos
+            if scan.repos is not None
+            else len({edge.source_repo for edge in scan.dependencies})
+        )
+        refs = (
+            scan.refs
+            if scan.refs is not None
+            else len({f"{edge.source_repo}@{edge.source_ref or ''}" for edge in scan.dependencies})
+        )
+        edges = len(scan.dependencies)
         with self._db() as db:
             _ensure_schema(db)
             db.execute("delete from dependency_edges where source_key = ?", (scan.source_key,))
             db.execute("delete from source_runs where source_key = ?", (scan.source_key,))
             db.execute(
-                "insert into source_runs(source_key, scanned_at) values (?, ?)",
-                (scan.source_key, _dump_dt(scan.scanned_at)),
+                """
+                insert into source_runs(source_key, scanned_at, repos, refs, edges)
+                values (?, ?, ?, ?, ?)
+                """,
+                (scan.source_key, _dump_dt(scan.scanned_at), repos, refs, edges),
             )
             db.executemany(
                 """
@@ -102,28 +116,17 @@ class SqliteDependencyIndex:
         with self._db() as db:
             _ensure_schema(db)
             row = db.execute(
-                "select scanned_at from source_runs where source_key = ?",
+                "select scanned_at, repos, refs, edges from source_runs where source_key = ?",
                 (source_key,),
             ).fetchone()
             if row is None:
                 return None
-            counts = db.execute(
-                """
-                select
-                    count(distinct source_repo) as repos,
-                    count(distinct source_repo || '@' || coalesce(source_ref, '')) as refs,
-                    count(*) as edges
-                from dependency_edges
-                where source_key = ?
-                """,
-                (source_key,),
-            ).fetchone()
         return IndexStatus(
             source_key=source_key,
             scanned_at=_load_dt(row["scanned_at"]),
-            repos=int(counts["repos"]),
-            refs=int(counts["refs"]),
-            edges=int(counts["edges"]),
+            repos=int(row["repos"]),
+            refs=int(row["refs"]),
+            edges=int(row["edges"]),
         )
 
     def is_stale(self, source_key: str | None, *, max_age_seconds: int) -> bool:
@@ -182,7 +185,10 @@ def _ensure_schema(db: sqlite3.Connection) -> None:
         """
         create table if not exists source_runs (
             source_key text primary key,
-            scanned_at text not null
+            scanned_at text not null,
+            repos integer not null default 0,
+            refs integer not null default 0,
+            edges integer not null default 0
         );
 
         create table if not exists dependency_edges (
@@ -204,6 +210,9 @@ def _ensure_schema(db: sqlite3.Connection) -> None:
             on dependency_edges(source_key, dependency_repo, dependency_version);
         """
     )
+    _ensure_column(db, "source_runs", "repos", "integer not null default 0")
+    _ensure_column(db, "source_runs", "refs", "integer not null default 0")
+    _ensure_column(db, "source_runs", "edges", "integer not null default 0")
     _ensure_column(db, "dependency_edges", "source_sha", "text")
 
 

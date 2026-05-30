@@ -31,6 +31,8 @@ class IndexScan(BaseModel):
 
     source_key: str
     scanned_at: datetime
+    repos: int | None = None
+    refs: int | None = None
     dependencies: tuple[IndexedDependency, ...] = ()
 
 

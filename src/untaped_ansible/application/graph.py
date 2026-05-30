@@ -65,7 +65,7 @@ class _GraphBuilder:
                 stack={target_id},
             )
         warnings: list[str] = []
-        if self._index.is_stale(
+        if self._request.direction in {"impact", "both"} and self._index.is_stale(
             self._request.source_key,
             max_age_seconds=self._request.stale_after,
         ):

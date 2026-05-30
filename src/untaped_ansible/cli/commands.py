@@ -305,6 +305,8 @@ def source_save_command(
             ref_patterns=ref_patterns,
         )
         SourceRepository().upsert(source)
+        settings = get_config_section("ansible", AnsibleSettings)
+        SqliteDependencyIndex(settings.index_path).clear(_saved_source_key(name))
         typer.echo(f"saved source {name!r}", err=True)
 
 
@@ -337,6 +339,8 @@ def source_remove_command(name: str) -> None:
         removed = SourceRepository().remove(name)
         if not removed:
             raise UntapedError(f"unknown source: {name!r}")
+        settings = get_config_section("ansible", AnsibleSettings)
+        SqliteDependencyIndex(settings.index_path).clear(_saved_source_key(name))
         typer.echo(f"removed source {name!r}", err=True)
 
 
@@ -479,15 +483,30 @@ def _source_definition(
         normalized_teams = normalize_team_refs(teams or [], normalized_orgs)
     except ValueError as exc:
         raise UntapedError(str(exc)) from exc
+    normalized_repos = repos or []
+    if not any((normalized_orgs, normalized_teams, normalized_repos)):
+        raise UntapedError("source requires --org, --team, or --repo")
+    for repo in normalized_repos:
+        if not _is_repo_name(repo):
+            raise UntapedError(f"repo must be owner/name: {repo!r}")
+    normalized_ref_kinds = ref_kinds or ["heads", "tags"]
+    invalid_ref_kinds = sorted(set(normalized_ref_kinds) - {"heads", "tags"})
+    if invalid_ref_kinds:
+        raise UntapedError("ref-kind must be heads or tags")
     return SourceDefinition(
         name=name,
         orgs=normalized_orgs,
         teams=normalized_teams,
-        repos=repos or [],
+        repos=normalized_repos,
         dependency_paths=paths or [],
-        ref_kinds=ref_kinds or ["heads", "tags"],
+        ref_kinds=normalized_ref_kinds,
         ref_patterns=ref_patterns or [],
     )
+
+
+def _is_repo_name(value: str) -> bool:
+    owner, separator, repo = value.partition("/")
+    return bool(owner and separator and repo and "/" not in repo)
 
 
 def _source_row(source: SourceDefinition) -> dict[str, object]:
