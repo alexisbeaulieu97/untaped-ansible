@@ -250,10 +250,18 @@ def _load_dt(value: str) -> datetime:
 
 
 def _ensure_column(db: sqlite3.Connection, table: str, column: str, definition: str) -> None:
+    _validate_sqlite_identifier(table)
+    _validate_sqlite_identifier(column)
     columns = _table_columns(db, table)
     if column not in columns:
         db.execute(f"alter table {table} add column {column} {definition}")
 
 
 def _table_columns(db: sqlite3.Connection, table: str) -> set[str]:
+    _validate_sqlite_identifier(table)
     return {row["name"] for row in db.execute(f"pragma table_info({table})")}
+
+
+def _validate_sqlite_identifier(value: str) -> None:
+    if not value.isidentifier():
+        raise ValueError(f"invalid sqlite identifier: {value!r}")

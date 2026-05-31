@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -396,19 +397,12 @@ def source_refresh_command(
         )
 
 
+@dataclass(frozen=True)
 class _GraphSource:
-    def __init__(
-        self,
-        *,
-        definition: SourceDefinition | None,
-        key: str | None,
-        label: str | None,
-        saved: bool,
-    ) -> None:
-        self.definition = definition
-        self.key = key
-        self.label = label
-        self.saved = saved
+    definition: SourceDefinition | None
+    key: str | None
+    label: str | None
+    saved: bool
 
 
 def _graph_direction(*, upstream: bool, downstream: bool, both: bool) -> GraphDirection:
@@ -753,7 +747,7 @@ def _parse_depth(value: str) -> int | None:
     return depth
 
 
-class _OverlayIndex:
+class _OverlayIndex(DependencyIndex):
     def __init__(self, wrapped: DependencyIndex, local_edges: list[IndexedDependency]) -> None:
         self._wrapped = wrapped
         self._local_edges = local_edges

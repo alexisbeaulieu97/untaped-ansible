@@ -534,6 +534,48 @@ def test_graph_repo_is_source_selector_and_target_repo_overrides_local_identity(
     assert "|   +-- acme/users" in result.stdout
 
 
+def test_graph_local_target_infers_repo_from_gitdir_file(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    target = tmp_path / "role"
+    gitdir = tmp_path / "gitdir"
+    (target / "roles").mkdir(parents=True)
+    gitdir.mkdir()
+    (target / ".git").write_text(f"gitdir: {gitdir}\n")
+    (gitdir / "config").write_text(
+        '[remote "origin"]\n  url = git@github.com:acme/worktree-role.git\n'
+    )
+    (target / "roles" / "requirements.yml").write_text("- src: https://github.com/acme/users\n")
+    cfg = _write_config(tmp_path, index_path=tmp_path / "index.sqlite3")
+    monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
+
+    result = CliRunner().invoke(app, ["graph", str(target), "--downstream"])
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout.startswith("acme/worktree-role\n")
+    assert "|   +-- acme/users" in result.stdout
+
+
+def test_graph_empty_local_dependency_result_explains_checked_paths(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    target = tmp_path / "role"
+    target.mkdir()
+    cfg = _write_config(tmp_path, index_path=tmp_path / "index.sqlite3")
+    monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
+
+    result = CliRunner().invoke(
+        app,
+        ["graph", str(target), "--target-repo", "acme/empty", "--downstream"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "warning: no declared downstream dependencies found for acme/empty" in result.stdout
+    assert "checked configured dependency paths" in result.stdout
+
+
 def test_graph_output_writes_data_to_file_and_keeps_stdout_clean(
     tmp_path: Path,
     monkeypatch,

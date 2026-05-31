@@ -5,8 +5,14 @@ from __future__ import annotations
 import sqlite3
 from datetime import UTC, datetime, timedelta
 
+import pytest
+
 from untaped_ansible.application.ports import IndexedDependency
-from untaped_ansible.infrastructure.sqlite_index import IndexScan, SqliteDependencyIndex
+from untaped_ansible.infrastructure.sqlite_index import (
+    IndexScan,
+    SqliteDependencyIndex,
+    _ensure_column,
+)
 
 
 def test_replace_source_scan_supports_dependency_and_reverse_lookup(tmp_path) -> None:
@@ -124,6 +130,18 @@ def test_status_uses_scan_metadata_when_source_has_no_edges(tmp_path) -> None:
     assert status.repos == 2
     assert status.refs == 5
     assert status.edges == 0
+
+
+def test_schema_column_helper_rejects_invalid_identifiers(tmp_path) -> None:
+    db_path = tmp_path / "index.sqlite3"
+    db = sqlite3.connect(db_path)
+    try:
+        with pytest.raises(ValueError, match="invalid sqlite identifier"):
+            _ensure_column(db, "dependency_edges; drop table source_runs", "source_sha", "text")
+        with pytest.raises(ValueError, match="invalid sqlite identifier"):
+            _ensure_column(db, "dependency_edges", "source_sha; drop table source_runs", "text")
+    finally:
+        db.close()
 
 
 def test_legacy_scope_schema_is_replaced(tmp_path) -> None:
