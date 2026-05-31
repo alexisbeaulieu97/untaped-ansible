@@ -330,6 +330,43 @@ def test_source_save_clears_cached_data_for_redefined_source(
     assert "no cached source data found for source 'platform'" in result.output
 
 
+def test_source_save_preserves_cached_data_for_identical_source(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    index_path = tmp_path / "index.sqlite3"
+    SqliteDependencyIndex(index_path).replace_source_scan(
+        IndexScan(
+            source_key="source:platform",
+            scanned_at=datetime.now(UTC),
+            dependencies=(
+                IndexedDependency(
+                    source_repo="acme/site",
+                    source_ref="main",
+                    dependency_repo="acme/base",
+                    dependency_name="base",
+                    dependency_version=None,
+                    source_path="roles/requirements.yml",
+                ),
+            ),
+        )
+    )
+    cfg = _write_config(
+        tmp_path,
+        index_path=index_path,
+        top_level_ansible={"sources": [{"name": "platform", "repos": ["acme/site"]}]},
+    )
+    monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
+    runner = CliRunner()
+
+    result = runner.invoke(app, ["source", "save", "platform", "--repo", "acme/site"])
+    assert result.exit_code == 0, result.output
+
+    result = runner.invoke(app, ["graph", "acme/base", "--source", "platform", "--upstream"])
+    assert result.exit_code == 0, result.output
+    assert "    +-- acme/site@main" in result.stdout
+
+
 def test_graph_both_renders_downstream_and_warns_when_upstream_unavailable(
     tmp_path: Path,
     monkeypatch,
@@ -347,7 +384,10 @@ def test_graph_both_renders_downstream_and_warns_when_upstream_unavailable(
 
     assert result.exit_code == 0, result.output
     assert "|   +-- acme/base" in result.stdout
-    assert "warning: upstream omitted: pass --source NAME or inline selectors" in result.stdout
+    assert (
+        "warning: only showing downstream; upstream omitted because no source is configured"
+        in result.stdout
+    )
 
 
 def test_graph_downstream_ignores_stale_source_data(
@@ -557,6 +597,29 @@ def test_graph_local_target_infers_repo_from_gitdir_file(
     assert "|   +-- acme/users" in result.stdout
 
 
+def test_graph_local_target_prefers_origin_remote_for_identity(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    target = tmp_path / "role"
+    (target / "roles").mkdir(parents=True)
+    (target / ".git").mkdir()
+    (target / ".git" / "config").write_text(
+        '[remote "upstream"]\n'
+        "  url = https://github.com/acme/upstream-role.git\n"
+        '[remote "origin"]\n'
+        "  url = https://github.com/acme/origin-role.git\n"
+    )
+    (target / "roles" / "requirements.yml").write_text("- src: https://github.com/acme/users\n")
+    cfg = _write_config(tmp_path, index_path=tmp_path / "index.sqlite3")
+    monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
+
+    result = CliRunner().invoke(app, ["graph", str(target), "--downstream"])
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout.startswith("acme/origin-role\n")
+
+
 def test_graph_empty_local_dependency_result_explains_checked_paths(
     tmp_path: Path,
     monkeypatch,
@@ -654,6 +717,8 @@ def test_graph_help_teaches_clean_source_first_workflow() -> None:
     assert "--source" in output
     assert "--refresh" in output
     assert "--target-repo" in output
+    assert "--both" in output
+    assert "Show upstream and downstream (default)." in output
     assert "Examples:" in output
     assert (
         "untaped ansible graph acme/base --org acme --team platform --upstream --refresh" in output
@@ -691,8 +756,8 @@ def test_source_status_classifies_missing_unindexed_and_stale_sources(
     assert rows["stale"]["state"] == "stale"
 
     result = runner.invoke(app, ["source", "status", "missing", "--format", "json"])
-    assert result.exit_code == 0, result.output
-    assert json.loads(result.stdout)[0]["state"] == "missing-source"
+    assert result.exit_code == 1
+    assert "unknown source: 'missing'" in result.output
 
 
 def test_source_refresh_scans_source_with_github_client(tmp_path: Path, monkeypatch) -> None:

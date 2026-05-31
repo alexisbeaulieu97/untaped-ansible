@@ -16,6 +16,7 @@ DEFAULT_DEPENDENCY_PATHS = (
     "meta/requirements.yaml",
     "meta/main.yml",
 )
+DEFAULT_REF_KINDS = ("heads", "tags")
 
 
 class SourceDefinition(BaseModel):
@@ -26,7 +27,7 @@ class SourceDefinition(BaseModel):
     teams: list[str] = Field(default_factory=list)
     repos: list[str] = Field(default_factory=list)
     dependency_paths: list[str] = Field(default_factory=list)
-    ref_kinds: list[str] = Field(default_factory=lambda: ["heads", "tags"])
+    ref_kinds: list[str] = Field(default_factory=lambda: list(DEFAULT_REF_KINDS))
     ref_patterns: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
@@ -42,7 +43,7 @@ class SourceDefinition(BaseModel):
         for repo in self.repos:
             if not _is_repo_name(repo):
                 raise ValueError(f"repo must be owner/name: {repo!r}")
-        invalid_ref_kinds = sorted(set(self.ref_kinds) - {"heads", "tags"})
+        invalid_ref_kinds = sorted(set(self.ref_kinds) - set(DEFAULT_REF_KINDS))
         if invalid_ref_kinds:
             raise ValueError("ref-kind must be heads or tags")
         return self

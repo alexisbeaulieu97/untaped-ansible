@@ -83,6 +83,9 @@ cached under deterministic internal source keys so repeated commands can reuse
 the same scan. Do not reintroduce user-facing `scope`, `index`, or `--direction`
 workflow concepts.
 
+Saving a source clears cached source data only when the saved definition
+changes. Re-saving an identical source must preserve refreshed cache data.
+
 ## Development Workflow
 
 ```bash

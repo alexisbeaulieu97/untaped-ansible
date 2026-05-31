@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from configparser import ConfigParser
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Literal
@@ -33,12 +34,14 @@ from untaped_ansible.domain.renderers import GraphFormat, render_graph
 from untaped_ansible.infrastructure import (
     AliasRepository,
     GithubDependencyIndex,
+    OverlayDependencyIndex,
     SourceRepository,
     SqliteDependencyIndex,
 )
-from untaped_ansible.settings import AnsibleSettings, SourceDefinition
+from untaped_ansible.settings import DEFAULT_REF_KINDS, AnsibleSettings, SourceDefinition
 
 GraphDirection = Literal["deps", "impact", "both"]
+_FINGERPRINT_HEX_CHARS = 16
 GraphFormatOption = Annotated[
     GraphFormat,
     typer.Option("--format", "-f", help="Graph output format."),
@@ -89,7 +92,7 @@ def graph_command(
     ),
     upstream: bool = typer.Option(False, "--upstream", help="Show who depends on TARGET."),
     downstream: bool = typer.Option(False, "--downstream", help="Show what TARGET depends on."),
-    both: bool = typer.Option(False, "--both", help="Show upstream and downstream."),
+    both: bool = typer.Option(False, "--both", help="Show upstream and downstream (default)."),
     refresh: bool = typer.Option(False, "--refresh", help="Refresh source data before graphing."),
     depth: str = typer.Option("3", "--depth", help="Traversal depth or 'unlimited'."),
     kind: Literal["auto", "playbook", "role"] = typer.Option(
@@ -183,7 +186,7 @@ def graph_command(
                 aliases=aliases,
                 dependency_paths=settings.dependency_paths,
             )
-            index = _OverlayIndex(index, local_edges)
+            index = OverlayDependencyIndex(index, local_edges)
             graph = _graph_from_index(
                 index,
                 repo=target_repo_name,
@@ -305,9 +308,12 @@ def source_save_command(
             ref_kinds=ref_kinds,
             ref_patterns=ref_patterns,
         )
-        SourceRepository().upsert(source)
+        source_repo = SourceRepository()
+        previous = source_repo.get(name)
+        source_repo.upsert(source)
         settings = get_config_section("ansible", AnsibleSettings)
-        SqliteDependencyIndex(settings.index_path).clear(_saved_source_key(name))
+        if previous != source:
+            SqliteDependencyIndex(settings.index_path).clear(_saved_source_key(name))
         typer.echo(f"saved source {name!r}", err=True)
 
 
@@ -358,6 +364,8 @@ def source_status_command(
         index = SqliteDependencyIndex(settings.index_path)
         source_repo = SourceRepository()
         configured = {source.name: source for source in source_repo.entries()}
+        if name is not None and name not in configured:
+            raise UntapedError(f"unknown source: {name!r}")
         names = [name] if name is not None else sorted(configured)
         rows = [
             _source_status_row(
@@ -479,7 +487,7 @@ def _source_definition(
             teams=teams or [],
             repos=repos or [],
             dependency_paths=paths or [],
-            ref_kinds=ref_kinds or ["heads", "tags"],
+            ref_kinds=ref_kinds or list(DEFAULT_REF_KINDS),
             ref_patterns=ref_patterns or [],
         )
     except ValueError as exc:
@@ -497,7 +505,7 @@ def _saved_source_key(name: str) -> str:
 def _inline_source_key(source: SourceDefinition) -> str:
     payload = source.model_dump(exclude={"name"})
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
-    return f"inline:{hashlib.sha256(encoded).hexdigest()[:16]}"
+    return f"inline:{hashlib.sha256(encoded).hexdigest()[:_FINGERPRINT_HEX_CHARS]}"
 
 
 def _refresh_source(
@@ -535,7 +543,10 @@ def _effective_direction(
         )
         if direction == "impact":
             raise UntapedError(message)
-        return "deps", ["upstream omitted: pass --source NAME or inline selectors"]
+        return "deps", [
+            "only showing downstream; upstream omitted because no source is configured. "
+            "Pass --source NAME or inline selectors."
+        ]
     if index.status(source_state.key) is not None:
         return direction, []
     message = _missing_source_index_message(target, source_state)
@@ -602,6 +613,16 @@ def _repo_from_local_git(path: Path) -> str | None:
     git_config = _git_config_path(path)
     if not git_config.is_file():
         return None
+    parser = ConfigParser()
+    parser.read(git_config)
+    origin_url = parser.get('remote "origin"', "url", fallback=None)
+    if origin_url:
+        declaration = DependencyDeclaration(
+            name=origin_url,
+            src=origin_url,
+            source_path="<git-remote>",
+        )
+        return IdentityResolver().resolve(declaration).repo
     for line in git_config.read_text().splitlines():
         stripped = line.strip()
         if stripped.startswith("url = "):
@@ -745,35 +766,3 @@ def _parse_depth(value: str) -> int | None:
     if depth < 0:
         raise typer.BadParameter("--depth must be >= 0")
     return depth
-
-
-class _OverlayIndex(DependencyIndex):
-    def __init__(self, wrapped: DependencyIndex, local_edges: list[IndexedDependency]) -> None:
-        self._wrapped = wrapped
-        self._local_edges = local_edges
-
-    def dependencies(
-        self,
-        repo: str,
-        ref: str | None,
-        *,
-        source_key: str | None,
-    ) -> list[IndexedDependency]:
-        local = [
-            edge
-            for edge in self._local_edges
-            if edge.source_repo == repo and edge.source_ref == ref
-        ]
-        return local or self._wrapped.dependencies(repo, ref, source_key=source_key)
-
-    def dependents(
-        self,
-        repo: str,
-        ref: str | None,
-        *,
-        source_key: str | None,
-    ) -> list[IndexedDependency]:
-        return self._wrapped.dependents(repo, ref, source_key=source_key)
-
-    def is_stale(self, source_key: str | None, *, max_age_seconds: int) -> bool:
-        return self._wrapped.is_stale(source_key, max_age_seconds=max_age_seconds)
