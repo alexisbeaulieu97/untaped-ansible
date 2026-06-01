@@ -30,7 +30,10 @@ def parse_dependency_file(path: str, text: str) -> ParseReport:
 def _load_yaml(text: str) -> Any:
     if not text.strip():
         return None
-    data = yaml.safe_load(text)
+    try:
+        data = yaml.safe_load(text)
+    except yaml.YAMLError:
+        return None
     if isinstance(data, list | dict):
         return data
     return None

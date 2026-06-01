@@ -66,3 +66,17 @@ def test_parse_meta_main_dependencies_from_simple_and_complex_entries() -> None:
 def test_parse_empty_or_unknown_yaml_shape_returns_empty_report() -> None:
     assert parse_dependency_file("README.yml", "name: not a dependency file").dependencies == ()
     assert parse_dependency_file("roles/requirements.yml", "").dependencies == ()
+
+
+def test_parse_invalid_templated_yaml_returns_empty_report() -> None:
+    report = parse_dependency_file(
+        "meta/main.yml",
+        """
+        ---
+        galaxy_info:
+          role_name: {@ role_slug @}
+        """,
+    )
+
+    assert report.dependencies == ()
+    assert report.ignored_collections == ()
