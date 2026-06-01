@@ -74,8 +74,9 @@ untaped ansible source refresh platform
 untaped ansible graph acme/base --source platform --upstream
 ```
 
-`source status NAME` reports whether a source is missing, configured but never
-refreshed, stale, or fresh.
+`source status NAME` reports whether a configured source has never been
+refreshed, is stale, or is fresh. Unknown source names return an error so
+typos do not look like missing cache data.
 
 When a source has exactly one `--org`, `--team` accepts a bare team slug
 and stores it as `org/slug`. Use `--team org/slug` when a source has no

@@ -186,7 +186,11 @@ def graph_command(
                 aliases=aliases,
                 dependency_paths=settings.dependency_paths,
             )
-            index = OverlayDependencyIndex(index, local_edges)
+            index = OverlayDependencyIndex(
+                index,
+                local_edges,
+                authoritative_sources={(target_repo_name, ref)},
+            )
             graph = _graph_from_index(
                 index,
                 repo=target_repo_name,

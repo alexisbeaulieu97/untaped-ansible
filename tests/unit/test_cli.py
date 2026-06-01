@@ -639,6 +639,42 @@ def test_graph_empty_local_dependency_result_explains_checked_paths(
     assert "checked configured dependency paths" in result.stdout
 
 
+def test_graph_empty_local_dependency_result_does_not_fall_back_to_cache(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    index_path = tmp_path / "index.sqlite3"
+    SqliteDependencyIndex(index_path).replace_source_scan(
+        IndexScan(
+            source_key="source:platform",
+            scanned_at=datetime.now(UTC),
+            dependencies=(
+                IndexedDependency(
+                    source_repo="acme/empty",
+                    source_ref=None,
+                    dependency_repo="acme/stale",
+                    dependency_name="stale",
+                    dependency_version=None,
+                    source_path="roles/requirements.yml",
+                ),
+            ),
+        )
+    )
+    target = tmp_path / "role"
+    target.mkdir()
+    cfg = _write_config(tmp_path, index_path=index_path)
+    monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
+
+    result = CliRunner().invoke(
+        app,
+        ["graph", str(target), "--target-repo", "acme/empty", "--downstream"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "acme/stale" not in result.stdout
+    assert "warning: no declared downstream dependencies found for acme/empty" in result.stdout
+
+
 def test_graph_output_writes_data_to_file_and_keeps_stdout_clean(
     tmp_path: Path,
     monkeypatch,
