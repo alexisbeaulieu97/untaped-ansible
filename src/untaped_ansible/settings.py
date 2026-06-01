@@ -16,7 +16,8 @@ DEFAULT_DEPENDENCY_PATHS = (
     "meta/requirements.yaml",
     "meta/main.yml",
 )
-DEFAULT_REF_KINDS = ("heads", "tags")
+ALLOWED_REF_KINDS = ("heads", "tags")
+DEFAULT_REF_KINDS = ("heads",)
 
 
 class SourceDefinition(BaseModel):
@@ -43,7 +44,7 @@ class SourceDefinition(BaseModel):
         for repo in self.repos:
             if not _is_repo_name(repo):
                 raise ValueError(f"repo must be owner/name: {repo!r}")
-        invalid_ref_kinds = sorted(set(self.ref_kinds) - set(DEFAULT_REF_KINDS))
+        invalid_ref_kinds = sorted(set(self.ref_kinds) - set(ALLOWED_REF_KINDS))
         if invalid_ref_kinds:
             raise ValueError("ref-kind must be heads or tags")
         return self

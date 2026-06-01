@@ -31,6 +31,7 @@ untaped config set github.token ghp_xxx
 untaped ansible graph TARGET --downstream
 untaped ansible graph TARGET --org acme --team platform --upstream --refresh
 untaped ansible graph TARGET --source platform --upstream
+untaped ansible graph TARGET --source platform --downstream --live
 untaped ansible graph TARGET --source platform --both --format mermaid --output deps.mmd
 untaped ansible source save platform --org acme --team platform
 untaped ansible source refresh platform
@@ -53,7 +54,9 @@ Use relationship flags in user terms:
 
 Downstream graphs do not require a source or cached data. Local targets are read
 from disk. GitHub URL and `owner/repo` targets read declared dependencies live
-from GitHub when GitHub auth is configured.
+from GitHub when no source is configured. When `--source` or inline source
+selectors are present, downstream graphing prefers the refreshed cache; pass
+`--live` to opt back into live GitHub reads for downstream traversal.
 
 Upstream graphs are source-backed because GitHub impact analysis needs a
 search boundary. Use inline selectors for one-off work:
@@ -62,7 +65,11 @@ search boundary. Use inline selectors for one-off work:
 untaped ansible graph acme/base --org acme --team platform --upstream --refresh
 ```
 
-`--refresh` is explicit and required before scanning GitHub. The same inline
+`--refresh` is explicit and required before scanning GitHub. Source refreshes
+scan only each repo's default branch by default. Use `--ref-pattern '*'` to scan
+all selected branches, and add `--ref-kind tags` only when tags are needed. More
+specific patterns such as `--ref-pattern 'release/*'` are sent to GitHub as
+narrow matching-ref prefixes before local `fnmatch` filtering. The same inline
 selector set is cached under a deterministic fingerprint, so later identical
 commands can reuse the refreshed source data without `--refresh`.
 

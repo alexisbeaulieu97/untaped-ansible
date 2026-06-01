@@ -8,6 +8,14 @@ from untaped_ansible.settings import SourceDefinition
 
 
 class FakeGitHub:
+    def __init__(self) -> None:
+        self.ref_calls: list[tuple[str, str, str]] = []
+        self.repository_calls: list[tuple[str, str]] = []
+
+    def get_repository(self, owner: str, repo: str) -> dict[str, object]:
+        self.repository_calls.append((owner, repo))
+        return {"default_branch": "main"}
+
     def list_org_repos(self, org: str) -> list[dict[str, object]]:
         assert org == "acme"
         return [{"full_name": "acme/site"}]
@@ -17,16 +25,18 @@ class FakeGitHub:
         return [{"full_name": "acme/platform-playbook"}]
 
     def list_matching_refs(self, owner: str, repo: str, namespace: str) -> list[dict[str, object]]:
-        assert namespace in {"heads", "tags"}
+        self.ref_calls.append((owner, repo, namespace))
+        kind, _, pattern = namespace.partition("/")
+        assert kind in {"heads", "tags"}
+        candidates = ["main", "scratch"]
+        if pattern:
+            candidates = [candidate for candidate in candidates if candidate.startswith(pattern)]
         return [
             {
-                "ref": f"refs/{namespace}/main",
-                "object": {"sha": f"{owner}-{repo}-{namespace}-sha", "type": "commit"},
-            },
-            {
-                "ref": f"refs/{namespace}/scratch",
-                "object": {"sha": "scratch-sha", "type": "commit"},
-            },
+                "ref": f"refs/{kind}/{candidate}",
+                "object": {"sha": f"{owner}-{repo}-{kind}-sha", "type": "commit"},
+            }
+            for candidate in candidates
         ]
 
     def get_tree(
@@ -122,3 +132,168 @@ def test_refresh_index_expands_bare_team_slug_with_single_source_org() -> None:
         "acme/site",
         "acme/platform-playbook",
     }
+
+
+def test_refresh_index_defaults_to_default_branch_for_each_source_repo() -> None:
+    index = CapturingIndex()
+    github = FakeGitHub()
+    source = SourceDefinition(
+        name="prod",
+        orgs=["acme"],
+        teams=["acme/platform"],
+        repos=["acme/explicit"],
+    )
+
+    result = RefreshSourceIndex(
+        github=github,
+        index=index,
+        aliases={"common": "acme/common"},
+        default_dependency_paths=["roles/requirements.yml"],
+    )(source, source_key="source:prod")
+
+    assert result.refs == 3
+    assert github.repository_calls == [
+        ("acme", "explicit"),
+        ("acme", "platform-playbook"),
+        ("acme", "site"),
+    ]
+    assert github.ref_calls == [
+        ("acme", "explicit", "heads/main"),
+        ("acme", "platform-playbook", "heads/main"),
+        ("acme", "site", "heads/main"),
+    ]
+
+
+class PatternGitHub:
+    def __init__(self, refs: dict[str, list[str]]) -> None:
+        self.refs = refs
+        self.ref_calls: list[str] = []
+
+    def get_repository(self, owner: str, repo: str) -> dict[str, object]:
+        return {"default_branch": "main"}
+
+    def list_org_repos(self, org: str) -> list[dict[str, object]]:
+        return []
+
+    def list_team_repos(self, org: str, team_slug: str) -> list[dict[str, object]]:
+        return []
+
+    def list_matching_refs(self, owner: str, repo: str, namespace: str) -> list[dict[str, object]]:
+        self.ref_calls.append(namespace)
+        kind, _, _pattern = namespace.partition("/")
+        return [
+            {"ref": f"refs/{kind}/{name}", "object": {"sha": f"sha-{name}"}}
+            for name in self.refs.get(namespace, [])
+        ]
+
+    def get_tree(
+        self,
+        owner: str,
+        repo: str,
+        tree_sha: str,
+        *,
+        recursive: bool = False,
+    ) -> dict[str, object]:
+        assert recursive
+        return {"tree": [{"path": "roles/requirements.yml", "type": "blob"}]}
+
+    def get_raw_content(self, owner: str, repo: str, path: str, *, ref: str) -> str:
+        return "- src: https://github.com/acme/base\n"
+
+
+def test_refresh_index_narrows_pattern_ref_calls_and_filters_matches() -> None:
+    index = CapturingIndex()
+    github = PatternGitHub(
+        {
+            "heads/main": ["main", "main-backup"],
+            "heads/release/": ["release/2026.01"],
+            "heads/v": ["v1"],
+        }
+    )
+    source = SourceDefinition(
+        name="prod",
+        repos=["acme/site"],
+        ref_kinds=["heads"],
+        ref_patterns=["main", "release/*", "v*"],
+    )
+
+    result = RefreshSourceIndex(
+        github=github,
+        index=index,
+        aliases={},
+        default_dependency_paths=["roles/requirements.yml"],
+    )(source, source_key="source:prod")
+
+    assert result.refs == 3
+    assert github.ref_calls == ["heads/main", "heads/release/", "heads/v"]
+    assert index.scan is not None
+    assert [edge.source_ref for edge in index.scan.dependencies] == [
+        "main",
+        "release/2026.01",
+        "v1",
+    ]
+
+
+def test_refresh_index_wildcard_pattern_scans_whole_selected_ref_kind_once() -> None:
+    index = CapturingIndex()
+    github = PatternGitHub({"heads": ["main", "scratch"]})
+    source = SourceDefinition(
+        name="prod",
+        repos=["acme/site"],
+        ref_kinds=["heads"],
+        ref_patterns=["*"],
+    )
+
+    result = RefreshSourceIndex(
+        github=github,
+        index=index,
+        aliases={},
+        default_dependency_paths=["roles/requirements.yml"],
+    )(source, source_key="source:prod")
+
+    assert result.refs == 2
+    assert github.ref_calls == ["heads"]
+
+
+def test_refresh_index_wildcard_pattern_dedupes_narrower_ref_calls() -> None:
+    index = CapturingIndex()
+    github = PatternGitHub({"heads": ["main", "scratch"]})
+    source = SourceDefinition(
+        name="prod",
+        repos=["acme/site"],
+        ref_kinds=["heads"],
+        ref_patterns=["*", "main"],
+    )
+
+    result = RefreshSourceIndex(
+        github=github,
+        index=index,
+        aliases={},
+        default_dependency_paths=["roles/requirements.yml"],
+    )(source, source_key="source:prod")
+
+    assert result.refs == 2
+    assert github.ref_calls == ["heads"]
+
+
+def test_refresh_index_keeps_explicit_tag_scans_available() -> None:
+    index = CapturingIndex()
+    github = PatternGitHub({"tags/v": ["v1", "v2"]})
+    source = SourceDefinition(
+        name="prod",
+        repos=["acme/site"],
+        ref_kinds=["tags"],
+        ref_patterns=["v*"],
+    )
+
+    result = RefreshSourceIndex(
+        github=github,
+        index=index,
+        aliases={},
+        default_dependency_paths=["roles/requirements.yml"],
+    )(source, source_key="source:prod")
+
+    assert result.refs == 2
+    assert github.ref_calls == ["tags/v"]
+    assert index.scan is not None
+    assert [edge.source_ref for edge in index.scan.dependencies] == ["v1", "v2"]

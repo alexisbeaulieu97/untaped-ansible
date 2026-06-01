@@ -70,9 +70,14 @@ def _mock_refresh_repo(
     *,
     sha: str,
     content: str,
-    refs_path: str = "heads",
+    refs_path: str = "heads/main",
+    default_branch: str | None = "main",
 ) -> None:
     owner, name = repo.split("/", maxsplit=1)
+    if default_branch is not None:
+        mock.get(f"/repos/{owner}/{name}").mock(
+            return_value=httpx.Response(200, json={"default_branch": default_branch})
+        )
     mock.get(f"/repos/{owner}/{name}/git/matching-refs/{refs_path}").mock(
         return_value=httpx.Response(
             200,
@@ -390,13 +395,26 @@ def test_graph_both_renders_downstream_and_warns_when_upstream_unavailable(
     )
 
 
-def test_graph_downstream_ignores_stale_source_data(
+def test_graph_downstream_with_source_uses_cached_data_without_live_reads(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
     index_path = tmp_path / "index.sqlite3"
     SqliteDependencyIndex(index_path).replace_source_scan(
-        IndexScan(source_key="source:platform", scanned_at=datetime(2026, 1, 1, tzinfo=UTC))
+        IndexScan(
+            source_key="source:platform",
+            scanned_at=datetime.now(UTC),
+            dependencies=(
+                IndexedDependency(
+                    source_repo="acme/site",
+                    source_ref="main",
+                    dependency_repo="acme/cached",
+                    dependency_name="cached",
+                    dependency_version=None,
+                    source_path="roles/requirements.yml",
+                ),
+            ),
+        )
     )
     cfg = _write_config(
         tmp_path,
@@ -409,16 +427,69 @@ def test_graph_downstream_ignores_stale_source_data(
     )
     monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
 
-    with respx.mock(base_url="https://api.github.com") as mock:
-        _mock_dependency_file(mock, "acme/site")
+    with respx.mock(base_url="https://api.github.com", assert_all_called=False) as mock:
         result = CliRunner().invoke(
             app,
             ["graph", "acme/site", "--source", "platform", "--downstream", "--depth", "1"],
         )
+        assert len(mock.calls) == 0
 
     assert result.exit_code == 0, result.output
-    assert "|   +-- acme/base" in result.stdout
-    assert "source data is stale" not in result.stdout
+    assert "|   +-- acme/cached" in result.stdout
+
+
+def test_graph_downstream_with_source_live_flag_reads_remote_dependencies(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    index_path = tmp_path / "index.sqlite3"
+    SqliteDependencyIndex(index_path).replace_source_scan(
+        IndexScan(
+            source_key="source:platform",
+            scanned_at=datetime.now(UTC),
+            dependencies=(
+                IndexedDependency(
+                    source_repo="acme/site",
+                    source_ref="main",
+                    dependency_repo="acme/cached",
+                    dependency_name="cached",
+                    dependency_version=None,
+                    source_path="roles/requirements.yml",
+                ),
+            ),
+        )
+    )
+    cfg = _write_config(
+        tmp_path,
+        index_path=index_path,
+        extra_profile={"github": {"token": "ghp_test"}},
+        top_level_ansible={"sources": [{"name": "platform", "repos": ["acme/site"]}]},
+    )
+    monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
+
+    with respx.mock(base_url="https://api.github.com") as mock:
+        _mock_dependency_file(
+            mock,
+            "acme/site",
+            content="- src: https://github.com/acme/live\n",
+        )
+        result = CliRunner().invoke(
+            app,
+            [
+                "graph",
+                "acme/site",
+                "--source",
+                "platform",
+                "--downstream",
+                "--depth",
+                "1",
+                "--live",
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    assert "|   +-- acme/live" in result.stdout
+    assert "acme/cached" not in result.stdout
 
 
 def test_graph_direction_flags_are_mutually_exclusive(tmp_path: Path, monkeypatch) -> None:
@@ -752,6 +823,7 @@ def test_graph_help_teaches_clean_source_first_workflow() -> None:
     assert "--downstream" in output
     assert "--source" in output
     assert "--refresh" in output
+    assert "--live" in output
     assert "--target-repo" in output
     assert "--both" in output
     assert "Show upstream and downstream (default)." in output
@@ -817,7 +889,13 @@ def test_source_refresh_scans_source_with_github_client(tmp_path: Path, monkeypa
     monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
 
     with respx.mock(base_url="https://api.github.com") as mock:
-        _mock_refresh_repo(mock, "acme/site", sha="abc", content="- common\n")
+        _mock_refresh_repo(
+            mock,
+            "acme/site",
+            sha="abc",
+            content="- common\n",
+            default_branch=None,
+        )
         result = CliRunner().invoke(app, ["source", "refresh", "prod"])
 
     assert result.exit_code == 0, result.output
