@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from base64 import b64encode
 from configparser import ConfigParser
 from dataclasses import dataclass
 from pathlib import Path
@@ -584,9 +585,14 @@ def _refresh_source(
                 clone_protocol=settings.git_clone_protocol,
                 fetch_depth=settings.git_fetch_depth,
                 blob_filter=settings.git_blob_filter,
-                auth_header=f"AUTHORIZATION: bearer {token}" if token else None,
+                auth_header=_git_auth_header(token) if token else None,
             )(source, source_key=source_key)
     return result
+
+
+def _git_auth_header(token: str) -> str:
+    credential = b64encode(f"x-access-token:{token}".encode()).decode()
+    return f"AUTHORIZATION: basic {credential}"
 
 
 def _should_refresh_source(

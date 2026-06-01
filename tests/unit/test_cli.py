@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from base64 import b64encode
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -944,6 +945,31 @@ def test_source_refresh_scans_source_with_github_client(tmp_path: Path, monkeypa
     assert SqliteDependencyIndex(index_path).dependents(
         "acme/common", None, source_key="source:prod"
     )
+
+
+def test_source_refresh_uses_basic_auth_for_git_backend(tmp_path: Path, monkeypatch) -> None:
+    cfg = _write_config(
+        tmp_path,
+        extra_profile={"github": {"token": "ghp_test"}},
+        top_level_ansible={"sources": [{"name": "prod", "repos": ["acme/site"]}]},
+    )
+    monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
+    captured: dict[str, str | None] = {}
+
+    class FakeGitRefresh:
+        def __init__(self, **kwargs) -> None:
+            captured["auth_header"] = kwargs["auth_header"]
+
+        def __call__(self, source, *, source_key: str) -> RefreshResult:
+            return RefreshResult(source_key=source_key, repos=1, refs=1, edges=0)
+
+    monkeypatch.setattr(commands, "RefreshGitSourceIndex", FakeGitRefresh)
+
+    result = CliRunner().invoke(app, ["source", "refresh", "prod"])
+
+    assert result.exit_code == 0, result.output
+    credential = b64encode(b"x-access-token:ghp_test").decode()
+    assert captured["auth_header"] == f"AUTHORIZATION: basic {credential}"
 
 
 def test_graph_with_source_refreshes_by_default_with_configured_backend(
