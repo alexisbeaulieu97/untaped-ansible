@@ -14,6 +14,8 @@ from untaped.settings import get_settings
 
 from untaped_ansible import app
 from untaped_ansible.application.ports import IndexedDependency
+from untaped_ansible.application.refresh_index import RefreshResult
+from untaped_ansible.cli import commands
 from untaped_ansible.infrastructure import IndexScan, SqliteDependencyIndex
 
 
@@ -220,6 +222,8 @@ def test_graph_inline_upstream_refreshes_and_renders_impact(
                 "heads",
                 "--upstream",
                 "--refresh",
+                "--cache-backend",
+                "api",
             ],
         )
 
@@ -263,6 +267,8 @@ def test_graph_inline_source_reuses_fingerprint_cache_without_refresh(
                 "heads",
                 "--upstream",
                 "--refresh",
+                "--cache-backend",
+                "api",
             ],
         )
 
@@ -271,7 +277,16 @@ def test_graph_inline_source_reuses_fingerprint_cache_without_refresh(
     with respx.mock(base_url="https://api.github.com", assert_all_called=False) as mock:
         second = runner.invoke(
             app,
-            ["graph", "acme/base", "--org", "acme", "--ref-kind", "heads", "--upstream"],
+            [
+                "graph",
+                "acme/base",
+                "--org",
+                "acme",
+                "--ref-kind",
+                "heads",
+                "--upstream",
+                "--cached",
+            ],
         )
         assert len(mock.calls) == 0
 
@@ -290,7 +305,10 @@ def test_graph_source_upstream_requires_refresh_when_index_missing(
     )
     monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
 
-    result = CliRunner().invoke(app, ["graph", "acme/base", "--source", "platform", "--upstream"])
+    result = CliRunner().invoke(
+        app,
+        ["graph", "acme/base", "--source", "platform", "--upstream", "--cached"],
+    )
 
     assert result.exit_code == 1
     assert "no cached source data found for source 'platform'" in result.output
@@ -330,7 +348,10 @@ def test_source_save_clears_cached_data_for_redefined_source(
     result = runner.invoke(app, ["source", "save", "platform", "--repo", "acme/new-site"])
     assert result.exit_code == 0, result.output
 
-    result = runner.invoke(app, ["graph", "acme/base", "--source", "platform", "--upstream"])
+    result = runner.invoke(
+        app,
+        ["graph", "acme/base", "--source", "platform", "--upstream", "--cached"],
+    )
     assert result.exit_code == 1
     assert "no cached source data found for source 'platform'" in result.output
 
@@ -367,7 +388,10 @@ def test_source_save_preserves_cached_data_for_identical_source(
     result = runner.invoke(app, ["source", "save", "platform", "--repo", "acme/site"])
     assert result.exit_code == 0, result.output
 
-    result = runner.invoke(app, ["graph", "acme/base", "--source", "platform", "--upstream"])
+    result = runner.invoke(
+        app,
+        ["graph", "acme/base", "--source", "platform", "--upstream", "--cached"],
+    )
     assert result.exit_code == 0, result.output
     assert "    +-- acme/site@main" in result.stdout
 
@@ -430,7 +454,16 @@ def test_graph_downstream_with_source_uses_cached_data_without_live_reads(
     with respx.mock(base_url="https://api.github.com", assert_all_called=False) as mock:
         result = CliRunner().invoke(
             app,
-            ["graph", "acme/site", "--source", "platform", "--downstream", "--depth", "1"],
+            [
+                "graph",
+                "acme/site",
+                "--source",
+                "platform",
+                "--downstream",
+                "--depth",
+                "1",
+                "--cached",
+            ],
         )
         assert len(mock.calls) == 0
 
@@ -594,6 +627,8 @@ def test_inline_source_cache_key_is_order_insensitive(tmp_path: Path, monkeypatc
                 "heads",
                 "--upstream",
                 "--refresh",
+                "--cache-backend",
+                "api",
             ],
         )
 
@@ -612,6 +647,7 @@ def test_inline_source_cache_key_is_order_insensitive(tmp_path: Path, monkeypatc
                 "--ref-kind",
                 "heads",
                 "--upstream",
+                "--cached",
             ],
         )
         assert len(mock.calls) == 0
@@ -808,7 +844,10 @@ def test_graph_alias_resolves_upstream_target(tmp_path: Path, monkeypatch) -> No
     )
     monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
 
-    result = CliRunner().invoke(app, ["graph", "base", "--source", "platform", "--upstream"])
+    result = CliRunner().invoke(
+        app,
+        ["graph", "base", "--source", "platform", "--upstream", "--cached"],
+    )
 
     assert result.exit_code == 0, result.output
     assert "    +-- acme/site@main" in result.stdout
@@ -823,6 +862,8 @@ def test_graph_help_teaches_clean_source_first_workflow() -> None:
     assert "--downstream" in output
     assert "--source" in output
     assert "--refresh" in output
+    assert "--cached" in output
+    assert "--cache-backend" in output
     assert "--live" in output
     assert "--target-repo" in output
     assert "--both" in output
@@ -896,13 +937,102 @@ def test_source_refresh_scans_source_with_github_client(tmp_path: Path, monkeypa
             content="- common\n",
             default_branch=None,
         )
-        result = CliRunner().invoke(app, ["source", "refresh", "prod"])
+        result = CliRunner().invoke(app, ["source", "refresh", "prod", "--cache-backend", "api"])
 
     assert result.exit_code == 0, result.output
     assert "refreshed source 'prod': 1 repos, 1 refs, 1 edges" in result.stderr
     assert SqliteDependencyIndex(index_path).dependents(
         "acme/common", None, source_key="source:prod"
     )
+
+
+def test_graph_with_source_refreshes_by_default_with_configured_backend(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    index_path = tmp_path / "index.sqlite3"
+    cfg = _write_config(
+        tmp_path,
+        index_path=index_path,
+        top_level_ansible={"sources": [{"name": "platform", "repos": ["acme/site"]}]},
+    )
+    monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
+    calls: list[str] = []
+
+    def fake_refresh(
+        source,
+        *,
+        source_key: str,
+        index: SqliteDependencyIndex,
+        aliases: dict[str, str],
+        settings,
+        cache_backend: str,
+    ) -> RefreshResult:
+        calls.append(cache_backend)
+        index.replace_source_scan(
+            IndexScan(
+                source_key=source_key,
+                scanned_at=datetime.now(UTC),
+                dependencies=(
+                    IndexedDependency(
+                        source_repo="acme/site",
+                        source_ref="main",
+                        dependency_repo="acme/base",
+                        dependency_name="base",
+                        dependency_version=None,
+                        source_path="roles/requirements.yml",
+                    ),
+                ),
+            )
+        )
+        return RefreshResult(source_key=source_key, repos=1, refs=1, edges=1)
+
+    monkeypatch.setattr(commands, "_refresh_source", fake_refresh)
+
+    result = CliRunner().invoke(app, ["graph", "acme/base", "--source", "platform", "--upstream"])
+
+    assert result.exit_code == 0, result.output
+    assert calls == ["git"]
+    assert "    +-- acme/site@main" in result.stdout
+
+
+def test_graph_cached_skips_source_refresh(tmp_path: Path, monkeypatch) -> None:
+    index_path = tmp_path / "index.sqlite3"
+    SqliteDependencyIndex(index_path).replace_source_scan(
+        IndexScan(
+            source_key="source:platform",
+            scanned_at=datetime.now(UTC),
+            dependencies=(
+                IndexedDependency(
+                    source_repo="acme/site",
+                    source_ref="main",
+                    dependency_repo="acme/base",
+                    dependency_name="base",
+                    dependency_version=None,
+                    source_path="roles/requirements.yml",
+                ),
+            ),
+        )
+    )
+    cfg = _write_config(
+        tmp_path,
+        index_path=index_path,
+        top_level_ansible={"sources": [{"name": "platform", "repos": ["acme/site"]}]},
+    )
+    monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
+
+    def fail_refresh(*args, **kwargs) -> RefreshResult:
+        raise AssertionError("--cached must not refresh source data")
+
+    monkeypatch.setattr(commands, "_refresh_source", fail_refresh)
+
+    result = CliRunner().invoke(
+        app,
+        ["graph", "acme/base", "--source", "platform", "--upstream", "--cached"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "    +-- acme/site@main" in result.stdout
 
 
 def test_source_save_expands_bare_team_slug_with_single_org(tmp_path: Path, monkeypatch) -> None:

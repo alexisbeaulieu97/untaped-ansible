@@ -24,6 +24,53 @@ class IndexedDependency(BaseModel):
     unresolved: str | None = None
 
 
+class GitRef(BaseModel):
+    """Resolved Git ref selected for dependency indexing."""
+
+    model_config = ConfigDict(frozen=True)
+
+    kind: str
+    name: str
+    sha: str
+
+
+class RefScanMetadata(BaseModel):
+    """Freshness metadata for one indexed source repo/ref."""
+
+    model_config = ConfigDict(frozen=True)
+
+    source_key: str
+    source_repo: str
+    ref_kind: str
+    source_ref: str
+    source_sha: str
+    backend: str
+    clone_url: str | None = None
+    clone_protocol: str | None = None
+    dependency_paths_fingerprint: str
+    checked_at: datetime
+    indexed_at: datetime
+    last_error: str | None = None
+
+
+class RefScan(RefScanMetadata):
+    """Replacement payload for one source repo/ref scan."""
+
+    dependencies: tuple[IndexedDependency, ...] = ()
+
+
+class SourceIndexStatus(BaseModel):
+    """Summary of one indexed source."""
+
+    model_config = ConfigDict(frozen=True)
+
+    source_key: str
+    scanned_at: datetime
+    repos: int
+    refs: int
+    edges: int
+
+
 class IndexScan(BaseModel):
     """Complete replacement payload for one source scan."""
 
@@ -62,6 +109,38 @@ class DependencyIndexWriter(Protocol):
     """Write port for replacing a source scan."""
 
     def replace_source_scan(self, scan: IndexScan) -> None: ...
+
+
+class IncrementalDependencyIndexWriter(DependencyIndexWriter, Protocol):
+    """Write port for replacing and pruning individual source repo/ref scans."""
+
+    def status(self, source_key: str) -> SourceIndexStatus | None: ...
+
+    def ref_scan(
+        self,
+        source_key: str,
+        source_repo: str,
+        ref_kind: str,
+        source_ref: str,
+    ) -> RefScanMetadata | None: ...
+
+    def replace_ref_scan(self, scan: RefScan) -> None: ...
+
+    def touch_ref_scan(
+        self,
+        source_key: str,
+        source_repo: str,
+        ref_kind: str,
+        source_ref: str,
+        *,
+        checked_at: datetime,
+    ) -> None: ...
+
+    def prune_source_refs(
+        self,
+        source_key: str,
+        keep: set[tuple[str, str, str]],
+    ) -> None: ...
 
 
 class GitHubDependencyReader(Protocol):

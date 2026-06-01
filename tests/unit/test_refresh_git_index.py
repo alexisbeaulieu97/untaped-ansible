@@ -1,0 +1,228 @@
+"""Tests for refreshing dependency sources through a local Git cache."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from untaped_ansible.application.ports import GitRef
+from untaped_ansible.application.refresh_git_index import RefreshGitSourceIndex
+from untaped_ansible.infrastructure.sqlite_index import SqliteDependencyIndex
+from untaped_ansible.settings import SourceDefinition
+
+
+class FakeGitHub:
+    def __init__(self) -> None:
+        self.repository_calls: list[tuple[str, str]] = []
+        self.org_calls: list[str] = []
+
+    def get_repository(self, owner: str, repo: str) -> dict[str, object]:
+        self.repository_calls.append((owner, repo))
+        return {
+            "full_name": f"{owner}/{repo}",
+            "default_branch": "main",
+            "clone_url": f"https://github.com/{owner}/{repo}.git",
+            "ssh_url": f"git@github.com:{owner}/{repo}.git",
+        }
+
+    def list_org_repos(self, org: str) -> list[dict[str, object]]:
+        self.org_calls.append(org)
+        return [
+            {
+                "full_name": f"{org}/site",
+                "default_branch": "main",
+                "clone_url": f"https://github.com/{org}/site.git",
+                "ssh_url": f"git@github.com:{org}/site.git",
+            }
+        ]
+
+    def list_team_repos(self, org: str, team_slug: str) -> list[dict[str, object]]:
+        return []
+
+    def list_matching_refs(self, owner: str, repo: str, namespace: str) -> list[dict[str, object]]:
+        raise AssertionError("git cache refresh must not use REST matching-refs")
+
+    def get_tree(
+        self,
+        owner: str,
+        repo: str,
+        tree_sha: str,
+        *,
+        recursive: bool = False,
+    ) -> dict[str, object]:
+        raise AssertionError("git cache refresh must not use REST tree reads")
+
+    def get_raw_content(self, owner: str, repo: str, path: str, *, ref: str) -> str:
+        raise AssertionError("git cache refresh must not use REST content reads")
+
+
+class FakeGitCache:
+    def __init__(self) -> None:
+        self.refs: dict[tuple[str, str], list[GitRef]] = {}
+        self.files: dict[tuple[str, str, str], str] = {}
+        self.fetches: list[tuple[str, tuple[str, ...], int, bool, str | None]] = []
+        self.reads: list[tuple[str, str, str]] = []
+
+    def ensure_bare(
+        self,
+        url: str,
+        *,
+        cache_dir: Path,
+        auth_header: str | None,
+    ) -> Path:
+        return cache_dir / url.removesuffix(".git").rsplit("/", maxsplit=1)[-1]
+
+    def fetch_refs(
+        self,
+        bare_path: Path,
+        *,
+        refspecs: list[str],
+        depth: int,
+        blob_filter: bool,
+        auth_header: str | None,
+    ) -> None:
+        self.fetches.append((bare_path.name, tuple(refspecs), depth, blob_filter, auth_header))
+
+    def list_refs(self, bare_path: Path, kind: str) -> list[GitRef]:
+        return self.refs.get((bare_path.name, kind), [])
+
+    def read_file(self, bare_path: Path, sha: str, path: str) -> str | None:
+        self.reads.append((bare_path.name, sha, path))
+        return self.files.get((bare_path.name, sha, path))
+
+
+def test_git_refresh_fetches_selected_refs_and_indexes_dependency_files(tmp_path: Path) -> None:
+    github = FakeGitHub()
+    git = FakeGitCache()
+    git.refs[("site", "heads")] = [GitRef(kind="heads", name="main", sha="sha-main")]
+    git.files[("site", "sha-main", "roles/requirements.yml")] = (
+        "- src: https://github.com/acme/base\n  version: v1\n"
+    )
+    index = SqliteDependencyIndex(tmp_path / "index.sqlite3")
+
+    result = RefreshGitSourceIndex(
+        github=github,
+        git=git,
+        index=index,
+        aliases={},
+        default_dependency_paths=["roles/requirements.yml"],
+        repo_cache_path=tmp_path / "repos",
+        clone_protocol="https",
+        fetch_depth=1,
+        blob_filter=True,
+        auth_header="AUTHORIZATION: bearer test",
+    )(SourceDefinition(name="prod", orgs=["acme"]), source_key="source:prod")
+
+    assert result.repos == 1
+    assert result.refs == 1
+    assert result.edges == 1
+    assert git.fetches == [
+        (
+            "site",
+            ("+refs/heads/main:refs/heads/main",),
+            1,
+            True,
+            "AUTHORIZATION: bearer test",
+        )
+    ]
+    assert git.reads == [("site", "sha-main", "roles/requirements.yml")]
+    assert index.dependents("acme/base", "v1", source_key="source:prod")[0].source_repo == (
+        "acme/site"
+    )
+
+
+def test_git_refresh_reuses_unchanged_ref_metadata_without_rereading_files(tmp_path: Path) -> None:
+    github = FakeGitHub()
+    git = FakeGitCache()
+    git.refs[("site", "heads")] = [GitRef(kind="heads", name="main", sha="sha-main")]
+    git.files[("site", "sha-main", "roles/requirements.yml")] = (
+        "- src: https://github.com/acme/base\n  version: v1\n"
+    )
+    index = SqliteDependencyIndex(tmp_path / "index.sqlite3")
+    refresh = RefreshGitSourceIndex(
+        github=github,
+        git=git,
+        index=index,
+        aliases={},
+        default_dependency_paths=["roles/requirements.yml"],
+        repo_cache_path=tmp_path / "repos",
+        clone_protocol="https",
+        fetch_depth=1,
+        blob_filter=True,
+        auth_header=None,
+    )
+
+    refresh(SourceDefinition(name="prod", orgs=["acme"]), source_key="source:prod")
+    git.files[("site", "sha-main", "roles/requirements.yml")] = (
+        "- src: https://github.com/acme/changed\n"
+    )
+    second = refresh(SourceDefinition(name="prod", orgs=["acme"]), source_key="source:prod")
+
+    assert second.edges == 1
+    assert git.reads == [("site", "sha-main", "roles/requirements.yml")]
+    assert index.dependents("acme/base", "v1", source_key="source:prod")
+    assert not index.dependents("acme/changed", None, source_key="source:prod")
+
+
+def test_git_refresh_reindexes_moved_tags_and_prunes_unselected_refs(tmp_path: Path) -> None:
+    github = FakeGitHub()
+    git = FakeGitCache()
+    git.refs[("site", "tags")] = [
+        GitRef(kind="tags", name="v1", sha="sha-v1"),
+        GitRef(kind="tags", name="v-old", sha="sha-old"),
+    ]
+    git.files[("site", "sha-v1", "roles/requirements.yml")] = (
+        "- src: https://github.com/acme/base\n"
+    )
+    git.files[("site", "sha-old", "roles/requirements.yml")] = (
+        "- src: https://github.com/acme/old\n"
+    )
+    index = SqliteDependencyIndex(tmp_path / "index.sqlite3")
+    refresh = RefreshGitSourceIndex(
+        github=github,
+        git=git,
+        index=index,
+        aliases={},
+        default_dependency_paths=["roles/requirements.yml"],
+        repo_cache_path=tmp_path / "repos",
+        clone_protocol="ssh",
+        fetch_depth=0,
+        blob_filter=False,
+        auth_header=None,
+    )
+    source = SourceDefinition(
+        name="prod",
+        orgs=["acme"],
+        ref_kinds=["tags"],
+        ref_patterns=["v*"],
+    )
+
+    refresh(source, source_key="source:prod")
+    git.refs[("site", "tags")] = [GitRef(kind="tags", name="v1", sha="sha-v2")]
+    git.files[("site", "sha-v2", "roles/requirements.yml")] = (
+        "- src: https://github.com/acme/base\n  version: v2\n"
+    )
+    refresh(source, source_key="source:prod")
+
+    assert git.fetches[0] == ("site", ("+refs/tags/*:refs/tags/*",), 0, False, None)
+    assert index.dependents("acme/base", "v2", source_key="source:prod")
+    assert not index.dependents("acme/base", "v1", source_key="source:prod")
+    assert not index.dependents("acme/old", None, source_key="source:prod")
+    assert index.ref_scan("source:prod", "acme/site", "tags", "v-old") is None
+
+
+def test_git_refresh_rejects_unknown_clone_protocol(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="clone_protocol"):
+        RefreshGitSourceIndex(
+            github=FakeGitHub(),
+            git=FakeGitCache(),
+            index=SqliteDependencyIndex(tmp_path / "index.sqlite3"),
+            aliases={},
+            default_dependency_paths=["roles/requirements.yml"],
+            repo_cache_path=tmp_path / "repos",
+            clone_protocol="git",
+            fetch_depth=1,
+            blob_filter=True,
+            auth_header=None,
+        )

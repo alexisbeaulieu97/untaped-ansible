@@ -64,20 +64,21 @@ src/untaped_ansible/
 
 ## Cached Source Data
 
-The SQLite cache is plugin-owned state. It stores named and fingerprinted
-source scans, repo/ref scan metadata, resolved SHAs, dependency files, graph
-edges, unresolved declarations, and timestamps. SHA is authoritative. Branch
-and tag names are resolved during source refresh and cached with freshness
-metadata.
+The SQLite cache and bare Git repository cache are plugin-owned state. SQLite
+stores named and fingerprinted source scans, repo/ref scan metadata, resolved
+SHAs, graph edges, unresolved declarations, and timestamps. SHA is
+authoritative. Branch and tag names are resolved during source refresh and
+cached with freshness metadata.
 
 `graph` is the primary user command. Downstream dependency reads do not require
 a source or cached data. When a source is configured, downstream graphing
-prefers the refreshed cache; `--live` is the explicit opt-in for live GitHub
-downstream reads. Upstream impact requires a saved or inline source with
+checks selected remote refs and prefers the refreshed cache; `--cached` skips
+that check and uses SQLite as-is, while `--live` is the explicit opt-in for live
+GitHub downstream reads. Upstream impact requires a saved or inline source with
 refreshed data: `both` degrades to downstream output with an actionable warning
 when upstream data is unavailable, while `upstream` fails early with the same
-guidance. `graph` warns on stale source data and refreshes only when the user
-passes `--refresh`.
+guidance. `graph --refresh` still exists as an explicit refresh request, but
+source-backed graphing refreshes by default unless `--cached` is passed.
 
 Saved sources are configured under `ansible.sources`. Inline graph selectors
 (`--org`, `--team`, `--repo`, `--path`, `--ref-kind`, `--ref-pattern`) are
@@ -88,6 +89,14 @@ workflow concepts.
 Source refresh defaults to the default branch under `refs/heads/`. Tags remain
 available through explicit `--ref-kind tags`, and broad scans require explicit
 patterns such as `--ref-pattern '*'`.
+
+`ansible.cache_backend` defaults to `git`. The Git backend keeps bare
+repositories under `ansible.repo_cache_path`, fetches only selected refs, reads
+dependency files with Git object plumbing, and replaces SQLite edges per
+`(source_key, repo, ref_kind, ref_name)`. Do not create working checkouts for
+source indexing. `ansible.cache_backend: api` keeps the REST tree/content path
+as an explicit fallback, and `--cache-backend` can override the backend for one
+graph refresh or source refresh.
 
 Saving a source clears cached source data only when the saved definition
 changes. Re-saving an identical source must preserve refreshed cache data.
