@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Self
+from typing import Literal, Self
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -47,6 +47,8 @@ class SourceDefinition(BaseModel):
         invalid_ref_kinds = sorted(set(self.ref_kinds) - set(ALLOWED_REF_KINDS))
         if invalid_ref_kinds:
             raise ValueError("ref-kind must be heads or tags")
+        if "tags" in self.ref_kinds and not self.ref_patterns:
+            raise ValueError("tag scans require --ref-pattern (use '*' for all tags)")
         return self
 
 
@@ -55,6 +57,11 @@ class AnsibleSettings(BaseModel):
 
     index_path: Path = Path("~/.untaped/ansible-index.sqlite3")
     stale_after: int = 86_400
+    cache_backend: Literal["git", "api"] = "git"
+    repo_cache_path: Path = Path("~/.untaped/ansible-repositories")
+    git_clone_protocol: Literal["https", "ssh"] = "https"
+    git_fetch_depth: int = Field(default=1, ge=0)
+    git_blob_filter: bool = True
     dependency_paths: list[str] = Field(default_factory=lambda: list(DEFAULT_DEPENDENCY_PATHS))
 
 

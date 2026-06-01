@@ -8,21 +8,18 @@ from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
-from pydantic import BaseModel, ConfigDict
+from untaped_ansible.application.ports import (
+    IndexedDependency,
+    IndexScan,
+    RefScan,
+    RefScanMetadata,
+    RefScanTouch,
+    SourceIndexStatus,
+)
 
-from untaped_ansible.application.ports import IndexedDependency, IndexScan
 
-
-class IndexStatus(BaseModel):
+class IndexStatus(SourceIndexStatus):
     """Summary of one indexed source."""
-
-    model_config = ConfigDict(frozen=True)
-
-    source_key: str
-    scanned_at: datetime
-    repos: int
-    refs: int
-    edges: int
 
 
 class SqliteDependencyIndex:
@@ -48,6 +45,7 @@ class SqliteDependencyIndex:
             _ensure_schema(db)
             db.execute("delete from dependency_edges where source_key = ?", (scan.source_key,))
             db.execute("delete from source_runs where source_key = ?", (scan.source_key,))
+            db.execute("delete from source_ref_scans where source_key = ?", (scan.source_key,))
             db.execute(
                 """
                 insert into source_runs(source_key, scanned_at, repos, refs, edges)
@@ -58,15 +56,16 @@ class SqliteDependencyIndex:
             db.executemany(
                 """
                 insert into dependency_edges(
-                    source_key, source_repo, source_ref, source_sha, dependency_repo,
-                    dependency_name, dependency_version, source_path, unresolved
-                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    source_key, source_repo, source_ref, source_ref_kind, source_sha,
+                    dependency_repo, dependency_name, dependency_version, source_path, unresolved
+                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     (
                         scan.source_key,
                         edge.source_repo,
                         edge.source_ref,
+                        None,
                         edge.source_sha,
                         edge.dependency_repo,
                         edge.dependency_name,
@@ -77,6 +76,86 @@ class SqliteDependencyIndex:
                     for edge in scan.dependencies
                 ],
             )
+
+    def ref_scan(
+        self,
+        source_key: str,
+        source_repo: str,
+        ref_kind: str,
+        source_ref: str,
+    ) -> RefScanMetadata | None:
+        with self._db() as db:
+            _ensure_schema(db)
+            row = db.execute(
+                """
+                select source_key, source_repo, ref_kind, source_ref, source_sha, backend,
+                       clone_url, clone_protocol, dependency_paths_fingerprint,
+                       aliases_fingerprint, checked_at, indexed_at, last_error
+                from source_ref_scans
+                where source_key = ? and source_repo = ? and ref_kind = ? and source_ref = ?
+                """,
+                (source_key, source_repo, ref_kind, source_ref),
+            ).fetchone()
+        if row is None:
+            return None
+        return _ref_scan_from_row(row)
+
+    def replace_ref_scan(self, scan: RefScan) -> None:
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        with self._db() as db:
+            _ensure_schema(db)
+            _replace_ref_scan(db, scan)
+
+    def touch_ref_scan(
+        self,
+        source_key: str,
+        source_repo: str,
+        ref_kind: str,
+        source_ref: str,
+        *,
+        checked_at: datetime,
+    ) -> None:
+        with self._db() as db:
+            _ensure_schema(db)
+            _touch_ref_scan(
+                db,
+                RefScanTouch(
+                    source_key=source_key,
+                    source_repo=source_repo,
+                    ref_kind=ref_kind,
+                    source_ref=source_ref,
+                    checked_at=checked_at,
+                ),
+            )
+
+    def prune_source_refs(self, source_key: str, keep: set[tuple[str, str, str]]) -> None:
+        with self._db() as db:
+            _ensure_schema(db)
+            _prune_source_refs(db, source_key, keep)
+
+    def commit_source_ref_refresh(
+        self,
+        source_key: str,
+        *,
+        scans: tuple[RefScan, ...],
+        touches: tuple[RefScanTouch, ...],
+        keep: set[tuple[str, str, str]],
+        scanned_at: datetime,
+    ) -> None:
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        with self._db() as db:
+            _ensure_schema(db)
+            for scan in scans:
+                _replace_ref_scan(db, scan)
+            for touch in touches:
+                _touch_ref_scan(db, touch)
+            _prune_source_refs(db, source_key, keep)
+            _refresh_source_run_from_ref_scans(db, source_key, scanned_at=scanned_at)
+
+    def finalize_source_ref_scan(self, source_key: str, *, scanned_at: datetime) -> None:
+        with self._db() as db:
+            _ensure_schema(db)
+            _refresh_source_run_from_ref_scans(db, source_key, scanned_at=scanned_at)
 
     def dependencies(
         self,
@@ -144,9 +223,11 @@ class SqliteDependencyIndex:
             if source_key is None:
                 db.execute("delete from dependency_edges")
                 db.execute("delete from source_runs")
+                db.execute("delete from source_ref_scans")
                 return
             db.execute("delete from dependency_edges where source_key = ?", (source_key,))
             db.execute("delete from source_runs where source_key = ?", (source_key,))
+            db.execute("delete from source_ref_scans where source_key = ?", (source_key,))
 
     def _select_edges(self, clauses: list[str], params: list[object]) -> list[IndexedDependency]:
         where = " and ".join(clauses)
@@ -196,6 +277,7 @@ def _ensure_schema(db: sqlite3.Connection) -> None:
             source_key text not null,
             source_repo text not null,
             source_ref text,
+            source_ref_kind text,
             source_sha text,
             dependency_repo text,
             dependency_name text not null,
@@ -204,16 +286,37 @@ def _ensure_schema(db: sqlite3.Connection) -> None:
             unresolved text
         );
 
+        create table if not exists source_ref_scans (
+            source_key text not null,
+            source_repo text not null,
+            ref_kind text not null,
+            source_ref text not null,
+            source_sha text not null,
+            backend text not null,
+            clone_url text,
+            clone_protocol text,
+            dependency_paths_fingerprint text not null,
+            aliases_fingerprint text not null default '',
+            checked_at text not null,
+            indexed_at text not null,
+            last_error text,
+            primary key (source_key, source_repo, ref_kind, source_ref)
+        );
+
         create index if not exists idx_dependency_edges_source
             on dependency_edges(source_key, source_repo, source_ref);
         create index if not exists idx_dependency_edges_dependency
             on dependency_edges(source_key, dependency_repo, dependency_version);
+        create index if not exists idx_source_ref_scans_source
+            on source_ref_scans(source_key, source_repo, ref_kind, source_ref);
         """
     )
     _ensure_column(db, "source_runs", "repos", "integer not null default 0")
     _ensure_column(db, "source_runs", "refs", "integer not null default 0")
     _ensure_column(db, "source_runs", "edges", "integer not null default 0")
     _ensure_column(db, "dependency_edges", "source_sha", "text")
+    _ensure_column(db, "dependency_edges", "source_ref_kind", "text")
+    _ensure_column(db, "source_ref_scans", "aliases_fingerprint", "text not null default ''")
 
 
 def _drop_legacy_scope_schema(db: sqlite3.Connection) -> None:
@@ -238,6 +341,194 @@ def _edge_from_row(row: sqlite3.Row) -> IndexedDependency:
         dependency_version=row["dependency_version"],
         source_path=row["source_path"],
         unresolved=row["unresolved"],
+    )
+
+
+def _ref_scan_from_row(row: sqlite3.Row) -> RefScanMetadata:
+    return RefScanMetadata(
+        source_key=row["source_key"],
+        source_repo=row["source_repo"],
+        ref_kind=row["ref_kind"],
+        source_ref=row["source_ref"],
+        source_sha=row["source_sha"],
+        backend=row["backend"],
+        clone_url=row["clone_url"],
+        clone_protocol=row["clone_protocol"],
+        dependency_paths_fingerprint=row["dependency_paths_fingerprint"],
+        aliases_fingerprint=row["aliases_fingerprint"],
+        checked_at=_load_dt(row["checked_at"]),
+        indexed_at=_load_dt(row["indexed_at"]),
+        last_error=row["last_error"],
+    )
+
+
+def _replace_ref_scan(db: sqlite3.Connection, scan: RefScan) -> None:
+    db.execute(
+        """
+        delete from dependency_edges
+        where source_key = ? and source_repo = ? and source_ref = ?
+          and source_ref_kind = ?
+        """,
+        (scan.source_key, scan.source_repo, scan.source_ref, scan.ref_kind),
+    )
+    db.executemany(
+        """
+        insert into dependency_edges(
+            source_key, source_repo, source_ref, source_ref_kind, source_sha,
+            dependency_repo, dependency_name, dependency_version, source_path, unresolved
+        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        [
+            (
+                scan.source_key,
+                edge.source_repo,
+                edge.source_ref,
+                scan.ref_kind,
+                edge.source_sha,
+                edge.dependency_repo,
+                edge.dependency_name,
+                edge.dependency_version,
+                edge.source_path,
+                edge.unresolved,
+            )
+            for edge in scan.dependencies
+        ],
+    )
+    db.execute(
+        """
+        insert into source_ref_scans(
+            source_key, source_repo, ref_kind, source_ref, source_sha, backend,
+            clone_url, clone_protocol, dependency_paths_fingerprint,
+            aliases_fingerprint, checked_at, indexed_at, last_error
+        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        on conflict(source_key, source_repo, ref_kind, source_ref) do update set
+            source_sha = excluded.source_sha,
+            backend = excluded.backend,
+            clone_url = excluded.clone_url,
+            clone_protocol = excluded.clone_protocol,
+            dependency_paths_fingerprint = excluded.dependency_paths_fingerprint,
+            aliases_fingerprint = excluded.aliases_fingerprint,
+            checked_at = excluded.checked_at,
+            indexed_at = excluded.indexed_at,
+            last_error = excluded.last_error
+        """,
+        (
+            scan.source_key,
+            scan.source_repo,
+            scan.ref_kind,
+            scan.source_ref,
+            scan.source_sha,
+            scan.backend,
+            scan.clone_url,
+            scan.clone_protocol,
+            scan.dependency_paths_fingerprint,
+            scan.aliases_fingerprint,
+            _dump_dt(scan.checked_at),
+            _dump_dt(scan.indexed_at),
+            scan.last_error,
+        ),
+    )
+
+
+def _touch_ref_scan(db: sqlite3.Connection, touch: RefScanTouch) -> None:
+    db.execute(
+        """
+        update source_ref_scans
+        set checked_at = ?
+        where source_key = ? and source_repo = ? and ref_kind = ? and source_ref = ?
+        """,
+        (
+            _dump_dt(touch.checked_at),
+            touch.source_key,
+            touch.source_repo,
+            touch.ref_kind,
+            touch.source_ref,
+        ),
+    )
+
+
+def _prune_source_refs(
+    db: sqlite3.Connection,
+    source_key: str,
+    keep: set[tuple[str, str, str]],
+) -> None:
+    db.execute(
+        """
+        delete from dependency_edges
+        where source_key = ? and source_ref_kind is null
+        """,
+        (source_key,),
+    )
+    rows = db.execute(
+        """
+        select source_repo, ref_kind, source_ref
+        from source_ref_scans
+        where source_key = ?
+        """,
+        (source_key,),
+    ).fetchall()
+    for row in rows:
+        key = (str(row["source_repo"]), str(row["ref_kind"]), str(row["source_ref"]))
+        if key in keep:
+            continue
+        db.execute(
+            """
+            delete from dependency_edges
+            where source_key = ? and source_repo = ? and source_ref = ?
+              and source_ref_kind = ?
+            """,
+            (source_key, key[0], key[2], key[1]),
+        )
+        db.execute(
+            """
+            delete from source_ref_scans
+            where source_key = ? and source_repo = ? and ref_kind = ? and source_ref = ?
+            """,
+            (source_key, key[0], key[1], key[2]),
+        )
+
+
+def _refresh_source_run_from_ref_scans(
+    db: sqlite3.Connection,
+    source_key: str,
+    *,
+    scanned_at: datetime,
+) -> None:
+    row = db.execute(
+        """
+        select
+            count(distinct source_repo) as repos,
+            count(*) as refs
+        from source_ref_scans
+        where source_key = ?
+        """,
+        (source_key,),
+    ).fetchone()
+    refs = int(row["refs"] or 0)
+    if refs == 0:
+        db.execute("delete from source_runs where source_key = ?", (source_key,))
+        return
+    edge_row = db.execute(
+        "select count(*) as edges from dependency_edges where source_key = ?",
+        (source_key,),
+    ).fetchone()
+    db.execute(
+        """
+        insert into source_runs(source_key, scanned_at, repos, refs, edges)
+        values (?, ?, ?, ?, ?)
+        on conflict(source_key) do update set
+            scanned_at = excluded.scanned_at,
+            repos = excluded.repos,
+            refs = excluded.refs,
+            edges = excluded.edges
+        """,
+        (
+            source_key,
+            _dump_dt(scanned_at),
+            int(row["repos"] or 0),
+            refs,
+            int(edge_row["edges"] or 0),
+        ),
     )
 
 

@@ -3,7 +3,7 @@
 `untaped-ansible` is the Ansible dependency graph plugin for
 [`untaped`](https://github.com/alexisbeaulieu97/untaped). It adds the
 `untaped ansible` command group for role/playbook dependency graphs,
-upstream impact analysis, and GitHub-backed source caches.
+upstream impact analysis, and Git-backed source caches.
 
 ## Install
 
@@ -29,7 +29,8 @@ untaped config set github.token ghp_xxx
 
 ```text
 untaped ansible graph TARGET --downstream
-untaped ansible graph TARGET --org acme --team platform --upstream --refresh
+untaped ansible graph TARGET --org acme --team platform --upstream
+untaped ansible graph TARGET --source platform --upstream --cached
 untaped ansible graph TARGET --source platform --upstream
 untaped ansible graph TARGET --source platform --downstream --live
 untaped ansible graph TARGET --source platform --both --format mermaid --output deps.mmd
@@ -55,23 +56,32 @@ Use relationship flags in user terms:
 Downstream graphs do not require a source or cached data. Local targets are read
 from disk. GitHub URL and `owner/repo` targets read declared dependencies live
 from GitHub when no source is configured. When `--source` or inline source
-selectors are present, downstream graphing prefers the refreshed cache; pass
-`--live` to opt back into live GitHub reads for downstream traversal.
+selectors are present, graph checks the selected remote refs, updates changed
+repo/ref entries in SQLite, then reads from the cache; pass `--cached` to skip
+the remote freshness check, or `--live` to opt back into live GitHub reads for
+downstream traversal.
 
 Upstream graphs are source-backed because GitHub impact analysis needs a
 search boundary. Use inline selectors for one-off work:
 
 ```bash
-untaped ansible graph acme/base --org acme --team platform --upstream --refresh
+untaped ansible graph acme/base --org acme --team platform --upstream
 ```
 
-`--refresh` is explicit and required before scanning GitHub. Source refreshes
-scan only each repo's default branch by default. Use `--ref-pattern '*'` to scan
-all selected branches, and add `--ref-kind tags` only when tags are needed. More
-specific patterns such as `--ref-pattern 'release/*'` are sent to GitHub as
-narrow matching-ref prefixes before local `fnmatch` filtering. The same inline
-selector set is cached under a deterministic fingerprint, so later identical
-commands can reuse the refreshed source data without `--refresh`.
+Git-backed source indexing is the default. The first source-backed run creates
+bare repositories under `ansible.repo_cache_path`
+(`~/.untaped/ansible-repositories` by default), fetches only the selected refs,
+and reads dependency files from Git objects without checking out worktrees.
+Later runs fetch/check the same ref set and reparse only refs whose SHA, tag
+target, or dependency path configuration changed. Use `--cached` for the
+offline/fast path when you do not want remote checks.
+
+Source refreshes scan only each repo's default branch by default. Use
+`--ref-pattern '*'` to scan all selected branches, and add `--ref-kind tags`
+only when tags are needed. More specific patterns such as
+`--ref-pattern 'release/*'` become narrow Git refspecs before local `fnmatch`
+filtering. The same inline selector set is cached under a deterministic
+fingerprint, so later identical commands reuse the same SQLite source key.
 
 Save a reusable source for repeated work or CI:
 
@@ -80,6 +90,12 @@ untaped ansible source save platform --org acme --team platform
 untaped ansible source refresh platform
 untaped ansible graph acme/base --source platform --upstream
 ```
+
+Use `--cache-backend api` or `ansible.cache_backend: api` to keep the legacy
+REST tree/content refresh path. Use `ansible.git_clone_protocol: ssh` when
+normal SSH keys are preferred over HTTPS token auth. HTTPS mode passes the
+configured GitHub token to Git as a transient auth header and does not store it
+in cached remotes.
 
 `source status NAME` reports whether a configured source has never been
 refreshed, is stale, or is fresh. Unknown source names return an error so

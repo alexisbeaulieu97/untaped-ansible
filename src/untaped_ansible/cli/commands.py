@@ -25,6 +25,7 @@ from untaped_github import GithubClient, GithubSettings
 
 from untaped_ansible.application import BuildGraph, GraphRequest
 from untaped_ansible.application.ports import DependencyIndex, IndexedDependency
+from untaped_ansible.application.refresh_git_index import RefreshGitSourceIndex
 from untaped_ansible.application.refresh_index import RefreshResult, RefreshSourceIndex
 from untaped_ansible.domain.graph import DependencyGraph
 from untaped_ansible.domain.identity import IdentityResolver
@@ -34,6 +35,7 @@ from untaped_ansible.domain.renderers import GraphFormat, render_graph
 from untaped_ansible.infrastructure import (
     AliasRepository,
     GithubDependencyIndex,
+    GitRepositoryCache,
     OverlayDependencyIndex,
     SourceRepository,
     SqliteDependencyIndex,
@@ -41,6 +43,7 @@ from untaped_ansible.infrastructure import (
 from untaped_ansible.settings import DEFAULT_REF_KINDS, AnsibleSettings, SourceDefinition
 
 GraphDirection = Literal["deps", "impact", "both"]
+CacheBackend = Literal["git", "api"]
 _FINGERPRINT_HEX_CHARS = 16
 GraphFormatOption = Annotated[
     GraphFormat,
@@ -95,6 +98,16 @@ def graph_command(
     downstream: bool = typer.Option(False, "--downstream", help="Show what TARGET depends on."),
     both: bool = typer.Option(False, "--both", help="Show upstream and downstream (default)."),
     refresh: bool = typer.Option(False, "--refresh", help="Refresh source data before graphing."),
+    cached: bool = typer.Option(
+        False,
+        "--cached",
+        help="Use cached source data without checking remote refs.",
+    ),
+    cache_backend: CacheBackend | None = typer.Option(
+        None,
+        "--cache-backend",
+        help="Source refresh backend: git or api; defaults to ansible.cache_backend.",
+    ),
     live: bool = typer.Option(
         False,
         "--live",
@@ -147,6 +160,9 @@ def graph_command(
             raise UntapedError(f"could not resolve target to a GitHub repo: {target!r}")
 
         direction = _graph_direction(upstream=upstream, downstream=downstream, both=both)
+        if cached and refresh:
+            raise typer.BadParameter("--cached cannot be combined with --refresh")
+        selected_backend = cache_backend or settings.cache_backend
         graph_source = _graph_source(
             source_name=source,
             orgs=orgs,
@@ -157,7 +173,14 @@ def graph_command(
             ref_patterns=ref_patterns,
         )
         sqlite_index = SqliteDependencyIndex(settings.index_path)
-        if refresh:
+        should_refresh_source = _should_refresh_source(
+            source_state=graph_source,
+            direction=direction,
+            cached=cached,
+            live=live,
+            refresh=refresh,
+        )
+        if should_refresh_source:
             if graph_source.definition is None:
                 raise typer.BadParameter("--refresh requires --source or inline source selectors")
             if graph_source.key is None or graph_source.label is None:
@@ -167,13 +190,15 @@ def graph_command(
                 source_key=graph_source.key,
                 index=sqlite_index,
                 aliases=aliases,
-                dependency_paths=settings.dependency_paths,
+                settings=settings,
+                cache_backend=selected_backend,
             )
-            typer.echo(
-                f"refreshed {graph_source.label}: {result.repos} repos, "
-                f"{result.refs} refs, {result.edges} edges",
-                err=True,
-            )
+            if refresh:
+                typer.echo(
+                    f"refreshed {graph_source.label}: {result.repos} repos, "
+                    f"{result.refs} refs, {result.edges} edges",
+                    err=True,
+                )
 
         direction, graph_warnings = _effective_direction(
             target=target,
@@ -392,6 +417,11 @@ def source_status_command(
 @source_app.command("refresh", no_args_is_help=True)
 def source_refresh_command(
     name: str,
+    cache_backend: CacheBackend | None = typer.Option(
+        None,
+        "--cache-backend",
+        help="Source refresh backend: git or api; defaults to ansible.cache_backend.",
+    ),
     profile: ProfileOverrideOption = None,
 ) -> None:
     """Refresh a saved source from GitHub."""
@@ -406,7 +436,8 @@ def source_refresh_command(
             source_key=_saved_source_key(name),
             index=SqliteDependencyIndex(settings.index_path),
             aliases=aliases,
-            dependency_paths=settings.dependency_paths,
+            settings=settings,
+            cache_backend=cache_backend or settings.cache_backend,
         )
         typer.echo(
             f"refreshed source {name!r}: {result.repos} repos, "
@@ -524,18 +555,53 @@ def _refresh_source(
     source_key: str,
     index: SqliteDependencyIndex,
     aliases: dict[str, str],
-    dependency_paths: list[str],
+    settings: AnsibleSettings,
+    cache_backend: CacheBackend,
 ) -> RefreshResult:
     github_settings = get_config_section("github", GithubSettings)
     core = get_core_settings()
     with GithubClient(github_settings, http=core.http) as github:
-        result = RefreshSourceIndex(
-            github=github,
-            index=index,
-            aliases=aliases,
-            default_dependency_paths=dependency_paths,
-        )(source, source_key=source_key)
+        if cache_backend == "api":
+            result = RefreshSourceIndex(
+                github=github,
+                index=index,
+                aliases=aliases,
+                default_dependency_paths=settings.dependency_paths,
+            )(source, source_key=source_key)
+        else:
+            token = (
+                github_settings.token.get_secret_value().strip()
+                if github_settings.token is not None
+                else ""
+            )
+            result = RefreshGitSourceIndex(
+                github=github,
+                git=GitRepositoryCache(),
+                index=index,
+                aliases=aliases,
+                default_dependency_paths=settings.dependency_paths,
+                repo_cache_path=settings.repo_cache_path,
+                clone_protocol=settings.git_clone_protocol,
+                fetch_depth=settings.git_fetch_depth,
+                blob_filter=settings.git_blob_filter,
+                auth_header=f"AUTHORIZATION: bearer {token}" if token else None,
+            )(source, source_key=source_key)
     return result
+
+
+def _should_refresh_source(
+    *,
+    source_state: _GraphSource,
+    direction: GraphDirection,
+    cached: bool,
+    live: bool,
+    refresh: bool,
+) -> bool:
+    if refresh:
+        return True
+    if cached or source_state.definition is None:
+        return False
+    return not (live and direction == "deps")
 
 
 def _effective_direction(
