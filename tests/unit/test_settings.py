@@ -22,6 +22,11 @@ def test_source_definition_defaults_to_branch_scans_only() -> None:
     assert source.ref_kinds == ["heads"]
 
 
+def test_source_definition_requires_explicit_tag_ref_pattern() -> None:
+    with pytest.raises(ValidationError, match="tag scans require --ref-pattern"):
+        SourceDefinition(name="prod", repos=["acme/site"], ref_kinds=["tags"])
+
+
 def test_ansible_settings_default_to_git_backed_cache() -> None:
     settings = AnsibleSettings()
 

@@ -63,7 +63,7 @@ def test_bare_git_cache_fetches_branch_updates_and_reads_files_without_checkout(
     )
 
     assert cache.list_refs(bare, "heads")[0].sha == first_sha
-    assert cache.read_file(bare, first_sha, "roles/requirements.yml") is not None
+    assert cache.read_file(bare, first_sha, "roles/requirements.yml", auth_header=None) is not None
     assert not (bare / "roles").exists()
 
     second_sha = _commit(
@@ -81,4 +81,6 @@ def test_bare_git_cache_fetches_branch_updates_and_reads_files_without_checkout(
     )
 
     assert cache.list_refs(bare, "heads")[0].sha == second_sha
-    assert "version: v2" in (cache.read_file(bare, second_sha, "roles/requirements.yml") or "")
+    assert "version: v2" in (
+        cache.read_file(bare, second_sha, "roles/requirements.yml", auth_header=None) or ""
+    )

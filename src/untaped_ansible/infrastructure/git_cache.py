@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -72,12 +74,7 @@ class GitRepositoryCache:
         if blob_filter:
             args.append("--filter=blob:none")
         args.extend(refspecs)
-        try:
-            self._run(args, cwd=bare_path, timeout=self._slow_timeout, auth_header=auth_header)
-        except GitCacheError as exc:
-            if "couldn't find remote ref" in str(exc):
-                return
-            raise
+        self._run(args, cwd=bare_path, timeout=self._slow_timeout, auth_header=auth_header)
 
     def list_refs(self, bare_path: Path, kind: str) -> list[GitRef]:
         """List locally fetched refs under ``refs/<kind>``."""
@@ -95,10 +92,22 @@ class GitRepositoryCache:
             refs.append(GitRef(kind=kind, name=full_ref.removeprefix(prefix), sha=sha))
         return sorted(refs, key=lambda ref: (ref.kind, ref.name, ref.sha))
 
-    def read_file(self, bare_path: Path, sha: str, path: str) -> str | None:
+    def read_file(
+        self,
+        bare_path: Path,
+        sha: str,
+        path: str,
+        *,
+        auth_header: str | None,
+    ) -> str | None:
         """Read ``path`` from ``sha`` without checking out a worktree."""
         try:
-            return self._run(["show", f"{sha}:{path}"], cwd=bare_path, capture=True)
+            return self._run(
+                ["show", f"{sha}:{path}"],
+                cwd=bare_path,
+                capture=True,
+                auth_header=auth_header,
+            )
         except GitCacheError:
             return None
 
@@ -115,16 +124,17 @@ class GitRepositoryCache:
         if self._git_path is None:
             raise GitCacheError(f"`{self._git}` not found on PATH")
         effective_timeout = self._timeout if timeout is None else timeout
-        cmd = [self._git_path]
+        cmd = [self._git_path, *args]
         display_args = list(args)
+        env = None
+        auth_config_path: Path | None = None
         if auth_header is not None:
-            cmd.extend(["-c", f"http.extraheader={auth_header}"])
-            display_args = ["-c", "http.extraheader=<redacted>", *display_args]
-        cmd.extend(args)
+            env, auth_config_path = _auth_config_env(auth_header)
         try:
             result = subprocess.run(
                 cmd,
                 cwd=cwd,
+                env=env,
                 text=True,
                 capture_output=True,
                 check=False,
@@ -134,8 +144,11 @@ class GitRepositoryCache:
             raise GitCacheError(
                 f"git {' '.join(display_args)} timed out after {effective_timeout:g}s"
             ) from exc
+        finally:
+            if auth_config_path is not None:
+                auth_config_path.unlink(missing_ok=True)
         if check and result.returncode != 0:
-            stderr = (result.stderr or "").strip()
+            stderr = _redact((result.stderr or "").strip(), auth_header)
             raise GitCacheError(f"git {' '.join(display_args)} failed: {stderr or 'no stderr'}")
         return result.stdout if capture else ""
 
@@ -165,3 +178,39 @@ def cache_path_for(url: str, *, cache_dir: Path) -> Path:
 
 def _safe_path_part(value: str) -> str:
     return "".join(char if char.isalnum() or char in "._-" else "_" for char in value)
+
+
+def _auth_config_env(auth_header: str) -> tuple[dict[str, str], Path]:
+    with tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        prefix="untaped-git-auth-",
+        suffix=".config",
+        delete=False,
+    ) as auth_config:
+        auth_config.write("[http]\n")
+        auth_config.write(f"\textraheader = {auth_header}\n")
+        path = Path(auth_config.name)
+    env = os.environ.copy()
+    count = _git_config_count(env)
+    env[f"GIT_CONFIG_KEY_{count}"] = "include.path"
+    env[f"GIT_CONFIG_VALUE_{count}"] = str(path)
+    env["GIT_CONFIG_COUNT"] = str(count + 1)
+    return env, path
+
+
+def _git_config_count(env: dict[str, str]) -> int:
+    raw = env.get("GIT_CONFIG_COUNT")
+    if raw is None:
+        return 0
+    try:
+        count = int(raw)
+    except ValueError:
+        return 0
+    return max(count, 0)
+
+
+def _redact(value: str, secret: str | None) -> str:
+    if secret is None:
+        return value
+    return value.replace(secret, "<redacted>")

@@ -62,7 +62,7 @@ class FakeGitCache:
         self.refs: dict[tuple[str, str], list[GitRef]] = {}
         self.files: dict[tuple[str, str, str], str] = {}
         self.fetches: list[tuple[str, tuple[str, ...], int, bool, str | None]] = []
-        self.reads: list[tuple[str, str, str]] = []
+        self.reads: list[tuple[str, str, str, str | None]] = []
 
     def ensure_bare(
         self,
@@ -87,8 +87,15 @@ class FakeGitCache:
     def list_refs(self, bare_path: Path, kind: str) -> list[GitRef]:
         return self.refs.get((bare_path.name, kind), [])
 
-    def read_file(self, bare_path: Path, sha: str, path: str) -> str | None:
-        self.reads.append((bare_path.name, sha, path))
+    def read_file(
+        self,
+        bare_path: Path,
+        sha: str,
+        path: str,
+        *,
+        auth_header: str | None,
+    ) -> str | None:
+        self.reads.append((bare_path.name, sha, path, auth_header))
         return self.files.get((bare_path.name, sha, path))
 
 
@@ -126,7 +133,9 @@ def test_git_refresh_fetches_selected_refs_and_indexes_dependency_files(tmp_path
             "AUTHORIZATION: bearer test",
         )
     ]
-    assert git.reads == [("site", "sha-main", "roles/requirements.yml")]
+    assert git.reads == [
+        ("site", "sha-main", "roles/requirements.yml", "AUTHORIZATION: bearer test")
+    ]
     assert index.dependents("acme/base", "v1", source_key="source:prod")[0].source_repo == (
         "acme/site"
     )
@@ -160,7 +169,7 @@ def test_git_refresh_reuses_unchanged_ref_metadata_without_rereading_files(tmp_p
     second = refresh(SourceDefinition(name="prod", orgs=["acme"]), source_key="source:prod")
 
     assert second.edges == 1
-    assert git.reads == [("site", "sha-main", "roles/requirements.yml")]
+    assert git.reads == [("site", "sha-main", "roles/requirements.yml", None)]
     assert index.dependents("acme/base", "v1", source_key="source:prod")
     assert not index.dependents("acme/changed", None, source_key="source:prod")
 

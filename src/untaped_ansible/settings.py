@@ -47,6 +47,8 @@ class SourceDefinition(BaseModel):
         invalid_ref_kinds = sorted(set(self.ref_kinds) - set(ALLOWED_REF_KINDS))
         if invalid_ref_kinds:
             raise ValueError("ref-kind must be heads or tags")
+        if "tags" in self.ref_kinds and not self.ref_patterns:
+            raise ValueError("tag scans require --ref-pattern (use '*' for all tags)")
         return self
 
 

@@ -48,7 +48,14 @@ class GitCache(Protocol):
 
     def list_refs(self, bare_path: Path, kind: str) -> list[GitRef]: ...
 
-    def read_file(self, bare_path: Path, sha: str, path: str) -> str | None: ...
+    def read_file(
+        self,
+        bare_path: Path,
+        sha: str,
+        path: str,
+        *,
+        auth_header: str | None,
+    ) -> str | None: ...
 
 
 class _RepoCandidate(BaseModel):
@@ -205,7 +212,12 @@ class RefreshGitSourceIndex:
         ignored_collections: set[str] = set()
         resolver = IdentityResolver(self._aliases)
         for path in paths:
-            content = self._git.read_file(bare, ref.sha, path)
+            content = self._git.read_file(
+                bare,
+                ref.sha,
+                path,
+                auth_header=self._auth_header,
+            )
             if content is None:
                 continue
             report = parse_dependency_file(path, content)
