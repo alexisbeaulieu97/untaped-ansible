@@ -74,6 +74,7 @@ app.add_typer(source_app, name="source")
         "  untaped ansible graph acme/base --org acme --team platform --upstream --refresh\n"
         "  untaped ansible source save platform --org acme --team platform\n"
         "  untaped ansible graph acme/base --source platform --upstream\n"
+        "  untaped ansible graph acme/site --source platform --downstream --live\n"
         "  untaped ansible graph acme/base --source platform --both --format mermaid "
         "--output deps.mmd"
     ),
@@ -88,12 +89,17 @@ def graph_command(
     source: str | None = typer.Option(
         None,
         "--source",
-        help="Saved source to use for upstream impact.",
+        help="Saved source to use for cached graph data and upstream impact.",
     ),
     upstream: bool = typer.Option(False, "--upstream", help="Show who depends on TARGET."),
     downstream: bool = typer.Option(False, "--downstream", help="Show what TARGET depends on."),
     both: bool = typer.Option(False, "--both", help="Show upstream and downstream (default)."),
     refresh: bool = typer.Option(False, "--refresh", help="Refresh source data before graphing."),
+    live: bool = typer.Option(
+        False,
+        "--live",
+        help="Use live GitHub reads for downstream graphing even when source data is configured.",
+    ),
     depth: str = typer.Option("3", "--depth", help="Traversal depth or 'unlimited'."),
     kind: Literal["auto", "playbook", "role"] = typer.Option(
         "auto",
@@ -120,12 +126,12 @@ def graph_command(
     ref_kinds: list[str] | None = typer.Option(
         None,
         "--ref-kind",
-        help="Inline source ref namespace to scan: heads or tags.",
+        help="Inline source ref namespace to scan: heads or tags; defaults to heads.",
     ),
     ref_patterns: list[str] | None = typer.Option(
         None,
         "--ref-pattern",
-        help="Inline source fnmatch pattern for branch/tag names.",
+        help="Inline source fnmatch pattern for branch/tag names; omit for default branch.",
     ),
     fmt: GraphFormatOption = "tree",
     output: Path | None = typer.Option(None, "--output", help="Write graph data to a file."),
@@ -205,7 +211,7 @@ def graph_command(
             if _should_use_live_dependencies(
                 direction=direction,
                 source_key=graph_source.key,
-                github_settings=github_settings,
+                live=live,
             ):
                 core = get_core_settings()
                 with GithubClient(github_settings, http=core.http) as github:
@@ -293,12 +299,12 @@ def source_save_command(
     ref_kinds: list[str] | None = typer.Option(
         None,
         "--ref-kind",
-        help="Ref namespace to scan: heads or tags.",
+        help="Ref namespace to scan: heads or tags; defaults to heads.",
     ),
     ref_patterns: list[str] | None = typer.Option(
         None,
         "--ref-pattern",
-        help="fnmatch pattern for branch/tag names.",
+        help="fnmatch pattern for branch/tag names; omit for default branch.",
     ),
 ) -> None:
     """Save a reusable GitHub source."""
@@ -738,17 +744,13 @@ def _should_use_live_dependencies(
     *,
     direction: GraphDirection,
     source_key: str | None,
-    github_settings: GithubSettings,
+    live: bool,
 ) -> bool:
     if direction == "impact":
         return False
-    return source_key is None or _has_github_token(github_settings)
-
-
-def _has_github_token(settings: GithubSettings) -> bool:
-    if settings.token is None:
-        return False
-    return bool(settings.token.get_secret_value().strip())
+    if source_key is None:
+        return True
+    return live
 
 
 def _emit_graph(graph: DependencyGraph, *, fmt: GraphFormat, output: Path | None) -> None:

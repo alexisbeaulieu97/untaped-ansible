@@ -110,18 +110,44 @@ class RefreshSourceIndex:
     def _refs(self, owner: str, repo: str, source: SourceDefinition) -> list[tuple[str, str]]:
         refs: list[tuple[str, str]] = []
         for kind in source.ref_kinds:
-            for row in self._github.list_matching_refs(owner, repo, kind):
-                full_ref = _str(row.get("ref"))
-                sha = _object_sha(row.get("object"))
-                prefix = f"refs/{kind}/"
-                if full_ref is None or sha is None or not full_ref.startswith(prefix):
-                    continue
-                name = full_ref.removeprefix(prefix)
-                if source.ref_patterns and not any(
-                    fnmatch(name, pattern) for pattern in source.ref_patterns
-                ):
-                    continue
-                refs.append((name, sha))
+            patterns = list(source.ref_patterns)
+            namespaces = _matching_ref_namespaces(kind, patterns)
+            if not patterns and kind == "heads":
+                default_branch = _default_branch(self._github.get_repository(owner, repo))
+                patterns = [default_branch]
+                namespaces = [f"{kind}/{default_branch}"]
+            for namespace in namespaces:
+                refs.extend(
+                    self._filtered_refs(
+                        owner,
+                        repo,
+                        kind=kind,
+                        namespace=namespace,
+                        patterns=patterns,
+                    )
+                )
+        return sorted(dict.fromkeys(refs))
+
+    def _filtered_refs(
+        self,
+        owner: str,
+        repo: str,
+        *,
+        kind: str,
+        namespace: str,
+        patterns: list[str],
+    ) -> list[tuple[str, str]]:
+        refs: list[tuple[str, str]] = []
+        for row in self._github.list_matching_refs(owner, repo, namespace):
+            full_ref = _str(row.get("ref"))
+            sha = _object_sha(row.get("object"))
+            prefix = f"refs/{kind}/"
+            if full_ref is None or sha is None or not full_ref.startswith(prefix):
+                continue
+            name = full_ref.removeprefix(prefix)
+            if patterns and not any(fnmatch(name, pattern) for pattern in patterns):
+                continue
+            refs.append((name, sha))
         return refs
 
     def _tree_paths(self, owner: str, repo: str, sha: str) -> set[str]:
@@ -136,6 +162,51 @@ class RefreshSourceIndex:
             if path is not None:
                 paths.add(path)
         return paths
+
+
+def _matching_ref_namespaces(kind: str, patterns: list[str]) -> list[str]:
+    if not patterns:
+        return [kind]
+    namespaces: list[str] = []
+    for pattern in patterns:
+        literal_prefix = _safe_literal_ref_prefix(pattern)
+        namespace = kind if literal_prefix == "" else f"{kind}/{literal_prefix}"
+        if namespace == kind:
+            return [kind]
+        if any(namespace.startswith(existing) for existing in namespaces):
+            continue
+        namespaces = [existing for existing in namespaces if not existing.startswith(namespace)]
+        namespaces.append(namespace)
+    return namespaces
+
+
+def _safe_literal_ref_prefix(pattern: str) -> str:
+    if not _has_wildcard(pattern):
+        return pattern
+    prefix = _literal_ref_prefix(pattern)
+    if "/" not in prefix:
+        return ""
+    return f"{prefix.rsplit('/', maxsplit=1)[0]}/"
+
+
+def _has_wildcard(pattern: str) -> bool:
+    return any(char in pattern for char in "*?[")
+
+
+def _literal_ref_prefix(pattern: str) -> str:
+    prefix = []
+    for char in pattern:
+        if char in "*?[":
+            break
+        prefix.append(char)
+    return "".join(prefix)
+
+
+def _default_branch(repository: dict[str, object]) -> str:
+    default_branch = repository.get("default_branch")
+    if isinstance(default_branch, str) and default_branch:
+        return default_branch
+    return "HEAD"
 
 
 def _repo_names(rows: Iterable[dict[str, object]]) -> list[str]:

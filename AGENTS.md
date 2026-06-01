@@ -71,7 +71,9 @@ and tag names are resolved during source refresh and cached with freshness
 metadata.
 
 `graph` is the primary user command. Downstream dependency reads do not require
-a source or cached data. Upstream impact requires a saved or inline source with
+a source or cached data. When a source is configured, downstream graphing
+prefers the refreshed cache; `--live` is the explicit opt-in for live GitHub
+downstream reads. Upstream impact requires a saved or inline source with
 refreshed data: `both` degrades to downstream output with an actionable warning
 when upstream data is unavailable, while `upstream` fails early with the same
 guidance. `graph` warns on stale source data and refreshes only when the user
@@ -82,6 +84,10 @@ Saved sources are configured under `ansible.sources`. Inline graph selectors
 cached under deterministic internal source keys so repeated commands can reuse
 the same scan. Do not reintroduce user-facing `scope`, `index`, or `--direction`
 workflow concepts.
+
+Source refresh defaults to the default branch under `refs/heads/`. Tags remain
+available through explicit `--ref-kind tags`, and broad scans require explicit
+patterns such as `--ref-pattern '*'`.
 
 Saving a source clears cached source data only when the saved definition
 changes. Re-saving an identical source must preserve refreshed cache data.
