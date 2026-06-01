@@ -191,6 +191,25 @@ class SqliteDependencyIndex:
             params.append(source_key)
         return self._select_edges(clauses, params)
 
+    def cached_refs(self, repo: str, *, source_key: str | None) -> set[str]:
+        if source_key is None:
+            return set()
+        with self._db() as db:
+            _ensure_schema(db)
+            rows = db.execute(
+                """
+                select source_ref
+                from source_ref_scans
+                where source_key = ? and source_repo = ?
+                union
+                select source_ref
+                from dependency_edges
+                where source_key = ? and source_repo = ? and source_ref is not null
+                """,
+                (source_key, repo, source_key, repo),
+            ).fetchall()
+        return {str(row["source_ref"]) for row in rows}
+
     def status(self, source_key: str) -> IndexStatus | None:
         with self._db() as db:
             _ensure_schema(db)

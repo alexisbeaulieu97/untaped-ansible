@@ -49,6 +49,15 @@ class GithubDependencyIndex:
     ) -> list[IndexedDependency]:
         return self._wrapped.dependents(repo, ref, source_key=source_key)
 
+    def cached_refs(self, repo: str, *, source_key: str | None) -> set[str]:
+        refs = set(self._wrapped.cached_refs(repo, source_key=source_key))
+        refs.update(
+            cached_ref
+            for cached_repo, cached_ref in self._cache
+            if cached_repo == repo and cached_ref is not None
+        )
+        return refs
+
     def is_stale(self, source_key: str | None, *, max_age_seconds: int) -> bool:
         return self._wrapped.is_stale(source_key, max_age_seconds=max_age_seconds)
 

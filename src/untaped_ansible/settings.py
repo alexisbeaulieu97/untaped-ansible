@@ -61,6 +61,7 @@ class AnsibleSettings(BaseModel):
     repo_cache_path: Path = Path("~/.untaped/ansible-repositories")
     git_clone_protocol: Literal["https", "ssh"] = "https"
     git_fetch_depth: int = Field(default=1, ge=0)
+    git_fetch_concurrency: int = Field(default=8, ge=1, le=32)
     git_blob_filter: bool = True
     dependency_paths: list[str] = Field(default_factory=lambda: list(DEFAULT_DEPENDENCY_PATHS))
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 from base64 import b64encode
 from configparser import ConfigParser
 from dataclasses import dataclass
@@ -109,6 +110,13 @@ def graph_command(
         "--cache-backend",
         help="Source refresh backend: git or api; defaults to ansible.cache_backend.",
     ),
+    concurrency: int | None = typer.Option(
+        None,
+        "--concurrency",
+        min=1,
+        max=32,
+        help="Git-backed source refresh concurrency; defaults to ansible.git_fetch_concurrency.",
+    ),
     live: bool = typer.Option(
         False,
         "--live",
@@ -164,6 +172,7 @@ def graph_command(
         if cached and refresh:
             raise typer.BadParameter("--cached cannot be combined with --refresh")
         selected_backend = cache_backend or settings.cache_backend
+        git_concurrency = concurrency or settings.git_fetch_concurrency
         graph_source = _graph_source(
             source_name=source,
             orgs=orgs,
@@ -186,6 +195,7 @@ def graph_command(
                 raise typer.BadParameter("--refresh requires --source or inline source selectors")
             if graph_source.key is None or graph_source.label is None:
                 raise typer.BadParameter("--refresh requires --source or inline source selectors")
+            started_at = time.perf_counter()
             result = _refresh_source(
                 graph_source.definition,
                 source_key=graph_source.key,
@@ -193,13 +203,19 @@ def graph_command(
                 aliases=aliases,
                 settings=settings,
                 cache_backend=selected_backend,
+                concurrency=git_concurrency,
             )
-            if refresh:
-                typer.echo(
-                    f"refreshed {graph_source.label}: {result.repos} repos, "
-                    f"{result.refs} refs, {result.edges} edges",
-                    err=True,
-                )
+            typer.echo(
+                _refresh_summary(
+                    "refreshed" if refresh else "checked",
+                    graph_source.label or "source",
+                    result,
+                    cache_backend=selected_backend,
+                    concurrency=git_concurrency,
+                    elapsed=time.perf_counter() - started_at,
+                ),
+                err=True,
+            )
 
         direction, graph_warnings = _effective_direction(
             target=target,
@@ -423,6 +439,13 @@ def source_refresh_command(
         "--cache-backend",
         help="Source refresh backend: git or api; defaults to ansible.cache_backend.",
     ),
+    concurrency: int | None = typer.Option(
+        None,
+        "--concurrency",
+        min=1,
+        max=32,
+        help="Git-backed source refresh concurrency; defaults to ansible.git_fetch_concurrency.",
+    ),
     profile: ProfileOverrideOption = None,
 ) -> None:
     """Refresh a saved source from GitHub."""
@@ -432,17 +455,27 @@ def source_refresh_command(
             raise UntapedError(f"unknown source: {name!r}")
         settings = get_config_section("ansible", AnsibleSettings)
         aliases = AliasRepository().entries()
+        selected_backend = cache_backend or settings.cache_backend
+        git_concurrency = concurrency or settings.git_fetch_concurrency
+        started_at = time.perf_counter()
         result = _refresh_source(
             source,
             source_key=_saved_source_key(name),
             index=SqliteDependencyIndex(settings.index_path),
             aliases=aliases,
             settings=settings,
-            cache_backend=cache_backend or settings.cache_backend,
+            cache_backend=selected_backend,
+            concurrency=git_concurrency,
         )
         typer.echo(
-            f"refreshed source {name!r}: {result.repos} repos, "
-            f"{result.refs} refs, {result.edges} edges",
+            _refresh_summary(
+                "refreshed",
+                f"source {name!r}",
+                result,
+                cache_backend=selected_backend,
+                concurrency=git_concurrency,
+                elapsed=time.perf_counter() - started_at,
+            ),
             err=True,
         )
 
@@ -558,6 +591,7 @@ def _refresh_source(
     aliases: dict[str, str],
     settings: AnsibleSettings,
     cache_backend: CacheBackend,
+    concurrency: int,
 ) -> RefreshResult:
     github_settings = get_config_section("github", GithubSettings)
     core = get_core_settings()
@@ -586,8 +620,27 @@ def _refresh_source(
                 fetch_depth=settings.git_fetch_depth,
                 blob_filter=settings.git_blob_filter,
                 auth_header=_git_auth_header(token) if token else None,
+                concurrency=concurrency,
             )(source, source_key=source_key)
     return result
+
+
+def _refresh_summary(
+    action: str,
+    label: str,
+    result: RefreshResult,
+    *,
+    cache_backend: CacheBackend,
+    concurrency: int,
+    elapsed: float,
+) -> str:
+    message = (
+        f"{action} {label}: {result.repos} repos, {result.refs} refs, {result.edges} edges, "
+        f"{result.changed_refs} changed, {result.unchanged_refs} unchanged in {elapsed:.2f}s"
+    )
+    if cache_backend == "git":
+        message = f"{message} (concurrency {concurrency})"
+    return message
 
 
 def _git_auth_header(token: str) -> str:

@@ -33,9 +33,10 @@ untaped ansible graph TARGET --org acme --team platform --upstream
 untaped ansible graph TARGET --source platform --upstream --cached
 untaped ansible graph TARGET --source platform --upstream
 untaped ansible graph TARGET --source platform --downstream --live
+untaped ansible graph TARGET --source platform --both --concurrency 12
 untaped ansible graph TARGET --source platform --both --format mermaid --output deps.mmd
 untaped ansible source save platform --org acme --team platform
-untaped ansible source refresh platform
+untaped ansible source refresh platform --concurrency 12
 untaped ansible source status platform
 untaped ansible alias add common acme/common
 ```
@@ -52,6 +53,11 @@ Use relationship flags in user terms:
 - `--upstream`: repos/roles/playbooks that depend on the target.
 - `--both`: both directions; this is the default when no direction flag is
   passed.
+
+Tree output renders each direction as a nested traversal. Downstream paths are
+shown as `target -> dependency -> transitive dependency`; upstream paths are
+shown as `dependent -> target` and continue through reverse impact. A repo/ref
+that appears in both directions is rendered in both sections.
 
 Downstream graphs do not require a source or cached data. Local targets are read
 from disk. GitHub URL and `owner/repo` targets read declared dependencies live
@@ -76,12 +82,26 @@ Later runs fetch/check the same ref set and reparse only refs whose SHA, tag
 target, or dependency path configuration changed. Use `--cached` for the
 offline/fast path when you do not want remote checks.
 
+Git-backed source freshness checks run with bounded per-repo concurrency:
+`ansible.git_fetch_concurrency` defaults to `8` and accepts `1..32`.
+`ansible graph` and `ansible source refresh` both accept `--concurrency N` as a
+per-run override. Repo, team, and org expansion still happens serially; SQLite
+writes are committed once after all repo work succeeds. Refresh progress is
+reported on stderr with repo/ref counts, changed and unchanged refs, edge count,
+elapsed time, and the Git concurrency used.
+
 Source refreshes scan only each repo's default branch by default. Use
 `--ref-pattern '*'` to scan all selected branches, and add `--ref-kind tags`
 only when tags are needed. More specific patterns such as
 `--ref-pattern 'release/*'` become narrow Git refspecs before local `fnmatch`
 filtering. The same inline selector set is cached under a deterministic
 fingerprint, so later identical commands reuse the same SQLite source key.
+
+Source-backed downstream traversal is strict about refs. If the graph needs
+`repo@v1` and the source cache only has `repo@main`, graph stops at that node
+and warns instead of silently falling back. Scan the matching branch/tag, use
+`--cached` only when the existing SQLite index is known to be complete, or pass
+`--live` when you explicitly want downstream dependencies read from GitHub.
 
 Save a reusable source for repeated work or CI:
 

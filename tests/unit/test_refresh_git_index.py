@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -103,6 +105,87 @@ class FakeGitCache:
         return self.files.get((bare_path.name, sha, path))
 
 
+class SlowGitCache(FakeGitCache):
+    def __init__(self) -> None:
+        super().__init__()
+        self.active_fetches = 0
+        self.max_active_fetches = 0
+        self._lock = threading.Lock()
+
+    def fetch_refs(
+        self,
+        bare_path: Path,
+        *,
+        refspecs: list[str],
+        depth: int,
+        blob_filter: bool,
+        auth_header: str | None,
+    ) -> None:
+        with self._lock:
+            self.active_fetches += 1
+            self.max_active_fetches = max(self.max_active_fetches, self.active_fetches)
+        try:
+            time.sleep(0.05)
+            super().fetch_refs(
+                bare_path,
+                refspecs=refspecs,
+                depth=depth,
+                blob_filter=blob_filter,
+                auth_header=auth_header,
+            )
+        finally:
+            with self._lock:
+                self.active_fetches -= 1
+
+
+class SlowRefScanIndex:
+    def __init__(self, wrapped: SqliteDependencyIndex) -> None:
+        self._wrapped = wrapped
+        self.active_ref_scans = 0
+        self.max_active_ref_scans = 0
+        self._lock = threading.Lock()
+
+    def status(self, source_key: str):
+        return self._wrapped.status(source_key)
+
+    def ref_scan(self, source_key: str, source_repo: str, ref_kind: str, source_ref: str):
+        with self._lock:
+            self.active_ref_scans += 1
+            self.max_active_ref_scans = max(self.max_active_ref_scans, self.active_ref_scans)
+        try:
+            time.sleep(0.05)
+            return self._wrapped.ref_scan(source_key, source_repo, ref_kind, source_ref)
+        finally:
+            with self._lock:
+                self.active_ref_scans -= 1
+
+    def replace_ref_scan(self, scan):
+        return self._wrapped.replace_ref_scan(scan)
+
+    def touch_ref_scan(
+        self, source_key: str, source_repo: str, ref_kind: str, source_ref: str, **kwargs
+    ):
+        return self._wrapped.touch_ref_scan(
+            source_key,
+            source_repo,
+            ref_kind,
+            source_ref,
+            **kwargs,
+        )
+
+    def prune_source_refs(self, source_key: str, keep):
+        return self._wrapped.prune_source_refs(source_key, keep)
+
+    def commit_source_ref_refresh(self, source_key: str, **kwargs):
+        return self._wrapped.commit_source_ref_refresh(source_key, **kwargs)
+
+    def finalize_source_ref_scan(self, source_key: str, **kwargs):
+        return self._wrapped.finalize_source_ref_scan(source_key, **kwargs)
+
+    def replace_source_scan(self, scan):
+        return self._wrapped.replace_source_scan(scan)
+
+
 def test_git_refresh_fetches_selected_refs_and_indexes_dependency_files(tmp_path: Path) -> None:
     github = FakeGitHub()
     git = FakeGitCache()
@@ -143,6 +226,77 @@ def test_git_refresh_fetches_selected_refs_and_indexes_dependency_files(tmp_path
     assert index.dependents("acme/base", "v1", source_key="source:prod")[0].source_repo == (
         "acme/site"
     )
+
+
+def test_git_refresh_processes_repositories_concurrently_and_reports_change_counts(
+    tmp_path: Path,
+) -> None:
+    github = FakeGitHub()
+    git = SlowGitCache()
+    git.refs[("a", "heads")] = [GitRef(kind="heads", name="main", sha="sha-a")]
+    git.refs[("b", "heads")] = [GitRef(kind="heads", name="main", sha="sha-b")]
+    git.files[("a", "sha-a", "roles/requirements.yml")] = "- src: https://github.com/acme/base-a\n"
+    git.files[("b", "sha-b", "roles/requirements.yml")] = "- src: https://github.com/acme/base-b\n"
+    index = SqliteDependencyIndex(tmp_path / "index.sqlite3")
+    refresh = RefreshGitSourceIndex(
+        github=github,
+        git=git,
+        index=index,
+        aliases={},
+        default_dependency_paths=["roles/requirements.yml"],
+        repo_cache_path=tmp_path / "repos",
+        clone_protocol="https",
+        fetch_depth=1,
+        blob_filter=True,
+        auth_header=None,
+        concurrency=2,
+    )
+    source = SourceDefinition(name="prod", repos=["acme/a", "acme/b", "acme/a"])
+
+    first = refresh(source, source_key="source:prod")
+    git.reads.clear()
+    second = refresh(source, source_key="source:prod")
+
+    assert first.changed_refs == 2
+    assert first.unchanged_refs == 0
+    assert second.changed_refs == 0
+    assert second.unchanged_refs == 2
+    assert second.edges == 2
+    assert git.max_active_fetches > 1
+    assert github.repository_calls.count(("acme", "a")) == 2
+    assert github.repository_calls.count(("acme", "b")) == 2
+    assert {fetch[0] for fetch in git.fetches} == {"a", "b"}
+    assert [fetch[0] for fetch in git.fetches].count("a") == 2
+    assert [fetch[0] for fetch in git.fetches].count("b") == 2
+    assert git.reads == []
+
+
+def test_git_refresh_serializes_sqlite_metadata_reads_while_fetching_concurrently(
+    tmp_path: Path,
+) -> None:
+    github = FakeGitHub()
+    git = SlowGitCache()
+    git.refs[("a", "heads")] = [GitRef(kind="heads", name="main", sha="sha-a")]
+    git.refs[("b", "heads")] = [GitRef(kind="heads", name="main", sha="sha-b")]
+    index = SlowRefScanIndex(SqliteDependencyIndex(tmp_path / "index.sqlite3"))
+    refresh = RefreshGitSourceIndex(
+        github=github,
+        git=git,
+        index=index,
+        aliases={},
+        default_dependency_paths=["roles/requirements.yml"],
+        repo_cache_path=tmp_path / "repos",
+        clone_protocol="https",
+        fetch_depth=1,
+        blob_filter=True,
+        auth_header=None,
+        concurrency=2,
+    )
+
+    refresh(SourceDefinition(name="prod", repos=["acme/a", "acme/b"]), source_key="source:prod")
+
+    assert git.max_active_fetches > 1
+    assert index.max_active_ref_scans == 1
 
 
 def test_git_refresh_reuses_unchanged_ref_metadata_without_rereading_files(tmp_path: Path) -> None:

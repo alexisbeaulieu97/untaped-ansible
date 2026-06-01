@@ -61,6 +61,9 @@ src/untaped_ansible/
   aliases. Unknown declarations stay in the graph as unresolved nodes.
 - The domain emits a graph model first; tree, Mermaid, and JSON are renderers
   over that model.
+- Tree output renders nested traversal paths for downstream and upstream
+  independently. Do not flatten both directions into shared buckets; a node
+  that appears in both directions should be visible in both sections.
 
 ## Cached Source Data
 
@@ -79,6 +82,9 @@ refreshed data: `both` degrades to downstream output with an actionable warning
 when upstream data is unavailable, while `upstream` fails early with the same
 guidance. `graph --refresh` still exists as an explicit refresh request, but
 source-backed graphing refreshes by default unless `--cached` is passed.
+Cached downstream traversal is strict about refs. If a dependency points at
+`repo@v1` and only `repo@main` is cached, traversal must warn and stop there
+instead of falling back to another cached ref.
 
 Saved sources are configured under `ansible.sources`. Inline graph selectors
 (`--org`, `--team`, `--repo`, `--path`, `--ref-kind`, `--ref-pattern`) are
@@ -97,6 +103,10 @@ dependency files with Git object plumbing, and replaces SQLite edges per
 source indexing. `ansible.cache_backend: api` keeps the REST tree/content path
 as an explicit fallback, and `--cache-backend` can override the backend for one
 graph refresh or source refresh.
+Git-backed source refresh supports bounded per-repo concurrency through
+`ansible.git_fetch_concurrency` and `--concurrency`; repo/team/org expansion
+remains serial, and SQLite mutation remains a single atomic commit after repo
+workers finish successfully. Refresh status and progress belong on stderr.
 
 Saving a source clears cached source data only when the saved definition
 changes. Re-saving an identical source must preserve refreshed cache data.

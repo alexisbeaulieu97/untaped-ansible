@@ -44,5 +44,14 @@ class OverlayDependencyIndex(DependencyIndex):
     ) -> list[IndexedDependency]:
         return self._wrapped.dependents(repo, ref, source_key=source_key)
 
+    def cached_refs(self, repo: str, *, source_key: str | None) -> set[str]:
+        refs = set(self._wrapped.cached_refs(repo, source_key=source_key))
+        refs.update(
+            ref
+            for source_repo, ref in self._authoritative_sources
+            if source_repo == repo and ref is not None
+        )
+        return refs
+
     def is_stale(self, source_key: str | None, *, max_age_seconds: int) -> bool:
         return self._wrapped.is_stale(source_key, max_age_seconds=max_age_seconds)
