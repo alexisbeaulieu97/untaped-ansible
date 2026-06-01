@@ -8,7 +8,6 @@ from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from fnmatch import fnmatch
 from pathlib import Path
 from threading import Lock
 from typing import Protocol
@@ -23,7 +22,12 @@ from untaped_ansible.application.ports import (
     RefScan,
     RefScanTouch,
 )
-from untaped_ansible.application.refresh_index import RefreshResult, _matching_ref_namespaces
+from untaped_ansible.application.refresh_index import RefreshResult
+from untaped_ansible.application.source_refs import (
+    RefScanDefault,
+    pattern_matches,
+    source_ref_selections,
+)
 from untaped_ansible.domain.identity import IdentityResolver
 from untaped_ansible.domain.parser import parse_dependency_file
 from untaped_ansible.settings import SourceDefinition, normalize_team_refs
@@ -104,6 +108,7 @@ class RefreshGitSourceIndex:
         fetch_depth: int,
         blob_filter: bool,
         auth_header: str | None,
+        ref_scan_default: RefScanDefault = "all",
         concurrency: int = 8,
     ) -> None:
         if clone_protocol not in {"https", "ssh"}:
@@ -120,6 +125,7 @@ class RefreshGitSourceIndex:
         self._fetch_depth = fetch_depth
         self._blob_filter = blob_filter
         self._auth_header = auth_header if clone_protocol == "https" else None
+        self._ref_scan_default = ref_scan_default
         self._concurrency = concurrency
         self._index_lock = Lock()
 
@@ -196,7 +202,7 @@ class RefreshGitSourceIndex:
             cache_dir=self._repo_cache_path,
             auth_header=self._auth_header,
         )
-        selections = _ref_selections(source, repo.default_branch)
+        selections = _ref_selections(source, repo.default_branch, self._ref_scan_default)
         refspecs = sorted({refspec for selection in selections for refspec in selection.refspecs})
         self._git.fetch_refs(
             bare,
@@ -314,13 +320,25 @@ class RefreshGitSourceIndex:
         return edges, ignored_collections
 
 
-def _ref_selections(source: SourceDefinition, default_branch: str) -> list[_RefSelection]:
+def _ref_selections(
+    source: SourceDefinition,
+    default_branch: str,
+    ref_scan_default: RefScanDefault,
+) -> list[_RefSelection]:
     selections: list[_RefSelection] = []
-    for kind in source.ref_kinds:
-        patterns = tuple(source.ref_patterns or ([default_branch] if kind == "heads" else []))
-        namespaces = _matching_ref_namespaces(kind, list(patterns))
-        refspecs = tuple(_namespace_refspec(namespace) for namespace in namespaces)
-        selections.append(_RefSelection(kind=kind, patterns=patterns, refspecs=refspecs))
+    for selection in source_ref_selections(
+        source,
+        default_branch=default_branch,
+        ref_scan_default=ref_scan_default,
+    ):
+        refspecs = tuple(_namespace_refspec(namespace) for namespace in selection.namespaces)
+        selections.append(
+            _RefSelection(
+                kind=selection.kind,
+                patterns=selection.patterns,
+                refspecs=refspecs,
+            )
+        )
     return selections
 
 
@@ -337,9 +355,7 @@ def _selected_refs(git: GitCache, bare: Path, selections: list[_RefSelection]) -
     selected: dict[tuple[str, str], GitRef] = {}
     for selection in selections:
         for ref in git.list_refs(bare, selection.kind):
-            if selection.patterns and not any(
-                fnmatch(ref.name, pattern) for pattern in selection.patterns
-            ):
+            if not pattern_matches(ref.name, selection.patterns):
                 continue
             selected[(ref.kind, ref.name)] = ref
     return [selected[key] for key in sorted(selected)]

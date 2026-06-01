@@ -84,3 +84,39 @@ def test_bare_git_cache_fetches_branch_updates_and_reads_files_without_checkout(
     assert "version: v2" in (
         cache.read_file(bare, second_sha, "roles/requirements.yml", auth_header=None) or ""
     )
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git is not installed")
+def test_bare_git_cache_peels_annotated_tags_for_file_reads(tmp_path: Path) -> None:
+    upstream = tmp_path / "upstream"
+    _git(tmp_path, "init", str(upstream))
+    _git(upstream, "config", "user.email", "tests@example.com")
+    _git(upstream, "config", "user.name", "Tests")
+    _git(upstream, "config", "commit.gpgsign", "false")
+    commit_sha = _commit(
+        upstream,
+        "roles/requirements.yml",
+        "- src: https://github.com/acme/base\n  version: v1\n",
+        "first",
+    )
+    _git(upstream, "tag", "-a", "v1", "-m", "v1")
+    tag_object_sha = _git(upstream, "rev-parse", "refs/tags/v1")
+
+    cache = GitRepositoryCache()
+    bare = cache.ensure_bare(f"file://{upstream}", cache_dir=tmp_path / "cache", auth_header=None)
+    cache.fetch_refs(
+        bare,
+        refspecs=["+refs/tags/*:refs/tags/*"],
+        depth=1,
+        blob_filter=False,
+        auth_header=None,
+    )
+
+    tag = cache.list_refs(bare, "tags")[0]
+
+    assert tag.name == "v1"
+    assert tag.sha == commit_sha
+    assert tag.sha != tag_object_sha
+    assert "version: v1" in (
+        cache.read_file(bare, tag.sha, "roles/requirements.yml", auth_header=None) or ""
+    )

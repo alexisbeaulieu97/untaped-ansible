@@ -17,7 +17,6 @@ DEFAULT_DEPENDENCY_PATHS = (
     "meta/main.yml",
 )
 ALLOWED_REF_KINDS = ("heads", "tags")
-DEFAULT_REF_KINDS = ("heads",)
 
 
 class SourceDefinition(BaseModel):
@@ -28,7 +27,7 @@ class SourceDefinition(BaseModel):
     teams: list[str] = Field(default_factory=list)
     repos: list[str] = Field(default_factory=list)
     dependency_paths: list[str] = Field(default_factory=list)
-    ref_kinds: list[str] = Field(default_factory=lambda: list(DEFAULT_REF_KINDS))
+    ref_kinds: list[str] = Field(default_factory=list)
     ref_patterns: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
@@ -47,8 +46,6 @@ class SourceDefinition(BaseModel):
         invalid_ref_kinds = sorted(set(self.ref_kinds) - set(ALLOWED_REF_KINDS))
         if invalid_ref_kinds:
             raise ValueError("ref-kind must be heads or tags")
-        if "tags" in self.ref_kinds and not self.ref_patterns:
-            raise ValueError("tag scans require --ref-pattern (use '*' for all tags)")
         return self
 
 
@@ -58,6 +55,7 @@ class AnsibleSettings(BaseModel):
     index_path: Path = Path("~/.untaped/ansible-index.sqlite3")
     stale_after: int = 86_400
     cache_backend: Literal["git", "api"] = "git"
+    ref_scan_default: Literal["all", "default_branch"] = "all"
     repo_cache_path: Path = Path("~/.untaped/ansible-repositories")
     git_clone_protocol: Literal["https", "ssh"] = "https"
     git_fetch_depth: int = Field(default=1, ge=0)

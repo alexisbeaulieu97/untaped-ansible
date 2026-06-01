@@ -77,6 +77,36 @@ def test_tree_renderer_renders_same_node_in_upstream_and_downstream_sections() -
     assert "    +-- acme/shared@main" in rendered
 
 
+def test_tree_renderer_renders_multiple_upstream_refs_from_same_repo() -> None:
+    graph = DependencyGraph(
+        target_id="target",
+        nodes=(
+            GraphNode(id="target", label="acme/base@v3", repo="acme/base", ref="v3"),
+            GraphNode(
+                id="playbook-master",
+                label="acme/playbook@master",
+                repo="acme/playbook",
+                ref="master",
+            ),
+            GraphNode(
+                id="playbook-v3",
+                label="acme/playbook@v3",
+                repo="acme/playbook",
+                ref="v3",
+            ),
+        ),
+        edges=(
+            GraphEdge(source_id="playbook-master", target_id="target", relation="impacts"),
+            GraphEdge(source_id="playbook-v3", target_id="target", relation="impacts"),
+        ),
+    )
+
+    rendered = render_graph(graph, "tree")
+
+    assert "    +-- acme/playbook@master" in rendered
+    assert "    +-- acme/playbook@v3" in rendered
+
+
 def test_mermaid_renderer_emits_directional_edges() -> None:
     rendered = render_graph(_graph(), "mermaid")
 

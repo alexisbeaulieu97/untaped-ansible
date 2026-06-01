@@ -92,9 +92,12 @@ cached under deterministic internal source keys so repeated commands can reuse
 the same scan. Do not reintroduce user-facing `scope`, `index`, or `--direction`
 workflow concepts.
 
-Source refresh defaults to the default branch under `refs/heads/`. Tags remain
-available through explicit `--ref-kind tags`, and broad scans require explicit
-patterns such as `--ref-pattern '*'`.
+Source refresh defaults to all branches and all tags through
+`ansible.ref_scan_default: all`. Users who need the older lower-cost behavior
+can set `ansible.ref_scan_default: default_branch`, which scans only each
+repo's default branch under `refs/heads/`. `--ref-pattern` narrows source refs
+across branches and tags unless paired with `--ref-kind`; `--ref-kind tags`
+without a pattern scans all tags.
 
 `ansible.cache_backend` defaults to `git`. The Git backend keeps bare
 repositories under `ansible.repo_cache_path`, fetches only selected refs, reads

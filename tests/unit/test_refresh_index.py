@@ -134,7 +134,7 @@ def test_refresh_index_expands_bare_team_slug_with_single_source_org() -> None:
     }
 
 
-def test_refresh_index_defaults_to_default_branch_for_each_source_repo() -> None:
+def test_refresh_index_can_default_to_default_branch_for_each_source_repo() -> None:
     index = CapturingIndex()
     github = FakeGitHub()
     source = SourceDefinition(
@@ -149,6 +149,7 @@ def test_refresh_index_defaults_to_default_branch_for_each_source_repo() -> None
         index=index,
         aliases={"common": "acme/common"},
         default_dependency_paths=["roles/requirements.yml"],
+        ref_scan_default="default_branch",
     )(source, source_key="source:prod")
 
     assert result.refs == 3
@@ -274,6 +275,30 @@ def test_refresh_index_wildcard_pattern_scans_whole_selected_ref_kind_once() -> 
 
     assert result.refs == 2
     assert github.ref_calls == ["heads"]
+
+
+def test_refresh_index_defaults_to_all_heads_and_tags() -> None:
+    index = CapturingIndex()
+    github = PatternGitHub(
+        {
+            "heads": ["master"],
+            "tags": ["v3"],
+        }
+    )
+    source = SourceDefinition(name="prod", repos=["acme/site"])
+
+    result = RefreshSourceIndex(
+        github=github,
+        index=index,
+        aliases={},
+        default_dependency_paths=["roles/requirements.yml"],
+        ref_scan_default="all",
+    )(source, source_key="source:prod")
+
+    assert result.refs == 2
+    assert github.ref_calls == ["heads", "tags"]
+    assert index.scan is not None
+    assert [edge.source_ref for edge in index.scan.dependencies] == ["master", "v3"]
 
 
 def test_refresh_index_wildcard_pattern_dedupes_narrower_ref_calls() -> None:
