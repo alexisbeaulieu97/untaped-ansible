@@ -34,6 +34,7 @@ def test_ansible_settings_default_to_git_backed_cache() -> None:
     assert settings.repo_cache_path == Path("~/.untaped/ansible-repositories")
     assert settings.git_clone_protocol == "https"
     assert settings.git_fetch_depth == 1
+    assert settings.git_fetch_concurrency == 8
     assert settings.git_blob_filter is True
 
 
@@ -44,3 +45,7 @@ def test_ansible_settings_validate_cache_backend_and_git_options() -> None:
         AnsibleSettings(git_clone_protocol="ftp")
     with pytest.raises(ValidationError, match="git_fetch_depth"):
         AnsibleSettings(git_fetch_depth=-1)
+    with pytest.raises(ValidationError, match="git_fetch_concurrency"):
+        AnsibleSettings(git_fetch_concurrency=0)
+    with pytest.raises(ValidationError, match="git_fetch_concurrency"):
+        AnsibleSettings(git_fetch_concurrency=33)

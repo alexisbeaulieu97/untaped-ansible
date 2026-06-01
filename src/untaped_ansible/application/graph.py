@@ -90,7 +90,11 @@ class _GraphBuilder:
             return
         next_remaining = None if remaining is None else remaining - 1
         source_id = _node_id(repo, ref)
-        for indexed in self._index.dependencies(repo, ref, source_key=self._request.source_key):
+        dependencies = self._index.dependencies(repo, ref, source_key=self._request.source_key)
+        if not dependencies:
+            self._warn_if_missing_cached_ref(repo, ref)
+            return
+        for indexed in dependencies:
             target_id = self._target_node_for_dependency(indexed)
             if target_id in stack:
                 continue
@@ -177,6 +181,26 @@ class _GraphBuilder:
             return
         self._seen_warnings.add(warning)
         self._warnings.append(warning)
+
+    def _warn_if_missing_cached_ref(self, repo: str, ref: str | None) -> None:
+        if self._request.source_key is None or ref is None:
+            return
+        cached_refs = self._index.cached_refs(repo, source_key=self._request.source_key)
+        node = _node_id(repo, ref)
+        if ref in cached_refs:
+            return
+        if cached_refs:
+            available = ", ".join(sorted(cached_refs))
+            self._add_warning(
+                f"not expanding {node} from cached source data: ref is not cached "
+                f"(available refs: {available}). Scan the matching ref/tag or use --live "
+                "for downstream."
+            )
+            return
+        self._add_warning(
+            f"not expanding {node} from cached source data: repo/ref is not cached. "
+            "Add it to the source, scan the matching ref/tag, or use --live for downstream."
+        )
 
 
 def _node_id(repo: str, ref: str | None) -> str:

@@ -30,6 +30,8 @@ class RefreshResult(BaseModel):
     refs: int
     edges: int
     ignored_collections: tuple[str, ...] = ()
+    changed_refs: int = 0
+    unchanged_refs: int = 0
 
 
 class RefreshSourceIndex:
@@ -96,6 +98,8 @@ class RefreshSourceIndex:
             refs=ref_count,
             edges=len(dependencies),
             ignored_collections=tuple(sorted(ignored_collections)),
+            changed_refs=ref_count,
+            unchanged_refs=0,
         )
 
     def _expand_repos(self, source: SourceDefinition) -> list[str]:

@@ -293,6 +293,47 @@ def test_empty_ref_scan_is_retained_and_pruned_by_selected_refs(tmp_path) -> Non
     assert index.status("source:prod").refs == 1  # type: ignore[union-attr]
 
 
+def test_cached_refs_include_ref_scans_and_legacy_source_edges(tmp_path) -> None:
+    index = SqliteDependencyIndex(tmp_path / "index.sqlite3")
+    now = datetime(2026, 6, 1, tzinfo=UTC)
+    index.replace_source_scan(
+        IndexScan(
+            source_key="source:prod",
+            scanned_at=now,
+            dependencies=(
+                IndexedDependency(
+                    source_repo="acme/legacy",
+                    source_ref="main",
+                    dependency_repo="acme/base",
+                    dependency_name="base",
+                    dependency_version=None,
+                    source_path="roles/requirements.yml",
+                ),
+            ),
+        )
+    )
+    index.replace_ref_scan(
+        RefScan(
+            source_key="source:prod",
+            source_repo="acme/site",
+            ref_kind="heads",
+            source_ref="release/1",
+            source_sha="sha-release",
+            backend="git",
+            clone_url="https://github.com/acme/site.git",
+            clone_protocol="https",
+            dependency_paths_fingerprint="paths-a",
+            checked_at=now,
+            indexed_at=now,
+            dependencies=(),
+        )
+    )
+
+    assert index.cached_refs("acme/site", source_key="source:prod") == {"release/1"}
+    assert index.cached_refs("acme/legacy", source_key="source:prod") == {"main"}
+    assert index.cached_refs("acme/site", source_key=None) == set()
+
+
 def test_pruning_git_refs_removes_legacy_full_source_edges(tmp_path) -> None:
     index = SqliteDependencyIndex(tmp_path / "index.sqlite3")
     now = datetime(2026, 6, 1, tzinfo=UTC)

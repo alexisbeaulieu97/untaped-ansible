@@ -865,6 +865,7 @@ def test_graph_help_teaches_clean_source_first_workflow() -> None:
     assert "--refresh" in output
     assert "--cached" in output
     assert "--cache-backend" in output
+    assert "--concurrency" in output
     assert "--live" in output
     assert "--target-repo" in output
     assert "--both" in output
@@ -959,9 +960,17 @@ def test_source_refresh_uses_basic_auth_for_git_backend(tmp_path: Path, monkeypa
     class FakeGitRefresh:
         def __init__(self, **kwargs) -> None:
             captured["auth_header"] = kwargs["auth_header"]
+            captured["concurrency"] = kwargs["concurrency"]
 
         def __call__(self, source, *, source_key: str) -> RefreshResult:
-            return RefreshResult(source_key=source_key, repos=1, refs=1, edges=0)
+            return RefreshResult(
+                source_key=source_key,
+                repos=1,
+                refs=1,
+                edges=0,
+                changed_refs=1,
+                unchanged_refs=0,
+            )
 
     monkeypatch.setattr(commands, "RefreshGitSourceIndex", FakeGitRefresh)
 
@@ -970,6 +979,40 @@ def test_source_refresh_uses_basic_auth_for_git_backend(tmp_path: Path, monkeypa
     assert result.exit_code == 0, result.output
     credential = b64encode(b"x-access-token:ghp_test").decode()
     assert captured["auth_header"] == f"AUTHORIZATION: basic {credential}"
+    assert captured["concurrency"] == 8
+
+
+def test_source_refresh_allows_git_concurrency_override(tmp_path: Path, monkeypatch) -> None:
+    cfg = _write_config(
+        tmp_path,
+        extra_profile={"github": {"token": "ghp_test"}},
+        top_level_ansible={"sources": [{"name": "prod", "repos": ["acme/site"]}]},
+    )
+    monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
+    captured: dict[str, int] = {}
+
+    class FakeGitRefresh:
+        def __init__(self, **kwargs) -> None:
+            captured["concurrency"] = kwargs["concurrency"]
+
+        def __call__(self, source, *, source_key: str) -> RefreshResult:
+            return RefreshResult(
+                source_key=source_key,
+                repos=1,
+                refs=1,
+                edges=0,
+                changed_refs=1,
+                unchanged_refs=0,
+            )
+
+    monkeypatch.setattr(commands, "RefreshGitSourceIndex", FakeGitRefresh)
+
+    result = CliRunner().invoke(app, ["source", "refresh", "prod", "--concurrency", "5"])
+
+    assert result.exit_code == 0, result.output
+    assert captured["concurrency"] == 5
+    assert "1 changed, 0 unchanged" in result.stderr
+    assert "concurrency 5" in result.stderr
 
 
 def test_graph_with_source_refreshes_by_default_with_configured_backend(
@@ -993,8 +1036,9 @@ def test_graph_with_source_refreshes_by_default_with_configured_backend(
         aliases: dict[str, str],
         settings,
         cache_backend: str,
+        concurrency: int,
     ) -> RefreshResult:
-        calls.append(cache_backend)
+        calls.append(f"{cache_backend}:{concurrency}")
         index.replace_source_scan(
             IndexScan(
                 source_key=source_key,
@@ -1011,15 +1055,27 @@ def test_graph_with_source_refreshes_by_default_with_configured_backend(
                 ),
             )
         )
-        return RefreshResult(source_key=source_key, repos=1, refs=1, edges=1)
+        return RefreshResult(
+            source_key=source_key,
+            repos=1,
+            refs=1,
+            edges=1,
+            changed_refs=1,
+            unchanged_refs=0,
+        )
 
     monkeypatch.setattr(commands, "_refresh_source", fake_refresh)
 
-    result = CliRunner().invoke(app, ["graph", "acme/base", "--source", "platform", "--upstream"])
+    result = CliRunner().invoke(
+        app,
+        ["graph", "acme/base", "--source", "platform", "--upstream", "--concurrency", "4"],
+    )
 
     assert result.exit_code == 0, result.output
-    assert calls == ["git"]
+    assert calls == ["git:4"]
     assert "    +-- acme/site@main" in result.stdout
+    assert "1 changed, 0 unchanged" in result.stderr
+    assert "concurrency 4" in result.stderr
 
 
 def test_graph_cached_skips_source_refresh(tmp_path: Path, monkeypatch) -> None:

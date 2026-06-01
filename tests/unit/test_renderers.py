@@ -38,6 +38,45 @@ def test_tree_renderer_groups_dependencies_and_impact() -> None:
     assert "warning: source data is stale" in rendered
 
 
+def test_tree_renderer_nests_transitive_downstream_paths() -> None:
+    graph = DependencyGraph(
+        target_id="target",
+        nodes=(
+            GraphNode(id="target", label="acme/base@v1", repo="acme/base", ref="v1"),
+            GraphNode(id="users", label="acme/users@main", repo="acme/users", ref="main"),
+            GraphNode(id="common", label="acme/common@main", repo="acme/common", ref="main"),
+        ),
+        edges=(
+            GraphEdge(source_id="target", target_id="users", relation="requires"),
+            GraphEdge(source_id="users", target_id="common", relation="requires"),
+        ),
+    )
+
+    rendered = render_graph(graph, "tree")
+
+    assert "|   +-- acme/users@main" in rendered
+    assert "|       +-- acme/common@main" in rendered
+
+
+def test_tree_renderer_renders_same_node_in_upstream_and_downstream_sections() -> None:
+    graph = DependencyGraph(
+        target_id="target",
+        nodes=(
+            GraphNode(id="target", label="acme/base@v1", repo="acme/base", ref="v1"),
+            GraphNode(id="shared", label="acme/shared@main", repo="acme/shared", ref="main"),
+        ),
+        edges=(
+            GraphEdge(source_id="target", target_id="shared", relation="requires"),
+            GraphEdge(source_id="shared", target_id="target", relation="impacts"),
+        ),
+    )
+
+    rendered = render_graph(graph, "tree")
+
+    assert "|   +-- acme/shared@main" in rendered
+    assert "    +-- acme/shared@main" in rendered
+
+
 def test_mermaid_renderer_emits_directional_edges() -> None:
     rendered = render_graph(_graph(), "mermaid")
 
