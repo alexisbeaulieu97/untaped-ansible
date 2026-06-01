@@ -223,8 +223,12 @@ def test_failed_git_refresh_does_not_advance_source_status(tmp_path: Path) -> No
     git = FakeGitCache()
     git.refs[("a", "heads")] = [GitRef(kind="heads", name="main", sha="sha-a")]
     git.refs[("b", "heads")] = [GitRef(kind="heads", name="main", sha="sha-b")]
-    git.files[("a", "sha-a", "roles/requirements.yml")] = "- src: https://github.com/acme/base\n"
-    git.files[("b", "sha-b", "roles/requirements.yml")] = "- src: https://github.com/acme/base\n"
+    git.files[("a", "sha-a", "roles/requirements.yml")] = (
+        "- src: https://github.com/acme/base\n  version: v1\n"
+    )
+    git.files[("b", "sha-b", "roles/requirements.yml")] = (
+        "- src: https://github.com/acme/base\n  version: v1\n"
+    )
     index = SqliteDependencyIndex(tmp_path / "index.sqlite3")
     refresh = RefreshGitSourceIndex(
         github=github,
@@ -243,6 +247,10 @@ def test_failed_git_refresh_does_not_advance_source_status(tmp_path: Path) -> No
     refresh(source, source_key="source:prod")
     previous = index.status("source:prod")
     assert previous is not None
+    git.refs[("a", "heads")] = [GitRef(kind="heads", name="main", sha="sha-a2")]
+    git.files[("a", "sha-a2", "roles/requirements.yml")] = (
+        "- src: https://github.com/acme/base\n  version: v2\n"
+    )
     git.fail_fetches.add("b")
 
     with pytest.raises(GitCacheError, match="git fetch failed for b"):
@@ -251,6 +259,14 @@ def test_failed_git_refresh_does_not_advance_source_status(tmp_path: Path) -> No
     current = index.status("source:prod")
     assert current is not None
     assert current.scanned_at == previous.scanned_at
+    assert not index.dependents("acme/base", "v2", source_key="source:prod")
+    v1_source_repos = {
+        edge.source_repo for edge in index.dependents("acme/base", "v1", source_key="source:prod")
+    }
+    assert v1_source_repos == {
+        "acme/a",
+        "acme/b",
+    }
 
 
 def test_git_refresh_reindexes_moved_tags_and_prunes_unselected_refs(tmp_path: Path) -> None:

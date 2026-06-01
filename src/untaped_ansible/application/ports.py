@@ -60,6 +60,18 @@ class RefScan(RefScanMetadata):
     dependencies: tuple[IndexedDependency, ...] = ()
 
 
+class RefScanTouch(BaseModel):
+    """Freshness touch for one unchanged source repo/ref scan."""
+
+    model_config = ConfigDict(frozen=True)
+
+    source_key: str
+    source_repo: str
+    ref_kind: str
+    source_ref: str
+    checked_at: datetime
+
+
 class SourceIndexStatus(BaseModel):
     """Summary of one indexed source."""
 
@@ -141,6 +153,16 @@ class IncrementalDependencyIndexWriter(DependencyIndexWriter, Protocol):
         self,
         source_key: str,
         keep: set[tuple[str, str, str]],
+    ) -> None: ...
+
+    def commit_source_ref_refresh(
+        self,
+        source_key: str,
+        *,
+        scans: tuple[RefScan, ...],
+        touches: tuple[RefScanTouch, ...],
+        keep: set[tuple[str, str, str]],
+        scanned_at: datetime,
     ) -> None: ...
 
     def finalize_source_ref_scan(self, source_key: str, *, scanned_at: datetime) -> None: ...

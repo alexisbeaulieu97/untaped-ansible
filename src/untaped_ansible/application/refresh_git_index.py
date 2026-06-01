@@ -18,6 +18,7 @@ from untaped_ansible.application.ports import (
     IncrementalDependencyIndexWriter,
     IndexedDependency,
     RefScan,
+    RefScanTouch,
 )
 from untaped_ansible.application.refresh_index import RefreshResult, _matching_ref_namespaces
 from untaped_ansible.domain.identity import IdentityResolver
@@ -114,6 +115,8 @@ class RefreshGitSourceIndex:
         paths_fingerprint = _dependency_paths_fingerprint(paths)
         aliases_fingerprint = _aliases_fingerprint(self._aliases)
         checked_at = datetime.now(UTC)
+        pending_scans: list[RefScan] = []
+        pending_touches: list[RefScanTouch] = []
 
         for repo in repos:
             clone_url = _clone_url(repo, self._clone_protocol)
@@ -145,12 +148,14 @@ class RefreshGitSourceIndex:
                     and metadata.clone_protocol == self._clone_protocol
                     and metadata.clone_url == clone_url
                 ):
-                    self._index.touch_ref_scan(
-                        source_key,
-                        repo.full_name,
-                        ref.kind,
-                        ref.name,
-                        checked_at=checked_at,
+                    pending_touches.append(
+                        RefScanTouch(
+                            source_key=source_key,
+                            source_repo=repo.full_name,
+                            ref_kind=ref.kind,
+                            source_ref=ref.name,
+                            checked_at=checked_at,
+                        )
                     )
                     continue
                 edges, ignored = self._read_dependencies(
@@ -160,7 +165,7 @@ class RefreshGitSourceIndex:
                     paths=paths,
                 )
                 ignored_collections.update(ignored)
-                self._index.replace_ref_scan(
+                pending_scans.append(
                     RefScan(
                         source_key=source_key,
                         source_repo=repo.full_name,
@@ -178,8 +183,13 @@ class RefreshGitSourceIndex:
                     )
                 )
 
-        self._index.prune_source_refs(source_key, selected)
-        self._index.finalize_source_ref_scan(source_key, scanned_at=checked_at)
+        self._index.commit_source_ref_refresh(
+            source_key,
+            scans=tuple(pending_scans),
+            touches=tuple(pending_touches),
+            keep=selected,
+            scanned_at=checked_at,
+        )
         status = self._index.status(source_key)
         return RefreshResult(
             source_key=source_key,
