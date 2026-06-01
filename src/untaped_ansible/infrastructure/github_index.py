@@ -33,7 +33,7 @@ class GithubDependencyIndex:
         repo: str,
         ref: str | None,
         *,
-        scope: str | None,
+        source_key: str | None,
     ) -> list[IndexedDependency]:
         key = (repo, ref)
         if key not in self._cache:
@@ -45,12 +45,12 @@ class GithubDependencyIndex:
         repo: str,
         ref: str | None,
         *,
-        scope: str | None,
+        source_key: str | None,
     ) -> list[IndexedDependency]:
-        return self._wrapped.dependents(repo, ref, scope=scope)
+        return self._wrapped.dependents(repo, ref, source_key=source_key)
 
-    def is_stale(self, scope: str | None, *, max_age_seconds: int) -> bool:
-        return self._wrapped.is_stale(scope, max_age_seconds=max_age_seconds)
+    def is_stale(self, source_key: str | None, *, max_age_seconds: int) -> bool:
+        return self._wrapped.is_stale(source_key, max_age_seconds=max_age_seconds)
 
     def _live_dependencies(self, repo: str, ref: str | None) -> list[IndexedDependency]:
         owner, name = _split_repo(repo)

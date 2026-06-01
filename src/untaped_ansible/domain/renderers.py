@@ -27,10 +27,10 @@ def _render_tree(graph: DependencyGraph) -> str:
     deps = [nodes[edge.target_id].label for edge in graph.edges if edge.relation == "requires"]
     impacts = [nodes[edge.source_id].label for edge in graph.edges if edge.relation == "impacts"]
     if deps:
-        lines.append("+-- deps")
+        lines.append("+-- downstream")
         lines.extend(f"|   +-- {label}" for label in deps)
     if impacts:
-        lines.append("+-- impact")
+        lines.append("+-- upstream")
         lines.extend(f"    +-- {label}" for label in impacts)
     lines.extend(f"warning: {warning}" for warning in graph.warnings)
     return "\n".join(lines)

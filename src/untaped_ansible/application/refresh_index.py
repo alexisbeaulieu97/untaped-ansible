@@ -1,4 +1,4 @@
-"""Use case for refreshing a named dependency index scope from GitHub."""
+"""Use case for refreshing a dependency source index from GitHub."""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ from untaped_ansible.application.ports import (
 )
 from untaped_ansible.domain.identity import IdentityResolver
 from untaped_ansible.domain.parser import parse_dependency_file
-from untaped_ansible.settings import ScopeDefinition, normalize_team_refs
+from untaped_ansible.settings import SourceDefinition, normalize_team_refs
 
 
 class RefreshResult(BaseModel):
@@ -25,15 +25,15 @@ class RefreshResult(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    scope: str
+    source_key: str
     repos: int
     refs: int
     edges: int
     ignored_collections: tuple[str, ...] = ()
 
 
-class RefreshIndex:
-    """Scan GitHub dependency files and replace one scope in the index."""
+class RefreshSourceIndex:
+    """Scan GitHub dependency files and replace one source in the index."""
 
     def __init__(
         self,
@@ -48,16 +48,16 @@ class RefreshIndex:
         self._aliases = aliases
         self._default_dependency_paths = default_dependency_paths
 
-    def __call__(self, scope: ScopeDefinition) -> RefreshResult:
-        repos = self._expand_repos(scope)
+    def __call__(self, source: SourceDefinition, *, source_key: str) -> RefreshResult:
+        repos = self._expand_repos(source)
         dependencies: list[IndexedDependency] = []
         ignored_collections: set[str] = set()
         ref_count = 0
         for repo in repos:
             owner, name = repo.split("/", maxsplit=1)
-            for ref_name, sha in self._refs(owner, name, scope):
+            for ref_name, sha in self._refs(owner, name, source):
                 ref_count += 1
-                paths = scope.dependency_paths or self._default_dependency_paths
+                paths = source.dependency_paths or self._default_dependency_paths
                 tree_paths = self._tree_paths(owner, name, sha)
                 for path in paths:
                     if path not in tree_paths:
@@ -83,31 +83,33 @@ class RefreshIndex:
                             )
                         )
         scan = IndexScan(
-            scope=scope.name,
+            source_key=source_key,
             scanned_at=datetime.now(UTC),
+            repos=len(repos),
+            refs=ref_count,
             dependencies=tuple(dependencies),
         )
-        self._index.replace_scope_scan(scan)
+        self._index.replace_source_scan(scan)
         return RefreshResult(
-            scope=scope.name,
+            source_key=source_key,
             repos=len(repos),
             refs=ref_count,
             edges=len(dependencies),
             ignored_collections=tuple(sorted(ignored_collections)),
         )
 
-    def _expand_repos(self, scope: ScopeDefinition) -> list[str]:
-        repos = list(scope.repos)
-        for org in scope.orgs:
+    def _expand_repos(self, source: SourceDefinition) -> list[str]:
+        repos = list(source.repos)
+        for org in source.orgs:
             repos.extend(_repo_names(self._github.list_org_repos(org)))
-        for team in normalize_team_refs(scope.teams, scope.orgs):
+        for team in normalize_team_refs(source.teams, source.orgs):
             org, slug = _split_team(team)
             repos.extend(_repo_names(self._github.list_team_repos(org, slug)))
         return sorted(dict.fromkeys(repos))
 
-    def _refs(self, owner: str, repo: str, scope: ScopeDefinition) -> list[tuple[str, str]]:
+    def _refs(self, owner: str, repo: str, source: SourceDefinition) -> list[tuple[str, str]]:
         refs: list[tuple[str, str]] = []
-        for kind in scope.ref_kinds:
+        for kind in source.ref_kinds:
             for row in self._github.list_matching_refs(owner, repo, kind):
                 full_ref = _str(row.get("ref"))
                 sha = _object_sha(row.get("object"))
@@ -115,8 +117,8 @@ class RefreshIndex:
                 if full_ref is None or sha is None or not full_ref.startswith(prefix):
                     continue
                 name = full_ref.removeprefix(prefix)
-                if scope.ref_patterns and not any(
-                    fnmatch(name, pattern) for pattern in scope.ref_patterns
+                if source.ref_patterns and not any(
+                    fnmatch(name, pattern) for pattern in source.ref_patterns
                 ):
                     continue
                 refs.append((name, sha))

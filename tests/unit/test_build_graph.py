@@ -12,12 +12,12 @@ class StubIndex:
         self.stale = stale
 
     def dependencies(
-        self, repo: str, ref: str | None, *, scope: str | None
+        self, repo: str, ref: str | None, *, source_key: str | None
     ) -> list[IndexedDependency]:
         return [edge for edge in self.edges if edge.source_repo == repo and edge.source_ref == ref]
 
     def dependents(
-        self, repo: str, ref: str | None, *, scope: str | None
+        self, repo: str, ref: str | None, *, source_key: str | None
     ) -> list[IndexedDependency]:
         return [
             edge
@@ -25,7 +25,7 @@ class StubIndex:
             if edge.dependency_repo == repo and (ref is None or edge.dependency_version == ref)
         ]
 
-    def is_stale(self, scope: str | None, *, max_age_seconds: int) -> bool:
+    def is_stale(self, source_key: str | None, *, max_age_seconds: int) -> bool:
         return self.stale
 
 
@@ -61,7 +61,13 @@ def test_build_graph_includes_dependencies_impact_unresolved_and_stale_warning()
     )
 
     graph = BuildGraph(index)(
-        GraphRequest(repo="acme/base", ref="v1", scope="prod", direction="both", depth=1)
+        GraphRequest(
+            repo="acme/base",
+            ref="v1",
+            source_key="source:prod",
+            direction="both",
+            depth=1,
+        )
     )
 
     assert [node.label for node in graph.nodes] == [
@@ -76,7 +82,7 @@ def test_build_graph_includes_dependencies_impact_unresolved_and_stale_warning()
         ("acme/site@release/1", "acme/base@v1", "impacts"),
     ]
     assert graph.warnings == (
-        "scope index is stale: prod",
+        "source data is stale; refresh it before relying on upstream impact",
         "unresolved dependency common from acme/base@v1 in meta/main.yml",
     )
 

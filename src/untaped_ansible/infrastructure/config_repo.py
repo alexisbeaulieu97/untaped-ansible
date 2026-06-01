@@ -1,9 +1,10 @@
-"""Config-file repositories for Ansible aliases and scopes."""
+"""Config-file repositories for Ansible aliases and sources."""
 
 from __future__ import annotations
 
 from typing import Any
 
+from pydantic import ValidationError
 from untaped.config_file import (
     get_at_path,
     mutate_config,
@@ -11,11 +12,12 @@ from untaped.config_file import (
     set_at_path,
     unset_at_path,
 )
+from untaped.errors import ConfigError, first_validation_error
 
-from untaped_ansible.settings import ScopeDefinition
+from untaped_ansible.settings import SourceDefinition
 
 _ALIASES_PATH: tuple[str, ...] = ("ansible", "aliases")
-_SCOPES_PATH: tuple[str, ...] = ("ansible", "scopes")
+_SOURCES_PATH: tuple[str, ...] = ("ansible", "sources")
 
 
 class AliasRepository:
@@ -54,23 +56,23 @@ class AliasRepository:
         return removed
 
 
-class ScopeRepository:
-    """Read/write named repository scopes in ``~/.untaped/config.yml``."""
+class SourceRepository:
+    """Read/write named repository sources in ``~/.untaped/config.yml``."""
 
-    def entries(self) -> list[ScopeDefinition]:
-        return [_scope_from_raw(raw) for raw in _scope_rows(read_config_dict())]
+    def entries(self) -> list[SourceDefinition]:
+        return [_source_from_raw(raw) for raw in _source_rows(read_config_dict())]
 
-    def get(self, name: str) -> ScopeDefinition | None:
-        for scope in self.entries():
-            if scope.name == name:
-                return scope
+    def get(self, name: str) -> SourceDefinition | None:
+        for source in self.entries():
+            if source.name == name:
+                return source
         return None
 
-    def upsert(self, scope: ScopeDefinition) -> None:
+    def upsert(self, source: SourceDefinition) -> None:
         def _apply(data: dict[str, Any]) -> None:
-            scopes = [row for row in _scope_rows(data) if row.get("name") != scope.name]
-            scopes.append(scope.model_dump())
-            set_at_path(data, _SCOPES_PATH, scopes)
+            sources = [row for row in _source_rows(data) if row.get("name") != source.name]
+            sources.append(source.model_dump())
+            set_at_path(data, _SOURCES_PATH, sources)
 
         mutate_config(_apply)
 
@@ -79,15 +81,15 @@ class ScopeRepository:
 
         def _apply(data: dict[str, Any]) -> None:
             nonlocal removed
-            scopes = _scope_rows(data)
-            new_scopes = [row for row in scopes if row.get("name") != name]
-            removed = len(new_scopes) != len(scopes)
+            sources = _source_rows(data)
+            new_sources = [row for row in sources if row.get("name") != name]
+            removed = len(new_sources) != len(sources)
             if not removed:
                 return
-            if new_scopes:
-                set_at_path(data, _SCOPES_PATH, new_scopes)
+            if new_sources:
+                set_at_path(data, _SOURCES_PATH, new_sources)
             else:
-                unset_at_path(data, _SCOPES_PATH)
+                unset_at_path(data, _SOURCES_PATH)
 
         mutate_config(_apply)
         return removed
@@ -100,12 +102,16 @@ def _aliases(data: dict[str, Any]) -> dict[str, str]:
     return {str(alias): str(repo) for alias, repo in raw.items()}
 
 
-def _scope_rows(data: dict[str, Any]) -> list[dict[str, Any]]:
-    raw = get_at_path(data, _SCOPES_PATH)
+def _source_rows(data: dict[str, Any]) -> list[dict[str, Any]]:
+    raw = get_at_path(data, _SOURCES_PATH)
     if not isinstance(raw, list):
         return []
     return [row for row in raw if isinstance(row, dict)]
 
 
-def _scope_from_raw(raw: dict[str, Any]) -> ScopeDefinition:
-    return ScopeDefinition.model_validate(raw)
+def _source_from_raw(raw: dict[str, Any]) -> SourceDefinition:
+    try:
+        return SourceDefinition.model_validate(raw)
+    except ValidationError as exc:
+        name = raw.get("name", "<unknown>")
+        raise ConfigError(f"invalid source {name!r}: {first_validation_error(exc)}") from exc

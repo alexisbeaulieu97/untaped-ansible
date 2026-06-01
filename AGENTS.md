@@ -8,7 +8,7 @@ workflow, update this file in the same commit.
 
 `untaped-ansible` is an `untaped` plugin. It owns the `untaped ansible`
 command group for Ansible role/playbook dependency graphing, reverse-impact
-analysis, and local dependency indexing. `untaped-github` owns GitHub API
+analysis, and local dependency cache data. `untaped-github` owns GitHub API
 access; `untaped` core owns the binary, plugin discovery, config/profile
 resolution, output helpers, HTTP/TLS primitives, and shared errors.
 
@@ -49,7 +49,7 @@ src/untaped_ansible/
 ├── cli/                  # Typer commands; composition root
 ├── application/          # use cases and ports
 ├── domain/               # pure models, parser, graph, renderers
-└── infrastructure/       # SQLite index, local filesystem/git adapters
+└── infrastructure/       # SQLite cache, local filesystem/git adapters
 ```
 
 ## Domain Contracts
@@ -62,15 +62,29 @@ src/untaped_ansible/
 - The domain emits a graph model first; tree, Mermaid, and JSON are renderers
   over that model.
 
-## Indexing
+## Cached Source Data
 
-The SQLite index is plugin-owned state. It stores named scan scopes, repo/ref
-scan metadata, resolved SHAs, dependency files, graph edges, unresolved
-declarations, and timestamps. SHA is authoritative. Branch and tag names are
-resolved during index refresh and cached with freshness metadata.
+The SQLite cache is plugin-owned state. It stores named and fingerprinted
+source scans, repo/ref scan metadata, resolved SHAs, dependency files, graph
+edges, unresolved declarations, and timestamps. SHA is authoritative. Branch
+and tag names are resolved during source refresh and cached with freshness
+metadata.
 
-`graph` warns on stale indexes and does not silently refresh unless the user
-explicitly requests it.
+`graph` is the primary user command. Downstream dependency reads do not require
+a source or cached data. Upstream impact requires a saved or inline source with
+refreshed data: `both` degrades to downstream output with an actionable warning
+when upstream data is unavailable, while `upstream` fails early with the same
+guidance. `graph` warns on stale source data and refreshes only when the user
+passes `--refresh`.
+
+Saved sources are configured under `ansible.sources`. Inline graph selectors
+(`--org`, `--team`, `--repo`, `--path`, `--ref-kind`, `--ref-pattern`) are
+cached under deterministic internal source keys so repeated commands can reuse
+the same scan. Do not reintroduce user-facing `scope`, `index`, or `--direction`
+workflow concepts.
+
+Saving a source clears cached source data only when the saved definition
+changes. Re-saving an identical source must preserve refreshed cache data.
 
 ## Development Workflow
 

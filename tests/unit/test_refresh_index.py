@@ -1,10 +1,10 @@
-"""Tests for refreshing dependency index scopes from GitHub."""
+"""Tests for refreshing dependency index sources from GitHub."""
 
 from __future__ import annotations
 
-from untaped_ansible.application.refresh_index import RefreshIndex
+from untaped_ansible.application.refresh_index import RefreshSourceIndex
 from untaped_ansible.infrastructure import IndexScan
-from untaped_ansible.settings import ScopeDefinition
+from untaped_ansible.settings import SourceDefinition
 
 
 class FakeGitHub:
@@ -56,13 +56,13 @@ class CapturingIndex:
     def __init__(self) -> None:
         self.scan: IndexScan | None = None
 
-    def replace_scope_scan(self, scan: IndexScan) -> None:
+    def replace_source_scan(self, scan: IndexScan) -> None:
         self.scan = scan
 
 
-def test_refresh_index_expands_scope_refs_parses_dependencies_and_aliases() -> None:
+def test_refresh_index_expands_source_refs_parses_dependencies_and_aliases() -> None:
     index = CapturingIndex()
-    scope = ScopeDefinition(
+    source = SourceDefinition(
         name="prod",
         orgs=["acme"],
         teams=["acme/platform"],
@@ -71,12 +71,12 @@ def test_refresh_index_expands_scope_refs_parses_dependencies_and_aliases() -> N
         ref_patterns=["main"],
     )
 
-    result = RefreshIndex(
+    result = RefreshSourceIndex(
         github=FakeGitHub(),
         index=index,
         aliases={"common": "acme/common"},
         default_dependency_paths=["roles/requirements.yml"],
-    )(scope)
+    )(source, source_key="source:prod")
 
     assert result.repos == 3
     assert result.refs == 3
@@ -99,9 +99,9 @@ def test_refresh_index_expands_scope_refs_parses_dependencies_and_aliases() -> N
     assert result.ignored_collections == ("community.general",)
 
 
-def test_refresh_index_expands_bare_team_slug_with_single_scope_org() -> None:
+def test_refresh_index_expands_bare_team_slug_with_single_source_org() -> None:
     index = CapturingIndex()
-    scope = ScopeDefinition(
+    source = SourceDefinition(
         name="prod",
         orgs=["acme"],
         teams=["platform"],
@@ -109,12 +109,12 @@ def test_refresh_index_expands_bare_team_slug_with_single_scope_org() -> None:
         ref_patterns=["main"],
     )
 
-    result = RefreshIndex(
+    result = RefreshSourceIndex(
         github=FakeGitHub(),
         index=index,
         aliases={"common": "acme/common"},
         default_dependency_paths=["roles/requirements.yml"],
-    )(scope)
+    )(source, source_key="source:prod")
 
     assert result.repos == 2
     assert index.scan is not None

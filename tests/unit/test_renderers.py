@@ -22,7 +22,7 @@ def _graph() -> DependencyGraph:
             GraphEdge(source_id="target", target_id="missing", relation="requires"),
             GraphEdge(source_id="site", target_id="target", relation="impacts"),
         ),
-        warnings=("scope index is stale",),
+        warnings=("source data is stale",),
     )
 
 
@@ -30,12 +30,12 @@ def test_tree_renderer_groups_dependencies_and_impact() -> None:
     rendered = render_graph(_graph(), "tree")
 
     assert "acme/base@v1.0.0" in rendered
-    assert "+-- deps" in rendered
+    assert "+-- downstream" in rendered
     assert "|   +-- acme/users@main" in rendered
     assert "|   +-- unresolved: common" in rendered
-    assert "+-- impact" in rendered
+    assert "+-- upstream" in rendered
     assert "    +-- acme/site@release/1" in rendered
-    assert "warning: scope index is stale" in rendered
+    assert "warning: source data is stale" in rendered
 
 
 def test_mermaid_renderer_emits_directional_edges() -> None:
@@ -46,7 +46,7 @@ def test_mermaid_renderer_emits_directional_edges() -> None:
     assert "target --> users" in rendered
     assert "site --> target" in rendered
     assert "target --> missing" in rendered
-    assert "%% warning: scope index is stale" in rendered
+    assert "%% warning: source data is stale" in rendered
 
 
 def test_json_renderer_emits_structured_graph() -> None:
@@ -55,4 +55,4 @@ def test_json_renderer_emits_structured_graph() -> None:
     assert data["target_id"] == "target"
     assert data["nodes"][0]["repo"] == "acme/base"
     assert data["edges"][0]["relation"] == "requires"
-    assert data["warnings"] == ["scope index is stale"]
+    assert data["warnings"] == ["source data is stale"]

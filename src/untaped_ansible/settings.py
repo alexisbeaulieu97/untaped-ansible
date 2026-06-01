@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Self
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 DEFAULT_DEPENDENCY_PATHS = (
     "roles/requirements.yml",
@@ -15,18 +16,37 @@ DEFAULT_DEPENDENCY_PATHS = (
     "meta/requirements.yaml",
     "meta/main.yml",
 )
+DEFAULT_REF_KINDS = ("heads", "tags")
 
 
-class ScopeDefinition(BaseModel):
-    """Named repository/ref scope for index refresh and impact queries."""
+class SourceDefinition(BaseModel):
+    """Named GitHub search boundary for index refresh and impact queries."""
 
     name: str
     orgs: list[str] = Field(default_factory=list)
     teams: list[str] = Field(default_factory=list)
     repos: list[str] = Field(default_factory=list)
     dependency_paths: list[str] = Field(default_factory=list)
-    ref_kinds: list[str] = Field(default_factory=lambda: ["heads", "tags"])
+    ref_kinds: list[str] = Field(default_factory=lambda: list(DEFAULT_REF_KINDS))
     ref_patterns: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _validate_source(self) -> Self:
+        self.orgs = _dedupe_sorted(self.orgs)
+        self.teams = normalize_team_refs(_dedupe_sorted(self.teams), self.orgs)
+        self.repos = _dedupe_sorted(self.repos)
+        self.dependency_paths = _dedupe_sorted(self.dependency_paths)
+        self.ref_kinds = _dedupe_sorted(self.ref_kinds)
+        self.ref_patterns = _dedupe_sorted(self.ref_patterns)
+        if not any((self.orgs, self.teams, self.repos)):
+            raise ValueError("source requires --org, --team, or --repo")
+        for repo in self.repos:
+            if not _is_repo_name(repo):
+                raise ValueError(f"repo must be owner/name: {repo!r}")
+        invalid_ref_kinds = sorted(set(self.ref_kinds) - set(DEFAULT_REF_KINDS))
+        if invalid_ref_kinds:
+            raise ValueError("ref-kind must be heads or tags")
+        return self
 
 
 class AnsibleSettings(BaseModel):
@@ -40,12 +60,12 @@ class AnsibleSettings(BaseModel):
 class AnsibleState(BaseModel):
     """Top-level Ansible plugin app state."""
 
-    scopes: list[ScopeDefinition] = Field(default_factory=list)
+    sources: list[SourceDefinition] = Field(default_factory=list)
     aliases: dict[str, str] = Field(default_factory=dict)
 
 
 def normalize_team_refs(teams: list[str], orgs: list[str]) -> list[str]:
-    """Expand bare team slugs when the scope has one unambiguous org."""
+    """Expand bare team slugs when the source has one unambiguous org."""
     normalized: list[str] = []
     for team in teams:
         if "/" in team:
@@ -54,5 +74,14 @@ def normalize_team_refs(teams: list[str], orgs: list[str]) -> list[str]:
         if len(orgs) == 1:
             normalized.append(f"{orgs[0]}/{team}")
             continue
-        raise ValueError(f"team {team!r} must be ORG/SLUG unless the scope has exactly one org")
+        raise ValueError(f"team {team!r} must be ORG/SLUG unless the source has exactly one org")
     return normalized
+
+
+def _dedupe_sorted(values: list[str]) -> list[str]:
+    return sorted(dict.fromkeys(values))
+
+
+def _is_repo_name(value: str) -> bool:
+    owner, separator, repo = value.partition("/")
+    return bool(owner and separator and repo and "/" not in repo)
