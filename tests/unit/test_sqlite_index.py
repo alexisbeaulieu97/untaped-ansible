@@ -218,12 +218,12 @@ def test_replace_ref_scan_tracks_metadata_and_replaces_only_that_ref(tmp_path) -
     )
 
     metadata = index.ref_scan("source:prod", "acme/site", "heads", "main")
-    status = index.status("source:prod")
 
     assert metadata is not None
     assert metadata.source_sha == "sha-main-2"
     assert metadata.backend == "git"
     assert metadata.checked_at == checked_at
+    assert metadata.aliases_fingerprint == ""
     dependency_repos = [
         edge.dependency_repo
         for edge in index.dependencies("acme/site", None, source_key="source:prod")
@@ -232,6 +232,11 @@ def test_replace_ref_scan_tracks_metadata_and_replaces_only_that_ref(tmp_path) -
         "acme/release-base",
         "acme/new-base",
     ]
+    assert index.status("source:prod") is None
+
+    index.finalize_source_ref_scan("source:prod", scanned_at=checked_at)
+    status = index.status("source:prod")
+
     assert status is not None
     assert status.repos == 1
     assert status.refs == 2
@@ -275,9 +280,13 @@ def test_empty_ref_scan_is_retained_and_pruned_by_selected_refs(tmp_path) -> Non
         )
     )
 
+    assert index.status("source:prod") is None
+
+    index.finalize_source_ref_scan("source:prod", scanned_at=now)
     assert index.status("source:prod").refs == 2  # type: ignore[union-attr]
 
     index.prune_source_refs("source:prod", {("acme/empty", "heads", "main")})
+    index.finalize_source_ref_scan("source:prod", scanned_at=now)
 
     assert index.ref_scan("source:prod", "acme/empty", "heads", "main") is not None
     assert index.ref_scan("source:prod", "acme/old", "heads", "main") is None

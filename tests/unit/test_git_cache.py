@@ -68,3 +68,45 @@ def test_fetch_refs_propagates_missing_remote_ref(monkeypatch, tmp_path: Path) -
             blob_filter=True,
             auth_header=None,
         )
+
+
+def test_read_file_returns_none_only_for_missing_paths(monkeypatch, tmp_path: Path) -> None:
+    responses = [
+        subprocess.CompletedProcess(
+            ["git"],
+            128,
+            stdout="",
+            stderr="fatal: path 'roles/requirements.yml' does not exist in 'abc123'",
+        ),
+        subprocess.CompletedProcess(
+            ["git"],
+            128,
+            stdout="",
+            stderr="fatal: unable to access 'https://github.com/acme/private.git/': denied",
+        ),
+    ]
+
+    def fake_run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        return responses.pop(0)
+
+    monkeypatch.setattr("shutil.which", lambda _: "/usr/bin/git")
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    cache = GitRepositoryCache()
+
+    assert (
+        cache.read_file(
+            tmp_path,
+            "abc123",
+            "roles/requirements.yml",
+            auth_header=None,
+        )
+        is None
+    )
+    with pytest.raises(GitCacheError, match="unable to access"):
+        cache.read_file(
+            tmp_path,
+            "abc123",
+            "roles/requirements.yml",
+            auth_header=None,
+        )

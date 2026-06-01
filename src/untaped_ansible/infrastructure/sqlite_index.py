@@ -89,7 +89,7 @@ class SqliteDependencyIndex:
                 """
                 select source_key, source_repo, ref_kind, source_ref, source_sha, backend,
                        clone_url, clone_protocol, dependency_paths_fingerprint,
-                       checked_at, indexed_at, last_error
+                       aliases_fingerprint, checked_at, indexed_at, last_error
                 from source_ref_scans
                 where source_key = ? and source_repo = ? and ref_kind = ? and source_ref = ?
                 """,
@@ -139,14 +139,15 @@ class SqliteDependencyIndex:
                 insert into source_ref_scans(
                     source_key, source_repo, ref_kind, source_ref, source_sha, backend,
                     clone_url, clone_protocol, dependency_paths_fingerprint,
-                    checked_at, indexed_at, last_error
-                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    aliases_fingerprint, checked_at, indexed_at, last_error
+                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 on conflict(source_key, source_repo, ref_kind, source_ref) do update set
                     source_sha = excluded.source_sha,
                     backend = excluded.backend,
                     clone_url = excluded.clone_url,
                     clone_protocol = excluded.clone_protocol,
                     dependency_paths_fingerprint = excluded.dependency_paths_fingerprint,
+                    aliases_fingerprint = excluded.aliases_fingerprint,
                     checked_at = excluded.checked_at,
                     indexed_at = excluded.indexed_at,
                     last_error = excluded.last_error
@@ -161,12 +162,12 @@ class SqliteDependencyIndex:
                     scan.clone_url,
                     scan.clone_protocol,
                     scan.dependency_paths_fingerprint,
+                    scan.aliases_fingerprint,
                     _dump_dt(scan.checked_at),
                     _dump_dt(scan.indexed_at),
                     scan.last_error,
                 ),
             )
-            _refresh_source_run_from_ref_scans(db, scan.source_key)
 
     def touch_ref_scan(
         self,
@@ -187,7 +188,6 @@ class SqliteDependencyIndex:
                 """,
                 (_dump_dt(checked_at), source_key, source_repo, ref_kind, source_ref),
             )
-            _refresh_source_run_from_ref_scans(db, source_key)
 
     def prune_source_refs(self, source_key: str, keep: set[tuple[str, str, str]]) -> None:
         with self._db() as db:
@@ -226,7 +226,11 @@ class SqliteDependencyIndex:
                     """,
                     (source_key, key[0], key[1], key[2]),
                 )
-            _refresh_source_run_from_ref_scans(db, source_key)
+
+    def finalize_source_ref_scan(self, source_key: str, *, scanned_at: datetime) -> None:
+        with self._db() as db:
+            _ensure_schema(db)
+            _refresh_source_run_from_ref_scans(db, source_key, scanned_at=scanned_at)
 
     def dependencies(
         self,
@@ -367,6 +371,7 @@ def _ensure_schema(db: sqlite3.Connection) -> None:
             clone_url text,
             clone_protocol text,
             dependency_paths_fingerprint text not null,
+            aliases_fingerprint text not null default '',
             checked_at text not null,
             indexed_at text not null,
             last_error text,
@@ -386,6 +391,7 @@ def _ensure_schema(db: sqlite3.Connection) -> None:
     _ensure_column(db, "source_runs", "edges", "integer not null default 0")
     _ensure_column(db, "dependency_edges", "source_sha", "text")
     _ensure_column(db, "dependency_edges", "source_ref_kind", "text")
+    _ensure_column(db, "source_ref_scans", "aliases_fingerprint", "text not null default ''")
 
 
 def _drop_legacy_scope_schema(db: sqlite3.Connection) -> None:
@@ -424,17 +430,22 @@ def _ref_scan_from_row(row: sqlite3.Row) -> RefScanMetadata:
         clone_url=row["clone_url"],
         clone_protocol=row["clone_protocol"],
         dependency_paths_fingerprint=row["dependency_paths_fingerprint"],
+        aliases_fingerprint=row["aliases_fingerprint"],
         checked_at=_load_dt(row["checked_at"]),
         indexed_at=_load_dt(row["indexed_at"]),
         last_error=row["last_error"],
     )
 
 
-def _refresh_source_run_from_ref_scans(db: sqlite3.Connection, source_key: str) -> None:
+def _refresh_source_run_from_ref_scans(
+    db: sqlite3.Connection,
+    source_key: str,
+    *,
+    scanned_at: datetime,
+) -> None:
     row = db.execute(
         """
         select
-            max(checked_at) as scanned_at,
             count(distinct source_repo) as repos,
             count(*) as refs
         from source_ref_scans
@@ -462,7 +473,7 @@ def _refresh_source_run_from_ref_scans(db: sqlite3.Connection, source_key: str) 
         """,
         (
             source_key,
-            row["scanned_at"],
+            _dump_dt(scanned_at),
             int(row["repos"] or 0),
             refs,
             int(edge_row["edges"] or 0),

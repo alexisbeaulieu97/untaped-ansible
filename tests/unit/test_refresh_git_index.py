@@ -8,6 +8,7 @@ import pytest
 
 from untaped_ansible.application.ports import GitRef
 from untaped_ansible.application.refresh_git_index import RefreshGitSourceIndex
+from untaped_ansible.infrastructure.git_cache import GitCacheError
 from untaped_ansible.infrastructure.sqlite_index import SqliteDependencyIndex
 from untaped_ansible.settings import SourceDefinition
 
@@ -63,6 +64,7 @@ class FakeGitCache:
         self.files: dict[tuple[str, str, str], str] = {}
         self.fetches: list[tuple[str, tuple[str, ...], int, bool, str | None]] = []
         self.reads: list[tuple[str, str, str, str | None]] = []
+        self.fail_fetches: set[str] = set()
 
     def ensure_bare(
         self,
@@ -82,6 +84,8 @@ class FakeGitCache:
         blob_filter: bool,
         auth_header: str | None,
     ) -> None:
+        if bare_path.name in self.fail_fetches:
+            raise GitCacheError(f"git fetch failed for {bare_path.name}")
         self.fetches.append((bare_path.name, tuple(refspecs), depth, blob_filter, auth_header))
 
     def list_refs(self, bare_path: Path, kind: str) -> list[GitRef]:
@@ -172,6 +176,81 @@ def test_git_refresh_reuses_unchanged_ref_metadata_without_rereading_files(tmp_p
     assert git.reads == [("site", "sha-main", "roles/requirements.yml", None)]
     assert index.dependents("acme/base", "v1", source_key="source:prod")
     assert not index.dependents("acme/changed", None, source_key="source:prod")
+
+
+def test_git_refresh_reindexes_unchanged_ref_when_aliases_change(tmp_path: Path) -> None:
+    github = FakeGitHub()
+    git = FakeGitCache()
+    git.refs[("site", "heads")] = [GitRef(kind="heads", name="main", sha="sha-main")]
+    git.files[("site", "sha-main", "roles/requirements.yml")] = "- common\n"
+    index = SqliteDependencyIndex(tmp_path / "index.sqlite3")
+
+    RefreshGitSourceIndex(
+        github=github,
+        git=git,
+        index=index,
+        aliases={},
+        default_dependency_paths=["roles/requirements.yml"],
+        repo_cache_path=tmp_path / "repos",
+        clone_protocol="https",
+        fetch_depth=1,
+        blob_filter=True,
+        auth_header=None,
+    )(SourceDefinition(name="prod", orgs=["acme"]), source_key="source:prod")
+    RefreshGitSourceIndex(
+        github=github,
+        git=git,
+        index=index,
+        aliases={"common": "acme/common"},
+        default_dependency_paths=["roles/requirements.yml"],
+        repo_cache_path=tmp_path / "repos",
+        clone_protocol="https",
+        fetch_depth=1,
+        blob_filter=True,
+        auth_header=None,
+    )(SourceDefinition(name="prod", orgs=["acme"]), source_key="source:prod")
+
+    assert git.reads == [
+        ("site", "sha-main", "roles/requirements.yml", None),
+        ("site", "sha-main", "roles/requirements.yml", None),
+    ]
+    assert index.dependents("acme/common", None, source_key="source:prod")
+    assert not index.dependencies("acme/site", "main", source_key="source:prod")[0].unresolved
+
+
+def test_failed_git_refresh_does_not_advance_source_status(tmp_path: Path) -> None:
+    github = FakeGitHub()
+    git = FakeGitCache()
+    git.refs[("a", "heads")] = [GitRef(kind="heads", name="main", sha="sha-a")]
+    git.refs[("b", "heads")] = [GitRef(kind="heads", name="main", sha="sha-b")]
+    git.files[("a", "sha-a", "roles/requirements.yml")] = "- src: https://github.com/acme/base\n"
+    git.files[("b", "sha-b", "roles/requirements.yml")] = "- src: https://github.com/acme/base\n"
+    index = SqliteDependencyIndex(tmp_path / "index.sqlite3")
+    refresh = RefreshGitSourceIndex(
+        github=github,
+        git=git,
+        index=index,
+        aliases={},
+        default_dependency_paths=["roles/requirements.yml"],
+        repo_cache_path=tmp_path / "repos",
+        clone_protocol="https",
+        fetch_depth=1,
+        blob_filter=True,
+        auth_header=None,
+    )
+    source = SourceDefinition(name="prod", repos=["acme/a", "acme/b"])
+
+    refresh(source, source_key="source:prod")
+    previous = index.status("source:prod")
+    assert previous is not None
+    git.fail_fetches.add("b")
+
+    with pytest.raises(GitCacheError, match="git fetch failed for b"):
+        refresh(source, source_key="source:prod")
+
+    current = index.status("source:prod")
+    assert current is not None
+    assert current.scanned_at == previous.scanned_at
 
 
 def test_git_refresh_reindexes_moved_tags_and_prunes_unselected_refs(tmp_path: Path) -> None:

@@ -48,6 +48,7 @@ class RefScanMetadata(BaseModel):
     clone_url: str | None = None
     clone_protocol: str | None = None
     dependency_paths_fingerprint: str
+    aliases_fingerprint: str = ""
     checked_at: datetime
     indexed_at: datetime
     last_error: str | None = None
@@ -141,6 +142,8 @@ class IncrementalDependencyIndexWriter(DependencyIndexWriter, Protocol):
         source_key: str,
         keep: set[tuple[str, str, str]],
     ) -> None: ...
+
+    def finalize_source_ref_scan(self, source_key: str, *, scanned_at: datetime) -> None: ...
 
 
 class GitHubDependencyReader(Protocol):

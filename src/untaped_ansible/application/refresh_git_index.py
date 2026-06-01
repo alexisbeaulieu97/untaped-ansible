@@ -112,6 +112,7 @@ class RefreshGitSourceIndex:
         ignored_collections: set[str] = set()
         paths = source.dependency_paths or self._default_dependency_paths
         paths_fingerprint = _dependency_paths_fingerprint(paths)
+        aliases_fingerprint = _aliases_fingerprint(self._aliases)
         checked_at = datetime.now(UTC)
 
         for repo in repos:
@@ -140,6 +141,7 @@ class RefreshGitSourceIndex:
                     and metadata.source_sha == ref.sha
                     and metadata.backend == "git"
                     and metadata.dependency_paths_fingerprint == paths_fingerprint
+                    and metadata.aliases_fingerprint == aliases_fingerprint
                     and metadata.clone_protocol == self._clone_protocol
                     and metadata.clone_url == clone_url
                 ):
@@ -169,6 +171,7 @@ class RefreshGitSourceIndex:
                         clone_url=clone_url,
                         clone_protocol=self._clone_protocol,
                         dependency_paths_fingerprint=paths_fingerprint,
+                        aliases_fingerprint=aliases_fingerprint,
                         checked_at=checked_at,
                         indexed_at=checked_at,
                         dependencies=tuple(edges),
@@ -176,6 +179,7 @@ class RefreshGitSourceIndex:
                 )
 
         self._index.prune_source_refs(source_key, selected)
+        self._index.finalize_source_ref_scan(source_key, scanned_at=checked_at)
         status = self._index.status(source_key)
         return RefreshResult(
             source_key=source_key,
@@ -300,6 +304,11 @@ def _clone_url(repo: _RepoCandidate, clone_protocol: str) -> str:
 
 def _dependency_paths_fingerprint(paths: list[str]) -> str:
     payload = json.dumps(paths, separators=(",", ":")).encode()
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _aliases_fingerprint(aliases: dict[str, str]) -> str:
+    payload = json.dumps(aliases, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(payload).hexdigest()
 
 

@@ -108,8 +108,10 @@ class GitRepositoryCache:
                 capture=True,
                 auth_header=auth_header,
             )
-        except GitCacheError:
-            return None
+        except GitCacheError as exc:
+            if _is_missing_path_error(str(exc)):
+                return None
+            raise
 
     def _run(
         self,
@@ -214,3 +216,7 @@ def _redact(value: str, secret: str | None) -> str:
     if secret is None:
         return value
     return value.replace(secret, "<redacted>")
+
+
+def _is_missing_path_error(message: str) -> bool:
+    return "does not exist in" in message or "exists on disk, but not in" in message
