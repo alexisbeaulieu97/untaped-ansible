@@ -169,7 +169,7 @@ def _matching_ref_namespaces(kind: str, patterns: list[str]) -> list[str]:
         return [kind]
     namespaces: list[str] = []
     for pattern in patterns:
-        literal_prefix = _literal_ref_prefix(pattern)
+        literal_prefix = _safe_literal_ref_prefix(pattern)
         namespace = kind if literal_prefix == "" else f"{kind}/{literal_prefix}"
         if namespace == kind:
             return [kind]
@@ -178,6 +178,19 @@ def _matching_ref_namespaces(kind: str, patterns: list[str]) -> list[str]:
         namespaces = [existing for existing in namespaces if not existing.startswith(namespace)]
         namespaces.append(namespace)
     return namespaces
+
+
+def _safe_literal_ref_prefix(pattern: str) -> str:
+    if not _has_wildcard(pattern):
+        return pattern
+    prefix = _literal_ref_prefix(pattern)
+    if "/" not in prefix:
+        return ""
+    return f"{prefix.rsplit('/', maxsplit=1)[0]}/"
+
+
+def _has_wildcard(pattern: str) -> bool:
+    return any(char in pattern for char in "*?[")
 
 
 def _literal_ref_prefix(pattern: str) -> str:

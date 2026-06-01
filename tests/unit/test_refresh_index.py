@@ -201,20 +201,45 @@ class PatternGitHub:
         return "- src: https://github.com/acme/base\n"
 
 
-def test_refresh_index_narrows_pattern_ref_calls_and_filters_matches() -> None:
+def test_refresh_index_narrows_exact_and_slash_prefix_pattern_ref_calls() -> None:
     index = CapturingIndex()
     github = PatternGitHub(
         {
             "heads/main": ["main", "main-backup"],
             "heads/release/": ["release/2026.01"],
-            "heads/v": ["v1"],
         }
     )
     source = SourceDefinition(
         name="prod",
         repos=["acme/site"],
         ref_kinds=["heads"],
-        ref_patterns=["main", "release/*", "v*"],
+        ref_patterns=["main", "release/*"],
+    )
+
+    result = RefreshSourceIndex(
+        github=github,
+        index=index,
+        aliases={},
+        default_dependency_paths=["roles/requirements.yml"],
+    )(source, source_key="source:prod")
+
+    assert result.refs == 2
+    assert github.ref_calls == ["heads/main", "heads/release/"]
+    assert index.scan is not None
+    assert [edge.source_ref for edge in index.scan.dependencies] == [
+        "main",
+        "release/2026.01",
+    ]
+
+
+def test_refresh_index_uses_whole_ref_kind_for_ambiguous_wildcard_prefix() -> None:
+    index = CapturingIndex()
+    github = PatternGitHub({"heads": ["main", "v", "v1", "v2"]})
+    source = SourceDefinition(
+        name="prod",
+        repos=["acme/site"],
+        ref_kinds=["heads"],
+        ref_patterns=["v*"],
     )
 
     result = RefreshSourceIndex(
@@ -225,13 +250,9 @@ def test_refresh_index_narrows_pattern_ref_calls_and_filters_matches() -> None:
     )(source, source_key="source:prod")
 
     assert result.refs == 3
-    assert github.ref_calls == ["heads/main", "heads/release/", "heads/v"]
+    assert github.ref_calls == ["heads"]
     assert index.scan is not None
-    assert [edge.source_ref for edge in index.scan.dependencies] == [
-        "main",
-        "release/2026.01",
-        "v1",
-    ]
+    assert [edge.source_ref for edge in index.scan.dependencies] == ["v", "v1", "v2"]
 
 
 def test_refresh_index_wildcard_pattern_scans_whole_selected_ref_kind_once() -> None:
@@ -278,7 +299,7 @@ def test_refresh_index_wildcard_pattern_dedupes_narrower_ref_calls() -> None:
 
 def test_refresh_index_keeps_explicit_tag_scans_available() -> None:
     index = CapturingIndex()
-    github = PatternGitHub({"tags/v": ["v1", "v2"]})
+    github = PatternGitHub({"tags": ["main", "v1", "v2"]})
     source = SourceDefinition(
         name="prod",
         repos=["acme/site"],
@@ -294,6 +315,6 @@ def test_refresh_index_keeps_explicit_tag_scans_available() -> None:
     )(source, source_key="source:prod")
 
     assert result.refs == 2
-    assert github.ref_calls == ["tags/v"]
+    assert github.ref_calls == ["tags"]
     assert index.scan is not None
     assert [edge.source_ref for edge in index.scan.dependencies] == ["v1", "v2"]
