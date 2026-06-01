@@ -16,21 +16,25 @@ def test_default_dependency_paths_include_yaml_requirements_variants() -> None:
     assert "meta/requirements.yaml" in DEFAULT_DEPENDENCY_PATHS
 
 
-def test_source_definition_defaults_to_branch_scans_only() -> None:
+def test_source_definition_defaults_to_no_explicit_ref_filters() -> None:
     source = SourceDefinition(name="prod", repos=["acme/site"])
 
-    assert source.ref_kinds == ["heads"]
+    assert source.ref_kinds == []
+    assert source.ref_patterns == []
 
 
-def test_source_definition_requires_explicit_tag_ref_pattern() -> None:
-    with pytest.raises(ValidationError, match="tag scans require --ref-pattern"):
-        SourceDefinition(name="prod", repos=["acme/site"], ref_kinds=["tags"])
+def test_source_definition_allows_tag_scans_without_ref_pattern() -> None:
+    source = SourceDefinition(name="prod", repos=["acme/site"], ref_kinds=["tags"])
+
+    assert source.ref_kinds == ["tags"]
+    assert source.ref_patterns == []
 
 
 def test_ansible_settings_default_to_git_backed_cache() -> None:
     settings = AnsibleSettings()
 
     assert settings.cache_backend == "git"
+    assert settings.ref_scan_default == "all"
     assert settings.repo_cache_path == Path("~/.untaped/ansible-repositories")
     assert settings.git_clone_protocol == "https"
     assert settings.git_fetch_depth == 1
@@ -41,6 +45,8 @@ def test_ansible_settings_default_to_git_backed_cache() -> None:
 def test_ansible_settings_validate_cache_backend_and_git_options() -> None:
     with pytest.raises(ValidationError, match="cache_backend"):
         AnsibleSettings(cache_backend="graphql")
+    with pytest.raises(ValidationError, match="ref_scan_default"):
+        AnsibleSettings(ref_scan_default="main")
     with pytest.raises(ValidationError, match="git_clone_protocol"):
         AnsibleSettings(git_clone_protocol="ftp")
     with pytest.raises(ValidationError, match="git_fetch_depth"):

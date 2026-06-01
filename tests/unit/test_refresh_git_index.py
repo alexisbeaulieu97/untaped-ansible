@@ -206,6 +206,7 @@ def test_git_refresh_fetches_selected_refs_and_indexes_dependency_files(tmp_path
         fetch_depth=1,
         blob_filter=True,
         auth_header="AUTHORIZATION: bearer test",
+        ref_scan_default="default_branch",
     )(SourceDefinition(name="prod", orgs=["acme"]), source_key="source:prod")
 
     assert result.repos == 1
@@ -226,6 +227,51 @@ def test_git_refresh_fetches_selected_refs_and_indexes_dependency_files(tmp_path
     assert index.dependents("acme/base", "v1", source_key="source:prod")[0].source_repo == (
         "acme/site"
     )
+
+
+def test_git_refresh_defaults_to_all_heads_and_tags(tmp_path: Path) -> None:
+    github = FakeGitHub()
+    git = FakeGitCache()
+    git.refs[("site", "heads")] = [GitRef(kind="heads", name="master", sha="sha-master")]
+    git.refs[("site", "tags")] = [GitRef(kind="tags", name="v3", sha="sha-v3")]
+    git.files[("site", "sha-master", "roles/requirements.yml")] = (
+        "- src: https://github.com/acme/base\n  version: v3\n"
+    )
+    git.files[("site", "sha-v3", "roles/requirements.yml")] = (
+        "- src: https://github.com/acme/base\n  version: v3\n"
+    )
+    index = SqliteDependencyIndex(tmp_path / "index.sqlite3")
+
+    result = RefreshGitSourceIndex(
+        github=github,
+        git=git,
+        index=index,
+        aliases={},
+        default_dependency_paths=["roles/requirements.yml"],
+        repo_cache_path=tmp_path / "repos",
+        clone_protocol="https",
+        fetch_depth=1,
+        blob_filter=True,
+        auth_header=None,
+        ref_scan_default="all",
+    )(SourceDefinition(name="prod", orgs=["acme"]), source_key="source:prod")
+
+    assert result.refs == 2
+    assert git.fetches == [
+        (
+            "site",
+            (
+                "+refs/heads/*:refs/heads/*",
+                "+refs/tags/*:refs/tags/*",
+            ),
+            1,
+            True,
+            None,
+        )
+    ]
+    assert [
+        edge.source_ref for edge in index.dependents("acme/base", "v3", source_key="source:prod")
+    ] == ["master", "v3"]
 
 
 def test_git_refresh_processes_repositories_concurrently_and_reports_change_counts(

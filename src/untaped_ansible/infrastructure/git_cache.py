@@ -80,13 +80,18 @@ class GitRepositoryCache:
         """List locally fetched refs under ``refs/<kind>``."""
         prefix = f"refs/{kind}/"
         out = self._run(
-            ["for-each-ref", "--format=%(refname) %(objectname)", f"refs/{kind}"],
+            [
+                "for-each-ref",
+                "--format=%(refname) %(objecttype) %(objectname) %(*objectname)",
+                f"refs/{kind}",
+            ],
             cwd=bare_path,
             capture=True,
         )
         refs: list[GitRef] = []
         for line in out.splitlines():
-            full_ref, _, sha = line.partition(" ")
+            full_ref, object_type, object_sha, peeled_sha = _split_ref_line(line)
+            sha = peeled_sha if object_type == "tag" and peeled_sha else object_sha
             if not full_ref.startswith(prefix) or not sha:
                 continue
             refs.append(GitRef(kind=kind, name=full_ref.removeprefix(prefix), sha=sha))
@@ -180,6 +185,13 @@ def cache_path_for(url: str, *, cache_dir: Path) -> Path:
 
 def _safe_path_part(value: str) -> str:
     return "".join(char if char.isalnum() or char in "._-" else "_" for char in value)
+
+
+def _split_ref_line(line: str) -> tuple[str, str, str, str]:
+    parts = line.split(" ", maxsplit=3)
+    while len(parts) < 4:
+        parts.append("")
+    return parts[0], parts[1], parts[2], parts[3]
 
 
 def _auth_config_env(auth_header: str) -> tuple[dict[str, str], Path]:

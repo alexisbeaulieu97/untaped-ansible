@@ -42,7 +42,7 @@ from untaped_ansible.infrastructure import (
     SourceRepository,
     SqliteDependencyIndex,
 )
-from untaped_ansible.settings import DEFAULT_REF_KINDS, AnsibleSettings, SourceDefinition
+from untaped_ansible.settings import AnsibleSettings, SourceDefinition
 
 GraphDirection = Literal["deps", "impact", "both"]
 CacheBackend = Literal["git", "api"]
@@ -148,12 +148,12 @@ def graph_command(
     ref_kinds: list[str] | None = typer.Option(
         None,
         "--ref-kind",
-        help="Inline source ref namespace to scan: heads or tags; defaults to heads.",
+        help="Inline source ref namespace to scan: heads or tags; omit for configured default.",
     ),
     ref_patterns: list[str] | None = typer.Option(
         None,
         "--ref-pattern",
-        help="Inline source fnmatch pattern for branch/tag names; omit for default branch.",
+        help="Inline source fnmatch pattern for branch/tag names; omit for configured default.",
     ),
     fmt: GraphFormatOption = "tree",
     output: Path | None = typer.Option(None, "--output", help="Write graph data to a file."),
@@ -341,12 +341,12 @@ def source_save_command(
     ref_kinds: list[str] | None = typer.Option(
         None,
         "--ref-kind",
-        help="Ref namespace to scan: heads or tags; defaults to heads.",
+        help="Ref namespace to scan: heads or tags; omit to use ansible.ref_scan_default.",
     ),
     ref_patterns: list[str] | None = typer.Option(
         None,
         "--ref-pattern",
-        help="fnmatch pattern for branch/tag names; omit for default branch.",
+        help="fnmatch pattern for branch/tag names; omit to use ansible.ref_scan_default.",
     ),
 ) -> None:
     """Save a reusable GitHub source."""
@@ -562,7 +562,7 @@ def _source_definition(
             teams=teams or [],
             repos=repos or [],
             dependency_paths=paths or [],
-            ref_kinds=ref_kinds or list(DEFAULT_REF_KINDS),
+            ref_kinds=ref_kinds or [],
             ref_patterns=ref_patterns or [],
         )
     except ValueError as exc:
@@ -602,6 +602,7 @@ def _refresh_source(
                 index=index,
                 aliases=aliases,
                 default_dependency_paths=settings.dependency_paths,
+                ref_scan_default=settings.ref_scan_default,
             )(source, source_key=source_key)
         else:
             token = (
@@ -621,6 +622,7 @@ def _refresh_source(
                 blob_filter=settings.git_blob_filter,
                 auth_header=_git_auth_header(token) if token else None,
                 concurrency=concurrency,
+                ref_scan_default=settings.ref_scan_default,
             )(source, source_key=source_key)
     return result
 

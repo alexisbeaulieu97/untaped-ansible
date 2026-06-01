@@ -90,12 +90,16 @@ writes are committed once after all repo work succeeds. Refresh progress is
 reported on stderr with repo/ref counts, changed and unchanged refs, edge count,
 elapsed time, and the Git concurrency used.
 
-Source refreshes scan only each repo's default branch by default. Use
-`--ref-pattern '*'` to scan all selected branches, and add `--ref-kind tags`
-only when tags are needed. More specific patterns such as
-`--ref-pattern 'release/*'` become narrow Git refspecs before local `fnmatch`
-filtering. The same inline selector set is cached under a deterministic
-fingerprint, so later identical commands reuse the same SQLite source key.
+Source refreshes scan all branches and all tags by default
+(`ansible.ref_scan_default: all`). Set
+`ansible.ref_scan_default: default_branch` when runtime matters more than broad
+upstream coverage. `--ref-pattern` narrows source refs, so
+`--ref-pattern v3` scans matching branches and tags unless `--ref-kind` is also
+provided. `--ref-kind tags` without a pattern scans all tags. More specific
+patterns such as `--ref-pattern 'release/*'` become narrow Git refspecs before
+local `fnmatch` filtering. The same inline selector set is cached under a
+deterministic fingerprint, so later identical commands reuse the same SQLite
+source key.
 
 Source-backed downstream traversal is strict about refs. If the graph needs
 `repo@v1` and the source cache only has `repo@main`, graph stops at that node

@@ -250,3 +250,42 @@ def test_both_direction_warns_when_target_downstream_ref_is_not_cached() -> None
         "not expanding acme/base@v1 from cached source data: repo/ref is not cached. "
         "Add it to the source, scan the matching ref/tag, or use --live for downstream.",
     )
+
+
+def test_upstream_graph_keeps_multiple_matching_refs_from_same_repo() -> None:
+    index = StubIndex(
+        [
+            IndexedDependency(
+                source_repo="acme/playbook",
+                source_ref="master",
+                dependency_repo="acme/base",
+                dependency_name="base",
+                dependency_version="v3",
+                source_path="roles/requirements.yml",
+            ),
+            IndexedDependency(
+                source_repo="acme/playbook",
+                source_ref="v3",
+                dependency_repo="acme/base",
+                dependency_name="base",
+                dependency_version="v3",
+                source_path="roles/requirements.yml",
+            ),
+        ],
+        cached_refs={"acme/playbook": {"master", "v3"}},
+    )
+
+    graph = BuildGraph(index)(
+        GraphRequest(
+            repo="acme/base",
+            ref="v3",
+            source_key="source:prod",
+            direction="impact",
+            depth=1,
+        )
+    )
+
+    assert [(edge.source_id, edge.target_id, edge.relation) for edge in graph.edges] == [
+        ("acme/playbook@master", "acme/base@v3", "impacts"),
+        ("acme/playbook@v3", "acme/base@v3", "impacts"),
+    ]

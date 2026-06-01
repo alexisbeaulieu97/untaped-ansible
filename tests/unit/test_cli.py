@@ -209,6 +209,8 @@ def test_graph_inline_upstream_refreshes_and_renders_impact(
             "acme/site",
             sha="sha-main",
             content="- src: https://github.com/acme/base\n  version: v1\n",
+            refs_path="heads",
+            default_branch=None,
         )
         result = CliRunner().invoke(
             app,
@@ -256,6 +258,8 @@ def test_graph_inline_source_reuses_fingerprint_cache_without_refresh(
             "acme/site",
             sha="sha-main",
             content="- src: https://github.com/acme/base\n",
+            refs_path="heads",
+            default_branch=None,
         )
         first = runner.invoke(
             app,
@@ -608,12 +612,16 @@ def test_inline_source_cache_key_is_order_insensitive(tmp_path: Path, monkeypatc
             "acme/a",
             sha="sha-a",
             content="- src: https://github.com/acme/base\n",
+            refs_path="heads",
+            default_branch=None,
         )
         _mock_refresh_repo(
             mock,
             "acme/b",
             sha="sha-b",
             content="- src: https://github.com/acme/base\n",
+            refs_path="heads",
+            default_branch=None,
         )
         first = runner.invoke(
             app,
@@ -1076,6 +1084,76 @@ def test_graph_with_source_refreshes_by_default_with_configured_backend(
     assert "    +-- acme/site@main" in result.stdout
     assert "1 changed, 0 unchanged" in result.stderr
     assert "concurrency 4" in result.stderr
+
+
+def test_graph_inline_upstream_with_ref_renders_all_matching_source_refs(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    index_path = tmp_path / "index.sqlite3"
+    cfg = _write_config(tmp_path, index_path=index_path)
+    monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
+    captured: dict[str, object] = {}
+
+    def fake_refresh(
+        source,
+        *,
+        source_key: str,
+        index: SqliteDependencyIndex,
+        aliases: dict[str, str],
+        settings,
+        cache_backend: str,
+        concurrency: int,
+    ) -> RefreshResult:
+        captured["ref_kinds"] = source.ref_kinds
+        captured["ref_patterns"] = source.ref_patterns
+        index.replace_source_scan(
+            IndexScan(
+                source_key=source_key,
+                scanned_at=datetime.now(UTC),
+                dependencies=(
+                    IndexedDependency(
+                        source_repo="acme/playbook",
+                        source_ref="master",
+                        dependency_repo="acme/base",
+                        dependency_name="base",
+                        dependency_version="v3",
+                        source_path="roles/requirements.yml",
+                    ),
+                    IndexedDependency(
+                        source_repo="acme/playbook",
+                        source_ref="v3",
+                        dependency_repo="acme/base",
+                        dependency_name="base",
+                        dependency_version="v3",
+                        source_path="roles/requirements.yml",
+                    ),
+                ),
+            )
+        )
+        return RefreshResult(source_key=source_key, repos=1, refs=2, edges=2)
+
+    monkeypatch.setattr(commands, "_refresh_source", fake_refresh)
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "graph",
+            "acme/base",
+            "--ref",
+            "v3",
+            "--org",
+            "acme",
+            "--team",
+            "platform",
+            "--upstream",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured == {"ref_kinds": [], "ref_patterns": []}
+    assert "    +-- acme/playbook@master" in result.stdout
+    assert "    +-- acme/playbook@v3" in result.stdout
 
 
 def test_graph_cached_skips_source_refresh(tmp_path: Path, monkeypatch) -> None:
