@@ -79,7 +79,7 @@ class GithubDependencyIndex:
                 edges.append(
                     IndexedDependency(
                         source_repo=repo,
-                        source_ref=ref,
+                        source_ref=ref or read_ref,
                         dependency_repo=resolved.repo,
                         dependency_name=declaration.name,
                         dependency_version=declaration.version,

@@ -31,10 +31,12 @@ def test_tree_renderer_groups_dependencies_and_impact() -> None:
 
     assert "acme/base@v1.0.0" in rendered
     assert "+-- downstream" in rendered
-    assert "|   +-- acme/users@main" in rendered
-    assert "|   +-- unresolved: common" in rendered
+    assert "|   +-- acme/base@v1.0.0" in rendered
+    assert "|       +-- acme/users@main" in rendered
+    assert "|       +-- unresolved: common" in rendered
     assert "+-- upstream" in rendered
-    assert "    +-- acme/site@release/1" in rendered
+    assert "    +-- acme/base@v1.0.0" in rendered
+    assert "        +-- acme/site@release/1" in rendered
     assert "warning: source data is stale" in rendered
 
 
@@ -54,8 +56,9 @@ def test_tree_renderer_nests_transitive_downstream_paths() -> None:
 
     rendered = render_graph(graph, "tree")
 
-    assert "|   +-- acme/users@main" in rendered
-    assert "|       +-- acme/common@main" in rendered
+    assert "|   +-- acme/base@v1" in rendered
+    assert "|       +-- acme/users@main" in rendered
+    assert "|           +-- acme/common@main" in rendered
 
 
 def test_tree_renderer_renders_same_node_in_upstream_and_downstream_sections() -> None:
@@ -73,8 +76,10 @@ def test_tree_renderer_renders_same_node_in_upstream_and_downstream_sections() -
 
     rendered = render_graph(graph, "tree")
 
-    assert "|   +-- acme/shared@main" in rendered
-    assert "    +-- acme/shared@main" in rendered
+    assert "|   +-- acme/base@v1" in rendered
+    assert "|       +-- acme/shared@main" in rendered
+    assert "    +-- acme/base@v1" in rendered
+    assert "        +-- acme/shared@main" in rendered
 
 
 def test_tree_renderer_renders_multiple_upstream_refs_from_same_repo() -> None:
@@ -103,8 +108,51 @@ def test_tree_renderer_renders_multiple_upstream_refs_from_same_repo() -> None:
 
     rendered = render_graph(graph, "tree")
 
-    assert "    +-- acme/playbook@master" in rendered
-    assert "    +-- acme/playbook@v3" in rendered
+    assert "    +-- acme/base@v3" in rendered
+    assert "        +-- acme/playbook@master" in rendered
+    assert "        +-- acme/playbook@v3" in rendered
+
+
+def test_tree_renderer_renders_multiple_target_refs_under_each_direction() -> None:
+    graph = DependencyGraph(
+        target_id="target",
+        nodes=(
+            GraphNode(id="target", label="acme/base", repo="acme/base"),
+            GraphNode(
+                id="target-main",
+                label="acme/base@main",
+                repo="acme/base",
+                ref="main",
+            ),
+            GraphNode(id="target-v1", label="acme/base@v1", repo="acme/base", ref="v1"),
+            GraphNode(id="users", label="acme/users@v1", repo="acme/users", ref="v1"),
+            GraphNode(id="legacy", label="acme/legacy@v1", repo="acme/legacy", ref="v1"),
+            GraphNode(id="site-main", label="acme/site@main", repo="acme/site", ref="main"),
+            GraphNode(
+                id="site-release",
+                label="acme/site@release",
+                repo="acme/site",
+                ref="release",
+            ),
+        ),
+        edges=(
+            GraphEdge(source_id="target-main", target_id="users", relation="requires"),
+            GraphEdge(source_id="target-v1", target_id="legacy", relation="requires"),
+            GraphEdge(source_id="site-main", target_id="target-main", relation="impacts"),
+            GraphEdge(source_id="site-release", target_id="target-v1", relation="impacts"),
+        ),
+    )
+
+    rendered = render_graph(graph, "tree")
+
+    assert "|   +-- acme/base@main" in rendered
+    assert "|       +-- acme/users@v1" in rendered
+    assert "|   +-- acme/base@v1" in rendered
+    assert "|       +-- acme/legacy@v1" in rendered
+    assert "    +-- acme/base@main" in rendered
+    assert "        +-- acme/site@main" in rendered
+    assert "    +-- acme/base@v1" in rendered
+    assert "        +-- acme/site@release" in rendered
 
 
 def test_mermaid_renderer_emits_directional_edges() -> None:

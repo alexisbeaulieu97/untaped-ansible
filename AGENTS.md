@@ -62,8 +62,12 @@ src/untaped_ansible/
 - The domain emits a graph model first; tree, Mermaid, and JSON are renderers
   over that model.
 - Tree output renders nested traversal paths for downstream and upstream
-  independently. Do not flatten both directions into shared buckets; a node
-  that appears in both directions should be visible in both sections.
+  independently. Each direction starts with the target node for that direction;
+  when the requested target omits `--ref`, tree output should preserve concrete
+  `target@ref` roots from indexed or live data instead of collapsing everything
+  under the repo-only target. Do not flatten both directions into shared
+  buckets; a node that appears in both directions should be visible in both
+  sections.
 
 ## Cached Source Data
 

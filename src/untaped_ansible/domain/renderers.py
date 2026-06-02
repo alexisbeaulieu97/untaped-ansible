@@ -31,25 +31,27 @@ def _render_tree(graph: DependencyGraph) -> str:
     upstream = _adjacency(
         (edge.target_id, edge.source_id) for edge in graph.edges if edge.relation == "impacts"
     )
-    if downstream.get(graph.target_id):
+    downstream_roots = _target_roots(downstream, nodes, target)
+    if downstream_roots:
         lines.append("+-- downstream")
-        _append_tree_children(
+        _append_tree_roots(
             lines,
             nodes=nodes,
             adjacency=downstream,
-            parent_id=graph.target_id,
+            root_ids=downstream_roots,
             prefix="|   ",
-            path={graph.target_id},
+            target_id=graph.target_id,
         )
-    if upstream.get(graph.target_id):
+    upstream_roots = _target_roots(upstream, nodes, target)
+    if upstream_roots:
         lines.append("+-- upstream")
-        _append_tree_children(
+        _append_tree_roots(
             lines,
             nodes=nodes,
             adjacency=upstream,
-            parent_id=graph.target_id,
+            root_ids=upstream_roots,
             prefix="    ",
-            path={graph.target_id},
+            target_id=graph.target_id,
         )
     lines.extend(f"warning: {warning}" for warning in graph.warnings)
     return "\n".join(lines)
@@ -74,6 +76,50 @@ def _adjacency(edges: Iterable[tuple[str, str]]) -> dict[str, list[str]]:
     for source_id, target_id in edges:
         adjacency.setdefault(source_id, []).append(target_id)
     return adjacency
+
+
+def _target_roots(
+    adjacency: dict[str, list[str]],
+    nodes: dict[str, GraphNode],
+    target: GraphNode,
+) -> list[str]:
+    roots: list[str] = []
+    for parent_id in adjacency:
+        node = nodes[parent_id]
+        if parent_id == target.id or _is_concrete_target_ref(node, target):
+            roots.append(parent_id)
+    return roots
+
+
+def _is_concrete_target_ref(node: GraphNode, target: GraphNode) -> bool:
+    return (
+        target.ref is None
+        and target.repo is not None
+        and node.repo == target.repo
+        and node.ref is not None
+    )
+
+
+def _append_tree_roots(
+    lines: list[str],
+    *,
+    nodes: dict[str, GraphNode],
+    adjacency: dict[str, list[str]],
+    root_ids: list[str],
+    prefix: str,
+    target_id: str,
+) -> None:
+    for root_id in root_ids:
+        root = nodes[root_id]
+        lines.append(f"{prefix}+-- {root.label}")
+        _append_tree_children(
+            lines,
+            nodes=nodes,
+            adjacency=adjacency,
+            parent_id=root_id,
+            prefix=f"{prefix}    ",
+            path={target_id, root_id},
+        )
 
 
 def _append_tree_children(

@@ -89,14 +89,16 @@ class _GraphBuilder:
         if remaining == 0:
             return
         next_remaining = None if remaining is None else remaining - 1
-        source_id = _node_id(repo, ref)
         dependencies = self._index.dependencies(repo, ref, source_key=self._request.source_key)
         if not dependencies:
             self._warn_if_missing_cached_ref(repo, ref)
             return
         for indexed in dependencies:
+            source_ref = ref if ref is not None else indexed.source_ref
+            source_id = self._add_node(repo, source_ref)
+            source_stack = {*stack, source_id}
             target_id = self._target_node_for_dependency(indexed)
-            if target_id in stack:
+            if target_id in source_stack:
                 continue
             self._add_edge(source_id, target_id, "requires", indexed)
             if indexed.dependency_repo is None:
@@ -105,7 +107,7 @@ class _GraphBuilder:
                 indexed.dependency_repo,
                 indexed.dependency_version,
                 remaining=next_remaining,
-                stack={*stack, target_id},
+                stack={*source_stack, target_id},
             )
 
     def _walk_impact(
@@ -119,17 +121,19 @@ class _GraphBuilder:
         if remaining == 0:
             return
         next_remaining = None if remaining is None else remaining - 1
-        target_id = _node_id(repo, ref)
         for indexed in self._index.dependents(repo, ref, source_key=self._request.source_key):
+            target_ref = ref if ref is not None else indexed.dependency_version
+            target_id = self._add_node(repo, target_ref)
+            target_stack = {*stack, target_id}
             source_id = self._add_node(indexed.source_repo, indexed.source_ref)
-            if source_id in stack:
+            if source_id in target_stack:
                 continue
             self._add_edge(source_id, target_id, "impacts", indexed)
             self._walk_impact(
                 indexed.source_repo,
                 indexed.source_ref,
                 remaining=next_remaining,
-                stack={*stack, source_id},
+                stack={*target_stack, source_id},
             )
 
     def _target_node_for_dependency(self, indexed: IndexedDependency) -> str:
