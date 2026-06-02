@@ -26,7 +26,11 @@ class StubIndex:
     def dependencies(
         self, repo: str, ref: str | None, *, source_key: str | None
     ) -> list[IndexedDependency]:
-        return [edge for edge in self.edges if edge.source_repo == repo and edge.source_ref == ref]
+        return [
+            edge
+            for edge in self.edges
+            if edge.source_repo == repo and (ref is None or edge.source_ref == ref)
+        ]
 
     def dependents(
         self, repo: str, ref: str | None, *, source_key: str | None
@@ -176,6 +180,50 @@ def test_transitive_dependency_traversal_uses_exact_cached_refs() -> None:
     assert graph.warnings == ()
 
 
+def test_downstream_without_ref_keeps_each_matching_target_ref() -> None:
+    index = StubIndex(
+        [
+            IndexedDependency(
+                source_repo="acme/base",
+                source_ref="main",
+                dependency_repo="acme/users",
+                dependency_name="users",
+                dependency_version="v1",
+                source_path="roles/requirements.yml",
+            ),
+            IndexedDependency(
+                source_repo="acme/base",
+                source_ref="v1",
+                dependency_repo="acme/legacy",
+                dependency_name="legacy",
+                dependency_version="v1",
+                source_path="roles/requirements.yml",
+            ),
+        ],
+        cached_refs={
+            "acme/base": {"main", "v1"},
+            "acme/users": {"v1"},
+            "acme/legacy": {"v1"},
+        },
+    )
+
+    graph = BuildGraph(index)(
+        GraphRequest(
+            repo="acme/base",
+            ref=None,
+            source_key="source:prod",
+            direction="deps",
+            depth=1,
+        )
+    )
+
+    assert graph.target_id == "acme/base"
+    assert [(edge.source_id, edge.target_id, edge.relation) for edge in graph.edges] == [
+        ("acme/base@main", "acme/users@v1", "requires"),
+        ("acme/base@v1", "acme/legacy@v1", "requires"),
+    ]
+
+
 def test_transitive_dependency_traversal_warns_and_stops_when_ref_is_not_cached() -> None:
     index = StubIndex(
         [
@@ -288,4 +336,44 @@ def test_upstream_graph_keeps_multiple_matching_refs_from_same_repo() -> None:
     assert [(edge.source_id, edge.target_id, edge.relation) for edge in graph.edges] == [
         ("acme/playbook@master", "acme/base@v3", "impacts"),
         ("acme/playbook@v3", "acme/base@v3", "impacts"),
+    ]
+
+
+def test_upstream_without_ref_keeps_each_matching_target_ref() -> None:
+    index = StubIndex(
+        [
+            IndexedDependency(
+                source_repo="acme/site",
+                source_ref="main",
+                dependency_repo="acme/base",
+                dependency_name="base",
+                dependency_version="main",
+                source_path="roles/requirements.yml",
+            ),
+            IndexedDependency(
+                source_repo="acme/site",
+                source_ref="release",
+                dependency_repo="acme/base",
+                dependency_name="base",
+                dependency_version="v1",
+                source_path="roles/requirements.yml",
+            ),
+        ],
+        cached_refs={"acme/site": {"main", "release"}},
+    )
+
+    graph = BuildGraph(index)(
+        GraphRequest(
+            repo="acme/base",
+            ref=None,
+            source_key="source:prod",
+            direction="impact",
+            depth=1,
+        )
+    )
+
+    assert graph.target_id == "acme/base"
+    assert [(edge.source_id, edge.target_id, edge.relation) for edge in graph.edges] == [
+        ("acme/site@main", "acme/base@main", "impacts"),
+        ("acme/site@release", "acme/base@v1", "impacts"),
     ]

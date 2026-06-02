@@ -424,7 +424,8 @@ def test_graph_downstream_reads_remote_dependencies_without_source(
 
     assert result.exit_code == 0, result.output
     assert "acme/site" in result.stdout
-    assert "|   +-- acme/base" in result.stdout
+    assert "|   +-- acme/site@main" in result.stdout
+    assert "|       +-- acme/base" in result.stdout
     assert "upstream omitted" not in result.stdout
 
 
@@ -472,7 +473,8 @@ def test_graph_inline_upstream_refreshes_and_renders_impact(
 
     assert result.exit_code == 0, result.output
     assert "+-- upstream" in result.stdout
-    assert "    +-- acme/site@main" in result.stdout
+    assert "    +-- acme/base@v1" in result.stdout
+    assert "        +-- acme/site@main" in result.stdout
     assert SqliteDependencyIndex(index_path).dependents("acme/base", "v1", source_key=None)
 
 
@@ -657,7 +659,8 @@ def test_graph_both_renders_downstream_and_warns_when_upstream_unavailable(
         result = CliRunner().invoke(app, ["graph", "acme/site", "--both", "--depth", "1"])
 
     assert result.exit_code == 0, result.output
-    assert "|   +-- acme/base" in result.stdout
+    assert "|   +-- acme/site@main" in result.stdout
+    assert "|       +-- acme/base" in result.stdout
     assert (
         "warning: only showing downstream; upstream omitted because no source is configured"
         in result.stdout
@@ -713,7 +716,8 @@ def test_graph_downstream_with_source_uses_cached_data_without_live_reads(
         assert len(mock.calls) == 0
 
     assert result.exit_code == 0, result.output
-    assert "|   +-- acme/cached" in result.stdout
+    assert "|   +-- acme/site@main" in result.stdout
+    assert "|       +-- acme/cached" in result.stdout
 
 
 def test_graph_downstream_with_source_live_flag_reads_remote_dependencies(
@@ -766,7 +770,8 @@ def test_graph_downstream_with_source_live_flag_reads_remote_dependencies(
         )
 
     assert result.exit_code == 0, result.output
-    assert "|   +-- acme/live" in result.stdout
+    assert "|   +-- acme/site@main" in result.stdout
+    assert "|       +-- acme/live" in result.stdout
     assert "acme/cached" not in result.stdout
 
 
@@ -927,7 +932,8 @@ def test_graph_repo_is_source_selector_and_target_repo_overrides_local_identity(
 
     assert result.exit_code == 0, result.output
     assert result.stdout.startswith("acme/base\n")
-    assert "|   +-- acme/users" in result.stdout
+    assert "|   +-- acme/base" in result.stdout
+    assert "|       +-- acme/users" in result.stdout
 
 
 def test_graph_local_target_infers_repo_from_gitdir_file(
@@ -950,7 +956,8 @@ def test_graph_local_target_infers_repo_from_gitdir_file(
 
     assert result.exit_code == 0, result.output
     assert result.stdout.startswith("acme/worktree-role\n")
-    assert "|   +-- acme/users" in result.stdout
+    assert "|   +-- acme/worktree-role" in result.stdout
+    assert "|       +-- acme/users" in result.stdout
 
 
 def test_graph_local_target_prefers_origin_remote_for_identity(

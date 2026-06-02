@@ -54,10 +54,11 @@ Use relationship flags in user terms:
 - `--both`: both directions; this is the default when no direction flag is
   passed.
 
-Tree output renders each direction as a nested traversal. Downstream paths are
-shown as `target -> dependency -> transitive dependency`; upstream paths are
-shown as `dependent -> target` and continue through reverse impact. A repo/ref
-that appears in both directions is rendered in both sections.
+Tree output renders each direction as a nested traversal. Each populated
+direction starts with the target node for that direction, then continues to its
+children. When the graph target omits `--ref` and cached or live data contains
+multiple matching refs, those refs are shown separately as `target@ref` roots.
+A repo/ref that appears in both directions is rendered in both sections.
 
 Downstream graphs do not require a source or cached data. Local targets are read
 from disk. GitHub URL and `owner/repo` targets read declared dependencies live
