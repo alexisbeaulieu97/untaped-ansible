@@ -42,7 +42,7 @@ from untaped_ansible.infrastructure import (
     SourceRepository,
     SqliteDependencyIndex,
 )
-from untaped_ansible.settings import AnsibleSettings, SourceDefinition
+from untaped_ansible.settings import AnsibleSettings, SourceDefinition, normalize_team_refs
 
 GraphDirection = Literal["deps", "impact", "both"]
 CacheBackend = Literal["git", "api"]
@@ -369,6 +369,116 @@ def source_save_command(
         typer.echo(f"saved source {name!r}", err=True)
 
 
+@source_app.command("edit", no_args_is_help=True)
+def source_edit_command(
+    name: str,
+    add_orgs: list[str] | None = typer.Option(None, "--add-org", help="Add a GitHub org."),
+    remove_orgs: list[str] | None = typer.Option(
+        None,
+        "--remove-org",
+        help="Remove a GitHub org.",
+    ),
+    clear_orgs: bool = typer.Option(False, "--clear-org", help="Remove all GitHub orgs."),
+    add_teams: list[str] | None = typer.Option(
+        None,
+        "--add-team",
+        help="Add a GitHub team slug with one org, or ORG/SLUG.",
+    ),
+    remove_teams: list[str] | None = typer.Option(
+        None,
+        "--remove-team",
+        help="Remove a GitHub team slug with one org, or ORG/SLUG.",
+    ),
+    clear_teams: bool = typer.Option(False, "--clear-team", help="Remove all GitHub teams."),
+    add_repos: list[str] | None = typer.Option(
+        None,
+        "--add-repo",
+        help="Add a GitHub repo as owner/name.",
+    ),
+    remove_repos: list[str] | None = typer.Option(
+        None,
+        "--remove-repo",
+        help="Remove a GitHub repo as owner/name.",
+    ),
+    clear_repos: bool = typer.Option(False, "--clear-repo", help="Remove all GitHub repos."),
+    add_paths: list[str] | None = typer.Option(
+        None,
+        "--add-path",
+        help="Add a dependency file path.",
+    ),
+    remove_paths: list[str] | None = typer.Option(
+        None,
+        "--remove-path",
+        help="Remove a dependency file path.",
+    ),
+    clear_paths: bool = typer.Option(False, "--clear-path", help="Remove all dependency paths."),
+    add_ref_kinds: list[str] | None = typer.Option(
+        None,
+        "--add-ref-kind",
+        help="Add a ref namespace to scan: heads or tags.",
+    ),
+    remove_ref_kinds: list[str] | None = typer.Option(
+        None,
+        "--remove-ref-kind",
+        help="Remove a ref namespace: heads or tags.",
+    ),
+    clear_ref_kinds: bool = typer.Option(
+        False,
+        "--clear-ref-kind",
+        help="Remove all ref namespace filters.",
+    ),
+    add_ref_patterns: list[str] | None = typer.Option(
+        None,
+        "--add-ref-pattern",
+        help="Add a branch/tag fnmatch pattern.",
+    ),
+    remove_ref_patterns: list[str] | None = typer.Option(
+        None,
+        "--remove-ref-pattern",
+        help="Remove a branch/tag fnmatch pattern.",
+    ),
+    clear_ref_patterns: bool = typer.Option(
+        False,
+        "--clear-ref-pattern",
+        help="Remove all branch/tag patterns.",
+    ),
+) -> None:
+    """Patch a saved GitHub source definition."""
+    with report_errors():
+        source_repo = SourceRepository()
+        previous = source_repo.get(name)
+        if previous is None:
+            raise UntapedError(f"unknown source: {name!r}")
+        edited, changes = _edit_source_definition(
+            previous,
+            add_orgs=add_orgs,
+            remove_orgs=remove_orgs,
+            clear_orgs=clear_orgs,
+            add_teams=add_teams,
+            remove_teams=remove_teams,
+            clear_teams=clear_teams,
+            add_repos=add_repos,
+            remove_repos=remove_repos,
+            clear_repos=clear_repos,
+            add_paths=add_paths,
+            remove_paths=remove_paths,
+            clear_paths=clear_paths,
+            add_ref_kinds=add_ref_kinds,
+            remove_ref_kinds=remove_ref_kinds,
+            clear_ref_kinds=clear_ref_kinds,
+            add_ref_patterns=add_ref_patterns,
+            remove_ref_patterns=remove_ref_patterns,
+            clear_ref_patterns=clear_ref_patterns,
+        )
+        if previous == edited:
+            typer.echo(f"source {name!r} unchanged", err=True)
+            return
+        source_repo.upsert(edited)
+        settings = get_config_section("ansible", AnsibleSettings)
+        SqliteDependencyIndex(settings.index_path).clear(_saved_source_key(name))
+        typer.echo(f"updated source {name!r}: {', '.join(changes)}", err=True)
+
+
 @source_app.command("list")
 def source_list_command(fmt: FormatOption = "table", columns: ColumnsOption = None) -> None:
     """List saved sources."""
@@ -565,6 +675,167 @@ def _source_definition(
             ref_kinds=ref_kinds or [],
             ref_patterns=ref_patterns or [],
         )
+    except ValueError as exc:
+        raise UntapedError(str(exc)) from exc
+
+
+def _edit_source_definition(
+    source: SourceDefinition,
+    *,
+    add_orgs: list[str] | None,
+    remove_orgs: list[str] | None,
+    clear_orgs: bool,
+    add_teams: list[str] | None,
+    remove_teams: list[str] | None,
+    clear_teams: bool,
+    add_repos: list[str] | None,
+    remove_repos: list[str] | None,
+    clear_repos: bool,
+    add_paths: list[str] | None,
+    remove_paths: list[str] | None,
+    clear_paths: bool,
+    add_ref_kinds: list[str] | None,
+    remove_ref_kinds: list[str] | None,
+    clear_ref_kinds: bool,
+    add_ref_patterns: list[str] | None,
+    remove_ref_patterns: list[str] | None,
+    clear_ref_patterns: bool,
+) -> tuple[SourceDefinition, list[str]]:
+    if not _source_edit_requested(
+        add_orgs,
+        remove_orgs,
+        clear_orgs,
+        add_teams,
+        remove_teams,
+        clear_teams,
+        add_repos,
+        remove_repos,
+        clear_repos,
+        add_paths,
+        remove_paths,
+        clear_paths,
+        add_ref_kinds,
+        remove_ref_kinds,
+        clear_ref_kinds,
+        add_ref_patterns,
+        remove_ref_patterns,
+        clear_ref_patterns,
+    ):
+        raise UntapedError("source edit requires at least one mutation flag")
+
+    changes: list[str] = []
+    orgs = _apply_source_list_edit(
+        source.name,
+        "org",
+        source.orgs,
+        add=add_orgs,
+        remove=remove_orgs,
+        clear=clear_orgs,
+        changes=changes,
+    )
+    teams = _apply_source_list_edit(
+        source.name,
+        "team",
+        source.teams,
+        add=_normalized_team_edit_values(add_teams, orgs),
+        remove=_normalized_team_edit_values(remove_teams, source.orgs),
+        clear=clear_teams,
+        changes=changes,
+    )
+    repos = _apply_source_list_edit(
+        source.name,
+        "repo",
+        source.repos,
+        add=add_repos,
+        remove=remove_repos,
+        clear=clear_repos,
+        changes=changes,
+    )
+    dependency_paths = _apply_source_list_edit(
+        source.name,
+        "path",
+        source.dependency_paths,
+        add=add_paths,
+        remove=remove_paths,
+        clear=clear_paths,
+        changes=changes,
+    )
+    ref_kinds = _apply_source_list_edit(
+        source.name,
+        "ref-kind",
+        source.ref_kinds,
+        add=add_ref_kinds,
+        remove=remove_ref_kinds,
+        clear=clear_ref_kinds,
+        changes=changes,
+    )
+    ref_patterns = _apply_source_list_edit(
+        source.name,
+        "ref-pattern",
+        source.ref_patterns,
+        add=add_ref_patterns,
+        remove=remove_ref_patterns,
+        clear=clear_ref_patterns,
+        changes=changes,
+    )
+    try:
+        edited = SourceDefinition(
+            name=source.name,
+            orgs=orgs,
+            teams=teams,
+            repos=repos,
+            dependency_paths=dependency_paths,
+            ref_kinds=ref_kinds,
+            ref_patterns=ref_patterns,
+        )
+    except ValueError as exc:
+        raise UntapedError(str(exc)) from exc
+    return edited, changes
+
+
+def _source_edit_requested(*groups: object) -> bool:
+    for group in groups:
+        if isinstance(group, bool):
+            if group:
+                return True
+            continue
+        if group:
+            return True
+    return False
+
+
+def _apply_source_list_edit(
+    source_name: str,
+    label: str,
+    current: list[str],
+    *,
+    add: list[str] | None,
+    remove: list[str] | None,
+    clear: bool,
+    changes: list[str],
+) -> list[str]:
+    edited = list(current)
+    if clear and edited:
+        edited = []
+        changes.append(f"cleared {label}")
+    for value in remove or []:
+        if value not in edited:
+            raise UntapedError(f"source {source_name!r} has no {label} {value}")
+        edited.remove(value)
+        changes.append(f"removed {label} {value}")
+    for value in add or []:
+        if value in edited:
+            continue
+        edited.append(value)
+        changes.append(f"added {label} {value}")
+    return edited
+
+
+def _normalized_team_edit_values(values: list[str] | None, orgs: list[str]) -> list[str] | None:
+    if not values:
+        return values
+    try:
+        return normalize_team_refs(values, orgs)
     except ValueError as exc:
         raise UntapedError(str(exc)) from exc
 

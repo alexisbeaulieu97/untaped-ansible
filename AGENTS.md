@@ -92,6 +92,12 @@ cached under deterministic internal source keys so repeated commands can reuse
 the same scan. Do not reintroduce user-facing `scope`, `index`, or `--direction`
 workflow concepts.
 
+Saved source edits are patch-style list mutations. `source edit NAME` adds,
+removes, or clears source selector lists without requiring the user to restate
+the full source. It prints a concise status summary to stderr only; stdout
+remains data-only. Missing removals should fail loudly so typos do not silently
+leave stale selectors behind.
+
 Source refresh defaults to all branches and all tags through
 `ansible.ref_scan_default: all`. Users who need the older lower-cost behavior
 can set `ansible.ref_scan_default: default_branch`, which scans only each
@@ -111,8 +117,9 @@ Git-backed source refresh supports bounded per-repo concurrency through
 remains serial, and SQLite mutation remains a single atomic commit after repo
 workers finish successfully. Refresh status and progress belong on stderr.
 
-Saving a source clears cached source data only when the saved definition
-changes. Re-saving an identical source must preserve refreshed cache data.
+Saving or editing a source clears cached source data only when the saved
+definition changes. Re-saving or editing to an identical source must preserve
+refreshed cache data.
 
 ## Development Workflow
 

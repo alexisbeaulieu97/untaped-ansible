@@ -164,6 +164,246 @@ def test_source_save_show_remove_updates_config(tmp_path: Path, monkeypatch) -> 
     assert yaml.safe_load(cfg.read_text()).get("ansible", {}).get("sources") is None
 
 
+def test_source_edit_add_remove_and_clear_updates_config(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    cfg = _write_config(
+        tmp_path,
+        top_level_ansible={
+            "sources": [
+                {
+                    "name": "prod",
+                    "orgs": ["acme"],
+                    "teams": ["acme/old-platform"],
+                    "repos": ["acme/site"],
+                    "dependency_paths": ["old/requirements.yml"],
+                    "ref_kinds": ["heads"],
+                    "ref_patterns": ["release/*"],
+                }
+            ]
+        },
+    )
+    monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "source",
+            "edit",
+            "prod",
+            "--remove-team",
+            "acme/old-platform",
+            "--add-team",
+            "acme/platform",
+            "--remove-repo",
+            "acme/site",
+            "--add-repo",
+            "acme/api",
+            "--clear-path",
+            "--add-path",
+            "roles/requirements.yml",
+            "--remove-ref-kind",
+            "heads",
+            "--add-ref-kind",
+            "tags",
+            "--clear-ref-pattern",
+            "--add-ref-pattern",
+            "v*",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout == ""
+    assert "updated source 'prod':" in result.stderr
+    assert "removed team acme/old-platform" in result.stderr
+    assert "added team acme/platform" in result.stderr
+    assert "cleared path" in result.stderr
+    assert yaml.safe_load(cfg.read_text())["ansible"]["sources"] == [
+        {
+            "name": "prod",
+            "orgs": ["acme"],
+            "teams": ["acme/platform"],
+            "repos": ["acme/api"],
+            "dependency_paths": ["roles/requirements.yml"],
+            "ref_kinds": ["tags"],
+            "ref_patterns": ["v*"],
+        }
+    ]
+
+
+def test_source_edit_clear_boundary_requires_replacement(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    cfg = _write_config(
+        tmp_path,
+        top_level_ansible={"sources": [{"name": "prod", "teams": ["acme/platform"]}]},
+    )
+    monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
+
+    result = CliRunner().invoke(app, ["source", "edit", "prod", "--clear-team"])
+
+    assert result.exit_code == 1
+    assert "source requires --org, --team, or --repo" in result.output
+    assert yaml.safe_load(cfg.read_text())["ansible"]["sources"] == [
+        {"name": "prod", "teams": ["acme/platform"]}
+    ]
+
+
+def test_source_edit_bare_team_removal_uses_original_source_org(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    cfg = _write_config(
+        tmp_path,
+        top_level_ansible={
+            "sources": [
+                {
+                    "name": "prod",
+                    "orgs": ["acme"],
+                    "teams": ["acme/platform"],
+                }
+            ]
+        },
+    )
+    monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "source",
+            "edit",
+            "prod",
+            "--remove-org",
+            "acme",
+            "--remove-team",
+            "platform",
+            "--add-repo",
+            "acme/site",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert yaml.safe_load(cfg.read_text())["ansible"]["sources"] == [
+        {
+            "name": "prod",
+            "orgs": [],
+            "teams": [],
+            "repos": ["acme/site"],
+            "dependency_paths": [],
+            "ref_kinds": [],
+            "ref_patterns": [],
+        }
+    ]
+
+
+def test_source_edit_errors_for_unknown_source_missing_mutation_and_missing_value(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    cfg = _write_config(
+        tmp_path,
+        top_level_ansible={"sources": [{"name": "prod", "repos": ["acme/site"]}]},
+    )
+    monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
+    runner = CliRunner()
+
+    cases = [
+        (["source", "edit", "missing", "--add-repo", "acme/api"], "unknown source: 'missing'"),
+        (["source", "edit", "prod"], "source edit requires at least one mutation flag"),
+        (
+            ["source", "edit", "prod", "--remove-team", "acme/platform"],
+            "source 'prod' has no team acme/platform",
+        ),
+    ]
+
+    for args, message in cases:
+        result = runner.invoke(app, args)
+        assert result.exit_code == 1
+        assert message in result.output
+
+
+def test_source_edit_noop_preserves_cached_data(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    index_path = tmp_path / "index.sqlite3"
+    SqliteDependencyIndex(index_path).replace_source_scan(
+        IndexScan(
+            source_key="source:platform",
+            scanned_at=datetime.now(UTC),
+            dependencies=(
+                IndexedDependency(
+                    source_repo="acme/site",
+                    source_ref="main",
+                    dependency_repo="acme/base",
+                    dependency_name="base",
+                    dependency_version=None,
+                    source_path="roles/requirements.yml",
+                ),
+            ),
+        )
+    )
+    cfg = _write_config(
+        tmp_path,
+        index_path=index_path,
+        top_level_ansible={"sources": [{"name": "platform", "repos": ["acme/site"]}]},
+    )
+    monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
+
+    result = CliRunner().invoke(app, ["source", "edit", "platform", "--add-repo", "acme/site"])
+    assert result.exit_code == 0, result.output
+    assert result.stdout == ""
+    assert "source 'platform' unchanged" in result.stderr
+
+    result = CliRunner().invoke(
+        app,
+        ["graph", "acme/base", "--source", "platform", "--upstream", "--cached"],
+    )
+    assert result.exit_code == 0, result.output
+    assert "acme/site" in result.output
+
+
+def test_source_edit_real_change_clears_cached_data(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    index_path = tmp_path / "index.sqlite3"
+    SqliteDependencyIndex(index_path).replace_source_scan(
+        IndexScan(
+            source_key="source:platform",
+            scanned_at=datetime.now(UTC),
+            dependencies=(
+                IndexedDependency(
+                    source_repo="acme/site",
+                    source_ref="main",
+                    dependency_repo="acme/base",
+                    dependency_name="base",
+                    dependency_version=None,
+                    source_path="roles/requirements.yml",
+                ),
+            ),
+        )
+    )
+    cfg = _write_config(
+        tmp_path,
+        index_path=index_path,
+        top_level_ansible={"sources": [{"name": "platform", "repos": ["acme/site"]}]},
+    )
+    monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
+
+    result = CliRunner().invoke(app, ["source", "edit", "platform", "--add-repo", "acme/api"])
+    assert result.exit_code == 0, result.output
+
+    result = CliRunner().invoke(
+        app,
+        ["graph", "acme/base", "--source", "platform", "--upstream", "--cached"],
+    )
+    assert result.exit_code == 1
+    assert "no cached source data found for source 'platform'" in result.output
+
+
 def test_graph_downstream_reads_remote_dependencies_without_source(
     tmp_path: Path,
     monkeypatch,
