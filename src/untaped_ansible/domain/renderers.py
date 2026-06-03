@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterable
+from functools import cmp_to_key
 from typing import Literal
 
 from untaped_ansible.domain.graph import DependencyGraph, GraphNode
+from untaped_ansible.domain.ref_display import RefDisplay, compare_ref_displays, natural_compare
 
 GraphFormat = Literal["tree", "mermaid", "json"]
 
@@ -88,7 +90,7 @@ def _target_roots(
         node = nodes[parent_id]
         if parent_id == target.id or _is_concrete_target_ref(node, target):
             roots.append(parent_id)
-    return roots
+    return _sort_node_ids(roots, nodes)
 
 
 def _is_concrete_target_ref(node: GraphNode, target: GraphNode) -> bool:
@@ -131,7 +133,7 @@ def _append_tree_children(
     prefix: str,
     path: set[str],
 ) -> None:
-    for child_id in adjacency.get(parent_id, []):
+    for child_id in _sort_node_ids(adjacency.get(parent_id, []), nodes):
         child = nodes[child_id]
         if child_id in path:
             lines.append(f"{prefix}+-- {child.label} (cycle)")
@@ -145,6 +147,36 @@ def _append_tree_children(
             prefix=f"{prefix}    ",
             path={*path, child_id},
         )
+
+
+def _sort_node_ids(node_ids: Iterable[str], nodes: dict[str, GraphNode]) -> list[str]:
+    def compare_node_ids(left: str, right: str) -> int:
+        return _compare_nodes(nodes[left], nodes[right])
+
+    return sorted(
+        node_ids,
+        key=cmp_to_key(compare_node_ids),
+    )
+
+
+def _compare_nodes(left: GraphNode, right: GraphNode) -> int:
+    left_repo = left.repo or ""
+    right_repo = right.repo or ""
+    repo_cmp = natural_compare(left_repo, right_repo)
+    if repo_cmp != 0:
+        return repo_cmp
+    ref_cmp = compare_ref_displays(_ref_display(left), _ref_display(right))
+    if ref_cmp != 0:
+        return ref_cmp
+    return natural_compare(left.label, right.label)
+
+
+def _ref_display(node: GraphNode) -> RefDisplay:
+    return RefDisplay(
+        name=node.ref or "",
+        kind=node.ref_kind,
+        default_branch=node.default_branch,
+    )
 
 
 def _mermaid_id(value: str) -> str:

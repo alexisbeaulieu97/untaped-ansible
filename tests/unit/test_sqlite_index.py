@@ -7,7 +7,12 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from untaped_ansible.domain.payloads import IndexedDependency, RefScan
+from untaped_ansible.domain.payloads import (
+    CachedRef,
+    IndexedDependency,
+    RefScan,
+    SourceRepoMetadata,
+)
 from untaped_ansible.infrastructure.sqlite_index import (
     IndexScan,
     SqliteDependencyIndex,
@@ -224,6 +229,10 @@ def test_replace_ref_scan_tracks_metadata_and_replaces_only_that_ref(tmp_path) -
     assert metadata.backend == "git"
     assert metadata.checked_at == checked_at
     assert metadata.aliases_fingerprint == ""
+    assert (
+        index.dependencies("acme/site", "main", source_key="source:prod")[0].source_ref_kind
+        == "heads"
+    )
     dependency_repos = [
         edge.dependency_repo
         for edge in index.dependencies("acme/site", None, source_key="source:prod")
@@ -332,6 +341,60 @@ def test_cached_refs_include_ref_scans_and_legacy_source_edges(tmp_path) -> None
     assert index.cached_refs("acme/site", source_key="source:prod") == {"release/1"}
     assert index.cached_refs("acme/legacy", source_key="source:prod") == {"main"}
     assert index.cached_refs("acme/site", source_key=None) == set()
+
+
+def test_cached_ref_metadata_includes_ref_kind_and_default_branch(tmp_path) -> None:
+    index = SqliteDependencyIndex(tmp_path / "index.sqlite3")
+    now = datetime(2026, 6, 1, tzinfo=UTC)
+
+    index.commit_source_ref_refresh(
+        "source:prod",
+        scans=(
+            RefScan(
+                source_key="source:prod",
+                source_repo="acme/site",
+                ref_kind="tags",
+                source_ref="v2.0.0",
+                source_sha="sha-v2",
+                backend="git",
+                clone_url="https://github.com/acme/site.git",
+                clone_protocol="https",
+                dependency_paths_fingerprint="paths-a",
+                checked_at=now,
+                indexed_at=now,
+                dependencies=(),
+            ),
+            RefScan(
+                source_key="source:prod",
+                source_repo="acme/site",
+                ref_kind="heads",
+                source_ref="trunk",
+                source_sha="sha-trunk",
+                backend="git",
+                clone_url="https://github.com/acme/site.git",
+                clone_protocol="https",
+                dependency_paths_fingerprint="paths-a",
+                checked_at=now,
+                indexed_at=now,
+                dependencies=(),
+            ),
+        ),
+        touches=(),
+        keep={("acme/site", "tags", "v2.0.0"), ("acme/site", "heads", "trunk")},
+        repo_metadata=(
+            SourceRepoMetadata(
+                source_key="source:prod",
+                source_repo="acme/site",
+                default_branch="trunk",
+            ),
+        ),
+        scanned_at=now,
+    )
+
+    assert set(index.cached_ref_metadata("acme/site", source_key="source:prod")) == {
+        CachedRef(name="v2.0.0", kind="tags", default_branch="trunk"),
+        CachedRef(name="trunk", kind="heads", default_branch="trunk"),
+    }
 
 
 def test_pruning_git_refs_removes_legacy_full_source_edges(tmp_path) -> None:

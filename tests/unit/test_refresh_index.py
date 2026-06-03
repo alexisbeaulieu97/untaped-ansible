@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from untaped_ansible.application.refresh_index import RefreshSourceIndex
+from untaped_ansible.domain.payloads import SourceRepoMetadata
 from untaped_ansible.infrastructure import IndexScan
 from untaped_ansible.settings import SourceDefinition
 
@@ -299,6 +300,14 @@ def test_refresh_index_defaults_to_all_heads_and_tags() -> None:
     assert github.ref_calls == ["heads", "tags"]
     assert index.scan is not None
     assert [edge.source_ref for edge in index.scan.dependencies] == ["master", "v3"]
+    assert [edge.source_ref_kind for edge in index.scan.dependencies] == ["heads", "tags"]
+    assert index.scan.repo_metadata == (
+        SourceRepoMetadata(
+            source_key="source:prod",
+            source_repo="acme/site",
+            default_branch="main",
+        ),
+    )
 
 
 def test_refresh_index_wildcard_pattern_dedupes_narrower_ref_calls() -> None:

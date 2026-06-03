@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from untaped_ansible.domain.payloads import IndexedDependency
+from untaped_ansible.domain.payloads import CachedRef, IndexedDependency
 
 if TYPE_CHECKING:
     from untaped_ansible.application.ports import DependencyIndex
@@ -57,6 +57,15 @@ class OverlayDependencyIndex:
             if source_repo == repo and ref is not None
         )
         return refs
+
+    def cached_ref_metadata(self, repo: str, *, source_key: str | None) -> tuple[CachedRef, ...]:
+        metadata = list(self._wrapped.cached_ref_metadata(repo, source_key=source_key))
+        known = {(cached_ref.name, cached_ref.kind) for cached_ref in metadata}
+        for source_repo, ref in self._authoritative_sources:
+            if source_repo != repo or ref is None or (ref, None) in known:
+                continue
+            metadata.append(CachedRef(name=ref))
+        return tuple(metadata)
 
     def is_stale(self, source_key: str | None, *, max_age_seconds: int) -> bool:
         return self._wrapped.is_stale(source_key, max_age_seconds=max_age_seconds)

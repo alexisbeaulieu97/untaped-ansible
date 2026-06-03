@@ -30,6 +30,10 @@ class DependencyIndex(Protocol):
 
     def cached_refs(self, repo: str, *, source_key: str | None) -> set[str]: ...
 
+    def cached_ref_metadata(
+        self, repo: str, *, source_key: str | None
+    ) -> tuple[payloads.CachedRef, ...]: ...
+
     def is_stale(self, source_key: str | None, *, max_age_seconds: int) -> bool: ...
 
 
@@ -84,6 +88,7 @@ class IncrementalDependencyIndexWriter(DependencyIndexWriter, Protocol):
         scans: tuple[payloads.RefScan, ...],
         touches: tuple[payloads.RefScanTouch, ...],
         keep: set[tuple[str, str, str]],
+        repo_metadata: tuple[payloads.SourceRepoMetadata, ...] = (),
         scanned_at: datetime,
     ) -> None: ...
 

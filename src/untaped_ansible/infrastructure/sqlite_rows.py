@@ -13,6 +13,7 @@ def edge_from_row(row: sqlite3.Row) -> IndexedDependency:
     return IndexedDependency(
         source_repo=row["source_repo"],
         source_ref=row["source_ref"],
+        source_ref_kind=row["source_ref_kind"],
         source_sha=row["source_sha"],
         dependency_repo=row["dependency_repo"],
         dependency_name=row["dependency_name"],

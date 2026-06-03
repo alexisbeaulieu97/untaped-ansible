@@ -72,14 +72,18 @@ execution in `cli/graph_commands.py`, source management and refresh wiring in
   under the repo-only target. Do not flatten both directions into shared
   buckets; a node that appears in both directions should be visible in both
   sections.
+- Tree output is the human report. It sorts refs with branches before tags,
+  promotes the repo's exact cached default branch first, sorts remaining
+  branches naturally, sorts semver tags newest-first, and leaves refs without
+  branch/tag metadata last. Mermaid and JSON keep graph model order.
 
 ## Cached Source Data
 
 The SQLite cache and bare Git repository cache are plugin-owned state. SQLite
-stores named and fingerprinted source scans, repo/ref scan metadata, resolved
-SHAs, graph edges, unresolved declarations, and timestamps. SHA is
-authoritative. Branch and tag names are resolved during source refresh and
-cached with freshness metadata.
+stores named and fingerprinted source scans, repo/ref scan metadata, per-source
+repo metadata such as exact default branch, resolved SHAs, graph edges,
+unresolved declarations, and timestamps. SHA is authoritative. Branch and tag
+names are resolved during source refresh and cached with freshness metadata.
 
 Keep SQLite adapter methods in `infrastructure/sqlite_index.py` focused on
 transaction boundaries and query flow. Schema/migration helpers live in

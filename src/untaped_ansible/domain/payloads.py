@@ -14,6 +14,7 @@ class IndexedDependency(BaseModel):
 
     source_repo: str
     source_ref: str | None
+    source_ref_kind: str | None = None
     dependency_name: str
     source_path: str
     source_sha: str | None = None
@@ -30,6 +31,26 @@ class GitRef(BaseModel):
     kind: str
     name: str
     sha: str
+
+
+class CachedRef(BaseModel):
+    """Cached ref metadata for graph display."""
+
+    model_config = ConfigDict(frozen=True)
+
+    name: str
+    kind: str | None = None
+    default_branch: str | None = None
+
+
+class SourceRepoMetadata(BaseModel):
+    """Cached metadata for one source repository."""
+
+    model_config = ConfigDict(frozen=True)
+
+    source_key: str
+    source_repo: str
+    default_branch: str
 
 
 class RefScanMetadata(BaseModel):
@@ -91,4 +112,5 @@ class IndexScan(BaseModel):
     scanned_at: datetime
     repos: int | None = None
     refs: int | None = None
+    repo_metadata: tuple[SourceRepoMetadata, ...] = ()
     dependencies: tuple[IndexedDependency, ...] = ()

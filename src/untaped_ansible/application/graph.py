@@ -8,7 +8,8 @@ from pydantic import BaseModel, ConfigDict
 
 from untaped_ansible.application.ports import DependencyIndex
 from untaped_ansible.domain.graph import DependencyGraph, GraphEdge, GraphNode
-from untaped_ansible.domain.payloads import IndexedDependency
+from untaped_ansible.domain.payloads import CachedRef, IndexedDependency
+from untaped_ansible.domain.ref_display import RefDisplay, sort_ref_displays
 
 GraphDirection = Literal["deps", "impact", "both"]
 
@@ -49,6 +50,7 @@ class _GraphBuilder:
         self._dependencies: dict[tuple[str, str | None, str | None], list[IndexedDependency]] = {}
         self._dependents: dict[tuple[str, str | None, str | None], list[IndexedDependency]] = {}
         self._cached_refs: dict[tuple[str, str | None], set[str]] = {}
+        self._cached_ref_metadata: dict[tuple[str, str | None], tuple[CachedRef, ...]] = {}
 
     def build(self) -> DependencyGraph:
         target_id = _node_id(self._request.repo, self._request.ref)
@@ -99,7 +101,7 @@ class _GraphBuilder:
             return
         for indexed in dependencies:
             source_ref = ref if ref is not None else indexed.source_ref
-            source_id = self._add_node(repo, source_ref)
+            source_id = self._add_node(repo, source_ref, ref_kind=indexed.source_ref_kind)
             source_stack = {*stack, source_id}
             target_id = self._target_node_for_dependency(indexed)
             if target_id in source_stack:
@@ -129,7 +131,11 @@ class _GraphBuilder:
             target_ref = ref if ref is not None else indexed.dependency_version
             target_id = self._add_node(repo, target_ref)
             target_stack = {*stack, target_id}
-            source_id = self._add_node(indexed.source_repo, indexed.source_ref)
+            source_id = self._add_node(
+                indexed.source_repo,
+                indexed.source_ref,
+                ref_kind=indexed.source_ref_kind,
+            )
             if source_id in target_stack:
                 continue
             self._add_edge(source_id, target_id, "impacts", indexed)
@@ -155,12 +161,27 @@ class _GraphBuilder:
         )
         return node_id
 
-    def _add_node(self, repo: str, ref: str | None) -> str:
+    def _add_node(self, repo: str, ref: str | None, *, ref_kind: str | None = None) -> str:
         node_id = _node_id(repo, ref)
-        self._nodes.setdefault(
+        metadata = self._node_metadata(repo, ref, explicit_ref_kind=ref_kind)
+        node = self._nodes.setdefault(
             node_id,
-            GraphNode(id=node_id, label=_label(repo, ref), repo=repo, ref=ref),
+            GraphNode(
+                id=node_id,
+                label=_label(repo, ref),
+                repo=repo,
+                ref=ref,
+                ref_kind=metadata.ref_kind,
+                default_branch=metadata.default_branch,
+            ),
         )
+        updates: dict[str, str] = {}
+        if node.ref_kind is None and metadata.ref_kind is not None:
+            updates["ref_kind"] = metadata.ref_kind
+        if node.default_branch is None and metadata.default_branch is not None:
+            updates["default_branch"] = metadata.default_branch
+        if updates:
+            self._nodes[node_id] = node.model_copy(update=updates)
         return node_id
 
     def _add_edge(
@@ -198,7 +219,7 @@ class _GraphBuilder:
         if ref in cached_refs:
             return
         if cached_refs:
-            available = ", ".join(sorted(cached_refs))
+            available = ", ".join(self._sorted_cached_ref_names(repo, cached_refs))
             self._add_warning(
                 f"not expanding {node} from cached source data: ref is not cached "
                 f"(available refs: {available}). Scan the matching ref/tag or use --live "
@@ -239,6 +260,61 @@ class _GraphBuilder:
             )
         return self._cached_refs[key]
 
+    def _cached_ref_metadata_for(self, repo: str) -> tuple[CachedRef, ...]:
+        key = (repo, self._request.source_key)
+        if key not in self._cached_ref_metadata:
+            self._cached_ref_metadata[key] = self._index.cached_ref_metadata(
+                repo,
+                source_key=self._request.source_key,
+            )
+        return self._cached_ref_metadata[key]
+
+    def _node_metadata(
+        self,
+        repo: str,
+        ref: str | None,
+        *,
+        explicit_ref_kind: str | None,
+    ) -> _NodeMetadata:
+        if ref is None:
+            return _NodeMetadata(ref_kind=explicit_ref_kind, default_branch=None)
+        metadata = self._cached_ref_metadata_for(repo)
+        matches = [cached_ref for cached_ref in metadata if cached_ref.name == ref]
+        default_branch = _first_default_branch(matches) or _first_default_branch(metadata)
+        if explicit_ref_kind is not None:
+            return _NodeMetadata(ref_kind=explicit_ref_kind, default_branch=default_branch)
+        kinds = {cached_ref.kind for cached_ref in matches if cached_ref.kind is not None}
+        ref_kind = next(iter(kinds)) if len(kinds) == 1 else None
+        return _NodeMetadata(ref_kind=ref_kind, default_branch=default_branch)
+
+    def _sorted_cached_ref_names(self, repo: str, cached_refs: set[str]) -> list[str]:
+        metadata = list(self._cached_ref_metadata_for(repo))
+        names_with_metadata = {cached_ref.name for cached_ref in metadata}
+        metadata.extend(CachedRef(name=name) for name in sorted(cached_refs - names_with_metadata))
+        sorted_refs = sort_ref_displays(
+            RefDisplay(
+                name=cached_ref.name,
+                kind=cached_ref.kind,
+                default_branch=cached_ref.default_branch,
+            )
+            for cached_ref in metadata
+        )
+        names: list[str] = []
+        seen: set[str] = set()
+        for ref in sorted_refs:
+            if ref.name in seen:
+                continue
+            seen.add(ref.name)
+            names.append(ref.name)
+        return names
+
+
+class _NodeMetadata(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    ref_kind: str | None
+    default_branch: str | None
+
 
 def _node_id(repo: str, ref: str | None) -> str:
     return f"{repo}@{ref}" if ref else repo
@@ -246,3 +322,10 @@ def _node_id(repo: str, ref: str | None) -> str:
 
 def _label(repo: str, ref: str | None) -> str:
     return _node_id(repo, ref)
+
+
+def _first_default_branch(refs: list[CachedRef] | tuple[CachedRef, ...]) -> str | None:
+    for ref in refs:
+        if ref.default_branch is not None:
+            return ref.default_branch
+    return None
