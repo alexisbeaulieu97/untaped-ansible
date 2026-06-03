@@ -194,17 +194,6 @@ class SlowRefScanIndex:
     def status(self, source_key: str):
         return self._wrapped.status(source_key)
 
-    def ref_scan(self, source_key: str, source_repo: str, ref_kind: str, source_ref: str):
-        with self._lock:
-            self.active_ref_scans += 1
-            self.max_active_ref_scans = max(self.max_active_ref_scans, self.active_ref_scans)
-        try:
-            time.sleep(0.05)
-            return self._wrapped.ref_scan(source_key, source_repo, ref_kind, source_ref)
-        finally:
-            with self._lock:
-                self.active_ref_scans -= 1
-
     def ref_scans(self, source_key: str, source_repo: str, refs):
         with self._lock:
             self.active_ref_scans += 1
@@ -216,31 +205,8 @@ class SlowRefScanIndex:
             with self._lock:
                 self.active_ref_scans -= 1
 
-    def replace_ref_scan(self, scan):
-        return self._wrapped.replace_ref_scan(scan)
-
-    def touch_ref_scan(
-        self, source_key: str, source_repo: str, ref_kind: str, source_ref: str, **kwargs
-    ):
-        return self._wrapped.touch_ref_scan(
-            source_key,
-            source_repo,
-            ref_kind,
-            source_ref,
-            **kwargs,
-        )
-
-    def prune_source_refs(self, source_key: str, keep):
-        return self._wrapped.prune_source_refs(source_key, keep)
-
     def commit_source_ref_refresh(self, source_key: str, **kwargs):
         return self._wrapped.commit_source_ref_refresh(source_key, **kwargs)
-
-    def finalize_source_ref_scan(self, source_key: str, **kwargs):
-        return self._wrapped.finalize_source_ref_scan(source_key, **kwargs)
-
-    def replace_source_scan(self, scan):
-        return self._wrapped.replace_source_scan(scan)
 
 
 class CountingRefScanIndex:
@@ -252,40 +218,13 @@ class CountingRefScanIndex:
     def status(self, source_key: str):
         return self._wrapped.status(source_key)
 
-    def ref_scan(self, source_key: str, source_repo: str, ref_kind: str, source_ref: str):
-        self.ref_scan_calls += 1
-        return self._wrapped.ref_scan(source_key, source_repo, ref_kind, source_ref)
-
     def ref_scans(self, source_key: str, source_repo: str, refs):
         refs_tuple = tuple(refs)
         self.ref_scans_calls.append((source_key, source_repo, refs_tuple))
         return self._wrapped.ref_scans(source_key, source_repo, refs_tuple)
 
-    def replace_ref_scan(self, scan):
-        return self._wrapped.replace_ref_scan(scan)
-
-    def touch_ref_scan(
-        self, source_key: str, source_repo: str, ref_kind: str, source_ref: str, **kwargs
-    ):
-        return self._wrapped.touch_ref_scan(
-            source_key,
-            source_repo,
-            ref_kind,
-            source_ref,
-            **kwargs,
-        )
-
-    def prune_source_refs(self, source_key: str, keep):
-        return self._wrapped.prune_source_refs(source_key, keep)
-
     def commit_source_ref_refresh(self, source_key: str, **kwargs):
         return self._wrapped.commit_source_ref_refresh(source_key, **kwargs)
-
-    def finalize_source_ref_scan(self, source_key: str, **kwargs):
-        return self._wrapped.finalize_source_ref_scan(source_key, **kwargs)
-
-    def replace_source_scan(self, scan):
-        return self._wrapped.replace_source_scan(scan)
 
 
 def test_git_refresh_fetches_selected_refs_and_indexes_dependency_files(tmp_path: Path) -> None:
@@ -648,7 +587,7 @@ def test_git_refresh_fetches_only_changed_refs_and_prunes_deleted_remote_refs(
     assert index.dependents("acme/base", "v2", source_key="source:prod")
     assert not index.dependents("acme/base", "v1", source_key="source:prod")
     assert not index.dependents("acme/release-base", None, source_key="source:prod")
-    assert index.ref_scan("source:prod", "acme/site", "heads", "release") is None
+    assert index.ref_scans("source:prod", "acme/site", [("heads", "release")]) == {}
 
 
 def test_git_refresh_reuses_parsed_dependencies_for_duplicate_remote_shas(
@@ -833,7 +772,7 @@ def test_git_refresh_reindexes_moved_tags_and_prunes_unselected_refs(tmp_path: P
     assert index.dependents("acme/base", "v2", source_key="source:prod")
     assert not index.dependents("acme/base", "v1", source_key="source:prod")
     assert not index.dependents("acme/old", None, source_key="source:prod")
-    assert index.ref_scan("source:prod", "acme/site", "tags", "v-old") is None
+    assert index.ref_scans("source:prod", "acme/site", [("tags", "v-old")]) == {}
 
 
 def test_git_refresh_rejects_unknown_clone_protocol(tmp_path: Path) -> None:

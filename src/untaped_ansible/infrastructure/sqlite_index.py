@@ -12,7 +12,6 @@ from threading import Lock
 from untaped_ansible.domain.payloads import (
     CachedRef,
     IndexedDependency,
-    IndexScan,
     RefScan,
     RefScanMetadata,
     RefScanTouch,
@@ -39,57 +38,6 @@ class SqliteDependencyIndex:
         self._path = path.expanduser()
         self._schema_lock = Lock()
         self._schema_ready = False
-
-    def replace_source_scan(self, scan: IndexScan) -> None:
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        repos = (
-            scan.repos
-            if scan.repos is not None
-            else len({edge.source_repo for edge in scan.dependencies})
-        )
-        refs = (
-            scan.refs
-            if scan.refs is not None
-            else len({f"{edge.source_repo}@{edge.source_ref or ''}" for edge in scan.dependencies})
-        )
-        edges = len(scan.dependencies)
-        with self._db() as db:
-            db.execute("delete from source_runs where source_key = ?", (scan.source_key,))
-            db.execute("delete from source_ref_scans where source_key = ?", (scan.source_key,))
-            db.execute("delete from source_repo_metadata where source_key = ?", (scan.source_key,))
-            db.execute(
-                """
-                insert into source_runs(source_key, scanned_at, repos, refs, edges)
-                values (?, ?, ?, ?, ?)
-                """,
-                (scan.source_key, dump_dt(scan.scanned_at), repos, refs, edges),
-            )
-            for ref_scan in _ref_scans_from_index_scan(scan):
-                _replace_ref_scan(db, ref_scan)
-            _replace_source_repo_metadata(db, scan.source_key, scan.repo_metadata)
-            _delete_orphan_snapshots(db)
-
-    def ref_scan(
-        self,
-        source_key: str,
-        source_repo: str,
-        ref_kind: str,
-        source_ref: str,
-    ) -> RefScanMetadata | None:
-        with self._db() as db:
-            row = db.execute(
-                """
-                select source_key, source_repo, ref_kind, source_ref, source_sha, backend,
-                       clone_url, clone_protocol, dependency_paths_fingerprint,
-                       aliases_fingerprint, checked_at, indexed_at, last_error
-                from source_ref_scans
-                where source_key = ? and source_repo = ? and ref_kind = ? and source_ref = ?
-                """,
-                (source_key, source_repo, ref_kind, source_ref),
-            ).fetchone()
-        if row is None:
-            return None
-        return ref_scan_from_row(row)
 
     def ref_scans(
         self,
@@ -130,38 +78,6 @@ class SqliteDependencyIndex:
                     scans[key] = ref_scan_from_row(row)
         return scans
 
-    def replace_ref_scan(self, scan: RefScan) -> None:
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        with self._db() as db:
-            _replace_ref_scan(db, scan)
-            _delete_orphan_snapshots(db)
-
-    def touch_ref_scan(
-        self,
-        source_key: str,
-        source_repo: str,
-        ref_kind: str,
-        source_ref: str,
-        *,
-        checked_at: datetime,
-    ) -> None:
-        with self._db() as db:
-            _touch_ref_scan(
-                db,
-                RefScanTouch(
-                    source_key=source_key,
-                    source_repo=source_repo,
-                    ref_kind=ref_kind,
-                    source_ref=source_ref,
-                    checked_at=checked_at,
-                ),
-            )
-
-    def prune_source_refs(self, source_key: str, keep: set[tuple[str, str, str]]) -> None:
-        with self._db() as db:
-            _prune_source_refs(db, source_key, keep)
-            _delete_orphan_snapshots(db)
-
     def commit_source_ref_refresh(
         self,
         source_key: str,
@@ -182,10 +98,6 @@ class SqliteDependencyIndex:
             _replace_source_repo_metadata(db, source_key, repo_metadata)
             _refresh_source_run_from_ref_scans(db, source_key, scanned_at=scanned_at)
             _delete_orphan_snapshots(db)
-
-    def finalize_source_ref_scan(self, source_key: str, *, scanned_at: datetime) -> None:
-        with self._db() as db:
-            _refresh_source_run_from_ref_scans(db, source_key, scanned_at=scanned_at)
 
     def dependencies(
         self,
@@ -347,38 +259,6 @@ class SqliteDependencyIndex:
                 yield db
         finally:
             db.close()
-
-
-def _ref_scans_from_index_scan(scan: IndexScan) -> tuple[RefScan, ...]:
-    grouped: dict[tuple[str, str, str], list[IndexedDependency]] = {}
-    source_shas: dict[tuple[str, str, str], str] = {}
-    for edge in scan.dependencies:
-        key = (
-            edge.source_repo,
-            edge.source_ref or "",
-            edge.source_ref_kind or "",
-        )
-        grouped.setdefault(key, []).append(edge)
-        if edge.source_sha is not None and key not in source_shas:
-            source_shas[key] = edge.source_sha
-    return tuple(
-        RefScan(
-            source_key=scan.source_key,
-            source_repo=source_repo,
-            ref_kind=ref_kind,
-            source_ref=source_ref,
-            source_sha=source_shas.get((source_repo, source_ref, ref_kind), ""),
-            backend="api",
-            clone_url=None,
-            clone_protocol=None,
-            dependency_paths_fingerprint="",
-            aliases_fingerprint="",
-            checked_at=scan.scanned_at,
-            indexed_at=scan.scanned_at,
-            dependencies=tuple(edges),
-        )
-        for (source_repo, source_ref, ref_kind), edges in grouped.items()
-    )
 
 
 def _replace_ref_scan(db: sqlite3.Connection, scan: RefScan) -> None:

@@ -101,16 +101,3 @@ class SourceIndexStatus(BaseModel):
     repos: int
     refs: int
     edges: int
-
-
-class IndexScan(BaseModel):
-    """Complete replacement payload for one source scan."""
-
-    model_config = ConfigDict(frozen=True)
-
-    source_key: str
-    scanned_at: datetime
-    repos: int | None = None
-    refs: int | None = None
-    repo_metadata: tuple[SourceRepoMetadata, ...] = ()
-    dependencies: tuple[IndexedDependency, ...] = ()

@@ -30,10 +30,9 @@ def test_source_definition_allows_tag_scans_without_ref_pattern() -> None:
     assert source.ref_patterns == []
 
 
-def test_ansible_settings_default_to_git_backed_cache() -> None:
+def test_ansible_settings_default_to_git_source_refresh() -> None:
     settings = AnsibleSettings()
 
-    assert settings.cache_backend == "git"
     assert settings.ref_scan_default == "all"
     assert settings.repo_cache_path == Path("~/.untaped/ansible-repositories")
     assert settings.git_clone_protocol == "https"
@@ -42,9 +41,7 @@ def test_ansible_settings_default_to_git_backed_cache() -> None:
     assert settings.git_blob_filter is True
 
 
-def test_ansible_settings_validate_cache_backend_and_git_options() -> None:
-    with pytest.raises(ValidationError, match="cache_backend"):
-        AnsibleSettings(cache_backend="graphql")
+def test_ansible_settings_validate_ref_scan_and_git_options() -> None:
     with pytest.raises(ValidationError, match="ref_scan_default"):
         AnsibleSettings(ref_scan_default="main")
     with pytest.raises(ValidationError, match="git_clone_protocol"):

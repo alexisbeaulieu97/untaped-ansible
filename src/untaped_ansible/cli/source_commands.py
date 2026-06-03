@@ -6,7 +6,6 @@ import hashlib
 import json
 import time
 from base64 import b64encode
-from typing import Literal
 
 import typer
 from untaped import (
@@ -23,7 +22,7 @@ from untaped import (
 from untaped_github import GithubClient, GithubSettings
 
 from untaped_ansible.application.refresh_git_index import RefreshGitSourceIndex
-from untaped_ansible.application.refresh_index import RefreshResult, RefreshSourceIndex
+from untaped_ansible.application.refresh_index import RefreshResult
 from untaped_ansible.infrastructure import (
     AliasRepository,
     GitRepositoryCache,
@@ -32,7 +31,6 @@ from untaped_ansible.infrastructure import (
 )
 from untaped_ansible.settings import AnsibleSettings, SourceDefinition, normalize_team_refs
 
-CacheBackend = Literal["git", "api"]
 _FINGERPRINT_HEX_CHARS = 16
 
 app = typer.Typer(
@@ -259,11 +257,6 @@ def source_status_command(
 @app.command("refresh", no_args_is_help=True)
 def source_refresh_command(
     name: str,
-    cache_backend: CacheBackend | None = typer.Option(
-        None,
-        "--cache-backend",
-        help="Source refresh backend: git or api; defaults to ansible.cache_backend.",
-    ),
     concurrency: int | None = typer.Option(
         None,
         "--concurrency",
@@ -280,7 +273,6 @@ def source_refresh_command(
             raise UntapedError(f"unknown source: {name!r}")
         settings = get_config_section("ansible", AnsibleSettings)
         aliases = AliasRepository().entries()
-        selected_backend = cache_backend or settings.cache_backend
         git_concurrency = concurrency or settings.git_fetch_concurrency
         started_at = time.perf_counter()
         result = _refresh_source(
@@ -289,7 +281,6 @@ def source_refresh_command(
             index=SqliteDependencyIndex(settings.index_path),
             aliases=aliases,
             settings=settings,
-            cache_backend=selected_backend,
             concurrency=git_concurrency,
         )
         typer.echo(
@@ -297,7 +288,6 @@ def source_refresh_command(
                 "refreshed",
                 f"source {name!r}",
                 result,
-                cache_backend=selected_backend,
                 concurrency=git_concurrency,
                 elapsed=time.perf_counter() - started_at,
             ),
@@ -511,40 +501,30 @@ def _refresh_source(
     index: SqliteDependencyIndex,
     aliases: dict[str, str],
     settings: AnsibleSettings,
-    cache_backend: CacheBackend,
     concurrency: int,
 ) -> RefreshResult:
     github_settings = get_config_section("github", GithubSettings)
     core = get_core_settings()
     with GithubClient(github_settings, http=core.http) as github:
-        if cache_backend == "api":
-            result = RefreshSourceIndex(
-                github=github,
-                index=index,
-                aliases=aliases,
-                default_dependency_paths=settings.dependency_paths,
-                ref_scan_default=settings.ref_scan_default,
-            )(source, source_key=source_key)
-        else:
-            token = (
-                github_settings.token.get_secret_value().strip()
-                if github_settings.token is not None
-                else ""
-            )
-            result = RefreshGitSourceIndex(
-                github=github,
-                git=GitRepositoryCache(),
-                index=index,
-                aliases=aliases,
-                default_dependency_paths=settings.dependency_paths,
-                repo_cache_path=settings.repo_cache_path,
-                clone_protocol=settings.git_clone_protocol,
-                fetch_depth=settings.git_fetch_depth,
-                blob_filter=settings.git_blob_filter,
-                auth_header=_git_auth_header(token) if token else None,
-                concurrency=concurrency,
-                ref_scan_default=settings.ref_scan_default,
-            )(source, source_key=source_key)
+        token = (
+            github_settings.token.get_secret_value().strip()
+            if github_settings.token is not None
+            else ""
+        )
+        result = RefreshGitSourceIndex(
+            github=github,
+            git=GitRepositoryCache(),
+            index=index,
+            aliases=aliases,
+            default_dependency_paths=settings.dependency_paths,
+            repo_cache_path=settings.repo_cache_path,
+            clone_protocol=settings.git_clone_protocol,
+            fetch_depth=settings.git_fetch_depth,
+            blob_filter=settings.git_blob_filter,
+            auth_header=_git_auth_header(token) if token else None,
+            concurrency=concurrency,
+            ref_scan_default=settings.ref_scan_default,
+        )(source, source_key=source_key)
     return result
 
 
@@ -553,7 +533,6 @@ def _refresh_summary(
     label: str,
     result: RefreshResult,
     *,
-    cache_backend: CacheBackend,
     concurrency: int,
     elapsed: float,
 ) -> str:
@@ -561,9 +540,7 @@ def _refresh_summary(
         f"{action} {label}: {result.repos} repos, {result.refs} refs, {result.edges} edges, "
         f"{result.changed_refs} changed, {result.unchanged_refs} unchanged in {elapsed:.2f}s"
     )
-    if cache_backend == "git":
-        message = f"{message} (concurrency {concurrency})"
-    return message
+    return f"{message} (concurrency {concurrency})"
 
 
 def _git_auth_header(token: str) -> str:

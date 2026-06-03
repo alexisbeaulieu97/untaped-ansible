@@ -37,24 +37,10 @@ class DependencyIndex(Protocol):
     def is_stale(self, source_key: str | None, *, max_age_seconds: int) -> bool: ...
 
 
-class DependencyIndexWriter(Protocol):
-    """Write port for replacing a source scan."""
-
-    def replace_source_scan(self, scan: payloads.IndexScan) -> None: ...
-
-
-class IncrementalDependencyIndexWriter(DependencyIndexWriter, Protocol):
-    """Write port for replacing and pruning individual source repo/ref scans."""
+class IncrementalDependencyIndexWriter(Protocol):
+    """Write port for committing source repo/ref refreshes."""
 
     def status(self, source_key: str) -> payloads.SourceIndexStatus | None: ...
-
-    def ref_scan(
-        self,
-        source_key: str,
-        source_repo: str,
-        ref_kind: str,
-        source_ref: str,
-    ) -> payloads.RefScanMetadata | None: ...
 
     def ref_scans(
         self,
@@ -62,24 +48,6 @@ class IncrementalDependencyIndexWriter(DependencyIndexWriter, Protocol):
         source_repo: str,
         refs: Iterable[tuple[str, str]],
     ) -> dict[tuple[str, str], payloads.RefScanMetadata]: ...
-
-    def replace_ref_scan(self, scan: payloads.RefScan) -> None: ...
-
-    def touch_ref_scan(
-        self,
-        source_key: str,
-        source_repo: str,
-        ref_kind: str,
-        source_ref: str,
-        *,
-        checked_at: datetime,
-    ) -> None: ...
-
-    def prune_source_refs(
-        self,
-        source_key: str,
-        keep: set[tuple[str, str, str]],
-    ) -> None: ...
 
     def commit_source_ref_refresh(
         self,
@@ -91,8 +59,6 @@ class IncrementalDependencyIndexWriter(DependencyIndexWriter, Protocol):
         repo_metadata: tuple[payloads.SourceRepoMetadata, ...] = (),
         scanned_at: datetime,
     ) -> None: ...
-
-    def finalize_source_ref_scan(self, source_key: str, *, scanned_at: datetime) -> None: ...
 
 
 class GitHubDependencyReader(Protocol):

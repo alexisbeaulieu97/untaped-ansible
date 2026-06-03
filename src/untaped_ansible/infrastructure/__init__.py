@@ -1,4 +1,3 @@
-from untaped_ansible.domain.payloads import IndexScan
 from untaped_ansible.infrastructure.config_repo import AliasRepository, SourceRepository
 from untaped_ansible.infrastructure.git_cache import GitCacheError, GitRepositoryCache
 from untaped_ansible.infrastructure.github_index import GithubDependencyIndex
@@ -14,7 +13,6 @@ __all__ = [
     "GitCacheError",
     "GitRepositoryCache",
     "GithubDependencyIndex",
-    "IndexScan",
     "IndexStatus",
     "MultiSourceDependencyIndex",
     "OverlayDependencyIndex",
