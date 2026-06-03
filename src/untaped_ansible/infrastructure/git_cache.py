@@ -47,14 +47,22 @@ class GitRepositoryCache:
         if not (bare / "HEAD").is_file():
             bare.parent.mkdir(parents=True, exist_ok=True)
             self._run(["init", "--bare", str(bare)], timeout=self._slow_timeout)
-        self._run(
-            ["remote", "remove", "origin"],
+        self._ensure_origin(bare, url, auth_header=auth_header)
+        return bare
+
+    def _ensure_origin(self, bare: Path, url: str, *, auth_header: str | None) -> None:
+        current_url = self._run(
+            ["remote", "get-url", "origin"],
             cwd=bare,
+            capture=True,
             check=False,
             auth_header=auth_header,
-        )
-        self._run(["remote", "add", "origin", url], cwd=bare, auth_header=auth_header)
-        return bare
+        ).strip()
+        if not current_url:
+            self._run(["remote", "add", "origin", url], cwd=bare, auth_header=auth_header)
+            return
+        if current_url != url:
+            self._run(["remote", "set-url", "origin", url], cwd=bare, auth_header=auth_header)
 
     def fetch_refs(
         self,

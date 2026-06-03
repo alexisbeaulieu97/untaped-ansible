@@ -45,6 +45,9 @@ class _GraphBuilder:
         self._seen_edges: set[tuple[str, str, str]] = set()
         self._warnings: list[str] = []
         self._seen_warnings: set[str] = set()
+        self._dependencies: dict[tuple[str, str | None, str | None], list[IndexedDependency]] = {}
+        self._dependents: dict[tuple[str, str | None, str | None], list[IndexedDependency]] = {}
+        self._cached_refs: dict[tuple[str, str | None], set[str]] = {}
 
     def build(self) -> DependencyGraph:
         target_id = _node_id(self._request.repo, self._request.ref)
@@ -89,7 +92,7 @@ class _GraphBuilder:
         if remaining == 0:
             return
         next_remaining = None if remaining is None else remaining - 1
-        dependencies = self._index.dependencies(repo, ref, source_key=self._request.source_key)
+        dependencies = self._dependencies_for(repo, ref)
         if not dependencies:
             self._warn_if_missing_cached_ref(repo, ref)
             return
@@ -121,7 +124,7 @@ class _GraphBuilder:
         if remaining == 0:
             return
         next_remaining = None if remaining is None else remaining - 1
-        for indexed in self._index.dependents(repo, ref, source_key=self._request.source_key):
+        for indexed in self._dependents_for(repo, ref):
             target_ref = ref if ref is not None else indexed.dependency_version
             target_id = self._add_node(repo, target_ref)
             target_stack = {*stack, target_id}
@@ -189,7 +192,7 @@ class _GraphBuilder:
     def _warn_if_missing_cached_ref(self, repo: str, ref: str | None) -> None:
         if self._request.source_key is None or ref is None:
             return
-        cached_refs = self._index.cached_refs(repo, source_key=self._request.source_key)
+        cached_refs = self._cached_refs_for(repo)
         node = _node_id(repo, ref)
         if ref in cached_refs:
             return
@@ -205,6 +208,35 @@ class _GraphBuilder:
             f"not expanding {node} from cached source data: repo/ref is not cached. "
             "Add it to the source, scan the matching ref/tag, or use --live for downstream."
         )
+
+    def _dependencies_for(self, repo: str, ref: str | None) -> list[IndexedDependency]:
+        key = (repo, ref, self._request.source_key)
+        if key not in self._dependencies:
+            self._dependencies[key] = self._index.dependencies(
+                repo,
+                ref,
+                source_key=self._request.source_key,
+            )
+        return self._dependencies[key]
+
+    def _dependents_for(self, repo: str, ref: str | None) -> list[IndexedDependency]:
+        key = (repo, ref, self._request.source_key)
+        if key not in self._dependents:
+            self._dependents[key] = self._index.dependents(
+                repo,
+                ref,
+                source_key=self._request.source_key,
+            )
+        return self._dependents[key]
+
+    def _cached_refs_for(self, repo: str) -> set[str]:
+        key = (repo, self._request.source_key)
+        if key not in self._cached_refs:
+            self._cached_refs[key] = self._index.cached_refs(
+                repo,
+                source_key=self._request.source_key,
+            )
+        return self._cached_refs[key]
 
 
 def _node_id(repo: str, ref: str | None) -> str:
