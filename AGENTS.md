@@ -46,11 +46,15 @@ src/untaped_ansible/
 ├── __init__.py           # re-exports app
 ├── plugin.py             # entry-point plugin object
 ├── settings.py           # plugin-owned config/state model
-├── cli/                  # Typer commands; composition root
+├── cli/                  # Typer composition root plus concern-specific commands
 ├── application/          # use cases and ports
 ├── domain/               # pure models, parser, graph, renderers
 └── infrastructure/       # SQLite cache, local filesystem/git adapters
 ```
+
+`cli/commands.py` is the Ansible Typer composition root only. Keep graph
+execution in `cli/graph_commands.py`, source management and refresh wiring in
+`cli/source_commands.py`, and alias management in `cli/alias_commands.py`.
 
 ## Domain Contracts
 
