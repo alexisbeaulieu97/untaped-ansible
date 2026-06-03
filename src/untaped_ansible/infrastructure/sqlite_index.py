@@ -16,6 +16,13 @@ from untaped_ansible.domain.payloads import (
     RefScanTouch,
     SourceIndexStatus,
 )
+from untaped_ansible.infrastructure.sqlite_rows import (
+    dump_dt,
+    edge_from_row,
+    load_dt,
+    ref_scan_from_row,
+)
+from untaped_ansible.infrastructure.sqlite_schema import ensure_schema
 
 
 class IndexStatus(SourceIndexStatus):
@@ -42,7 +49,7 @@ class SqliteDependencyIndex:
         )
         edges = len(scan.dependencies)
         with self._db() as db:
-            _ensure_schema(db)
+            ensure_schema(db)
             db.execute("delete from dependency_edges where source_key = ?", (scan.source_key,))
             db.execute("delete from source_runs where source_key = ?", (scan.source_key,))
             db.execute("delete from source_ref_scans where source_key = ?", (scan.source_key,))
@@ -51,7 +58,7 @@ class SqliteDependencyIndex:
                 insert into source_runs(source_key, scanned_at, repos, refs, edges)
                 values (?, ?, ?, ?, ?)
                 """,
-                (scan.source_key, _dump_dt(scan.scanned_at), repos, refs, edges),
+                (scan.source_key, dump_dt(scan.scanned_at), repos, refs, edges),
             )
             db.executemany(
                 """
@@ -85,7 +92,7 @@ class SqliteDependencyIndex:
         source_ref: str,
     ) -> RefScanMetadata | None:
         with self._db() as db:
-            _ensure_schema(db)
+            ensure_schema(db)
             row = db.execute(
                 """
                 select source_key, source_repo, ref_kind, source_ref, source_sha, backend,
@@ -98,7 +105,7 @@ class SqliteDependencyIndex:
             ).fetchone()
         if row is None:
             return None
-        return _ref_scan_from_row(row)
+        return ref_scan_from_row(row)
 
     def ref_scans(
         self,
@@ -111,7 +118,7 @@ class SqliteDependencyIndex:
             return {}
         scans: dict[tuple[str, str], RefScanMetadata] = {}
         with self._db() as db:
-            _ensure_schema(db)
+            ensure_schema(db)
             for chunk in _chunks(requested, 400):
                 placeholders = ",".join("(?, ?)" for _ in chunk)
                 params: list[object] = [
@@ -137,13 +144,13 @@ class SqliteDependencyIndex:
                 ).fetchall()
                 for row in rows:
                     key = (str(row["ref_kind"]), str(row["source_ref"]))
-                    scans[key] = _ref_scan_from_row(row)
+                    scans[key] = ref_scan_from_row(row)
         return scans
 
     def replace_ref_scan(self, scan: RefScan) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         with self._db() as db:
-            _ensure_schema(db)
+            ensure_schema(db)
             _replace_ref_scan(db, scan)
 
     def touch_ref_scan(
@@ -156,7 +163,7 @@ class SqliteDependencyIndex:
         checked_at: datetime,
     ) -> None:
         with self._db() as db:
-            _ensure_schema(db)
+            ensure_schema(db)
             _touch_ref_scan(
                 db,
                 RefScanTouch(
@@ -170,7 +177,7 @@ class SqliteDependencyIndex:
 
     def prune_source_refs(self, source_key: str, keep: set[tuple[str, str, str]]) -> None:
         with self._db() as db:
-            _ensure_schema(db)
+            ensure_schema(db)
             _prune_source_refs(db, source_key, keep)
 
     def commit_source_ref_refresh(
@@ -184,7 +191,7 @@ class SqliteDependencyIndex:
     ) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         with self._db() as db:
-            _ensure_schema(db)
+            ensure_schema(db)
             for scan in scans:
                 _replace_ref_scan(db, scan)
             for touch in touches:
@@ -194,7 +201,7 @@ class SqliteDependencyIndex:
 
     def finalize_source_ref_scan(self, source_key: str, *, scanned_at: datetime) -> None:
         with self._db() as db:
-            _ensure_schema(db)
+            ensure_schema(db)
             _refresh_source_run_from_ref_scans(db, source_key, scanned_at=scanned_at)
 
     def dependencies(
@@ -235,7 +242,7 @@ class SqliteDependencyIndex:
         if source_key is None:
             return set()
         with self._db() as db:
-            _ensure_schema(db)
+            ensure_schema(db)
             rows = db.execute(
                 """
                 select source_ref
@@ -252,7 +259,7 @@ class SqliteDependencyIndex:
 
     def status(self, source_key: str) -> IndexStatus | None:
         with self._db() as db:
-            _ensure_schema(db)
+            ensure_schema(db)
             row = db.execute(
                 "select scanned_at, repos, refs, edges from source_runs where source_key = ?",
                 (source_key,),
@@ -261,7 +268,7 @@ class SqliteDependencyIndex:
                 return None
         return IndexStatus(
             source_key=source_key,
-            scanned_at=_load_dt(row["scanned_at"]),
+            scanned_at=load_dt(row["scanned_at"]),
             repos=int(row["repos"]),
             refs=int(row["refs"]),
             edges=int(row["edges"]),
@@ -278,7 +285,7 @@ class SqliteDependencyIndex:
 
     def clear(self, source_key: str | None = None) -> None:
         with self._db() as db:
-            _ensure_schema(db)
+            ensure_schema(db)
             if source_key is None:
                 db.execute("delete from dependency_edges")
                 db.execute("delete from source_runs")
@@ -291,7 +298,7 @@ class SqliteDependencyIndex:
     def _select_edges(self, clauses: list[str], params: list[object]) -> list[IndexedDependency]:
         where = " and ".join(clauses)
         with self._db() as db:
-            _ensure_schema(db)
+            ensure_schema(db)
             rows = db.execute(
                 f"""
                 select source_repo, source_ref, source_sha, dependency_repo, dependency_name,
@@ -302,7 +309,7 @@ class SqliteDependencyIndex:
                 """,
                 params,
             ).fetchall()
-        return [_edge_from_row(row) for row in rows]
+        return [edge_from_row(row) for row in rows]
 
     def _connect(self) -> sqlite3.Connection:
         db = sqlite3.connect(self._path)
@@ -317,108 +324,6 @@ class SqliteDependencyIndex:
                 yield db
         finally:
             db.close()
-
-
-def _ensure_schema(db: sqlite3.Connection) -> None:
-    _drop_legacy_scope_schema(db)
-    db.executescript(
-        """
-        create table if not exists source_runs (
-            source_key text primary key,
-            scanned_at text not null,
-            repos integer not null default 0,
-            refs integer not null default 0,
-            edges integer not null default 0
-        );
-
-        create table if not exists dependency_edges (
-            id integer primary key autoincrement,
-            source_key text not null,
-            source_repo text not null,
-            source_ref text,
-            source_ref_kind text,
-            source_sha text,
-            dependency_repo text,
-            dependency_name text not null,
-            dependency_version text,
-            source_path text not null,
-            unresolved text
-        );
-
-        create table if not exists source_ref_scans (
-            source_key text not null,
-            source_repo text not null,
-            ref_kind text not null,
-            source_ref text not null,
-            source_sha text not null,
-            backend text not null,
-            clone_url text,
-            clone_protocol text,
-            dependency_paths_fingerprint text not null,
-            aliases_fingerprint text not null default '',
-            checked_at text not null,
-            indexed_at text not null,
-            last_error text,
-            primary key (source_key, source_repo, ref_kind, source_ref)
-        );
-
-        create index if not exists idx_dependency_edges_source
-            on dependency_edges(source_key, source_repo, source_ref);
-        create index if not exists idx_dependency_edges_dependency
-            on dependency_edges(source_key, dependency_repo, dependency_version);
-        create index if not exists idx_source_ref_scans_source
-            on source_ref_scans(source_key, source_repo, ref_kind, source_ref);
-        """
-    )
-    _ensure_column(db, "source_runs", "repos", "integer not null default 0")
-    _ensure_column(db, "source_runs", "refs", "integer not null default 0")
-    _ensure_column(db, "source_runs", "edges", "integer not null default 0")
-    _ensure_column(db, "dependency_edges", "source_sha", "text")
-    _ensure_column(db, "dependency_edges", "source_ref_kind", "text")
-    _ensure_column(db, "source_ref_scans", "aliases_fingerprint", "text not null default ''")
-
-
-def _drop_legacy_scope_schema(db: sqlite3.Connection) -> None:
-    columns = _table_columns(db, "dependency_edges")
-    if not columns or "source_key" in columns:
-        return
-    db.executescript(
-        """
-        drop table if exists dependency_edges;
-        drop table if exists scan_runs;
-        """
-    )
-
-
-def _edge_from_row(row: sqlite3.Row) -> IndexedDependency:
-    return IndexedDependency(
-        source_repo=row["source_repo"],
-        source_ref=row["source_ref"],
-        source_sha=row["source_sha"],
-        dependency_repo=row["dependency_repo"],
-        dependency_name=row["dependency_name"],
-        dependency_version=row["dependency_version"],
-        source_path=row["source_path"],
-        unresolved=row["unresolved"],
-    )
-
-
-def _ref_scan_from_row(row: sqlite3.Row) -> RefScanMetadata:
-    return RefScanMetadata(
-        source_key=row["source_key"],
-        source_repo=row["source_repo"],
-        ref_kind=row["ref_kind"],
-        source_ref=row["source_ref"],
-        source_sha=row["source_sha"],
-        backend=row["backend"],
-        clone_url=row["clone_url"],
-        clone_protocol=row["clone_protocol"],
-        dependency_paths_fingerprint=row["dependency_paths_fingerprint"],
-        aliases_fingerprint=row["aliases_fingerprint"],
-        checked_at=_load_dt(row["checked_at"]),
-        indexed_at=_load_dt(row["indexed_at"]),
-        last_error=row["last_error"],
-    )
 
 
 def _replace_ref_scan(db: sqlite3.Connection, scan: RefScan) -> None:
@@ -482,8 +387,8 @@ def _replace_ref_scan(db: sqlite3.Connection, scan: RefScan) -> None:
             scan.clone_protocol,
             scan.dependency_paths_fingerprint,
             scan.aliases_fingerprint,
-            _dump_dt(scan.checked_at),
-            _dump_dt(scan.indexed_at),
+            dump_dt(scan.checked_at),
+            dump_dt(scan.indexed_at),
             scan.last_error,
         ),
     )
@@ -497,7 +402,7 @@ def _touch_ref_scan(db: sqlite3.Connection, touch: RefScanTouch) -> None:
         where source_key = ? and source_repo = ? and ref_kind = ? and source_ref = ?
         """,
         (
-            _dump_dt(touch.checked_at),
+            dump_dt(touch.checked_at),
             touch.source_key,
             touch.source_repo,
             touch.ref_kind,
@@ -586,7 +491,7 @@ def _refresh_source_run_from_ref_scans(
         """,
         (
             source_key,
-            _dump_dt(scanned_at),
+            dump_dt(scanned_at),
             int(row["repos"] or 0),
             refs,
             int(edge_row["edges"] or 0),
@@ -594,32 +499,6 @@ def _refresh_source_run_from_ref_scans(
     )
 
 
-def _dump_dt(value: datetime) -> str:
-    return value.astimezone(UTC).isoformat()
-
-
-def _load_dt(value: str) -> datetime:
-    return datetime.fromisoformat(value)
-
-
 def _chunks[T](values: list[T], size: int) -> Iterator[list[T]]:
     for start in range(0, len(values), size):
         yield values[start : start + size]
-
-
-def _ensure_column(db: sqlite3.Connection, table: str, column: str, definition: str) -> None:
-    _validate_sqlite_identifier(table)
-    _validate_sqlite_identifier(column)
-    columns = _table_columns(db, table)
-    if column not in columns:
-        db.execute(f"alter table {table} add column {column} {definition}")
-
-
-def _table_columns(db: sqlite3.Connection, table: str) -> set[str]:
-    _validate_sqlite_identifier(table)
-    return {row["name"] for row in db.execute(f"pragma table_info({table})")}
-
-
-def _validate_sqlite_identifier(value: str) -> None:
-    if not value.isidentifier():
-        raise ValueError(f"invalid sqlite identifier: {value!r}")
