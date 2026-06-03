@@ -8,7 +8,43 @@ from typing import Any
 
 import pytest
 
-from untaped_ansible.infrastructure.git_cache import GitCacheError, GitRepositoryCache
+from untaped_ansible.infrastructure.git_cache import (
+    GitCacheError,
+    GitRepositoryCache,
+    cache_path_for,
+)
+
+
+def test_existing_bare_cache_updates_origin_without_remove_add_churn(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    bare = cache_path_for("https://github.com/acme/site.git", cache_dir=tmp_path / "cache")
+    bare.mkdir(parents=True)
+    (bare / "HEAD").write_text("ref: refs/heads/main\n")
+    commands: list[list[str]] = []
+
+    def fake_run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        cmd = args[0]
+        assert isinstance(cmd, list)
+        commands.append(cmd[1:])
+        if cmd[1:] == ["remote", "get-url", "origin"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout="old-url\n", stderr="")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr("shutil.which", lambda _: "/usr/bin/git")
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    result = GitRepositoryCache().ensure_bare(
+        "https://github.com/acme/site.git",
+        cache_dir=tmp_path / "cache",
+        auth_header=None,
+    )
+
+    assert result == bare
+    assert ["remote", "remove", "origin"] not in commands
+    assert ["remote", "add", "origin", "https://github.com/acme/site.git"] not in commands
+    assert ["remote", "set-url", "origin", "https://github.com/acme/site.git"] in commands
 
 
 def test_auth_header_is_not_passed_in_git_argv(monkeypatch, tmp_path: Path) -> None:

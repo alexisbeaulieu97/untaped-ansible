@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -99,6 +99,46 @@ class SqliteDependencyIndex:
         if row is None:
             return None
         return _ref_scan_from_row(row)
+
+    def ref_scans(
+        self,
+        source_key: str,
+        source_repo: str,
+        refs: Iterable[tuple[str, str]],
+    ) -> dict[tuple[str, str], RefScanMetadata]:
+        requested = sorted(set(refs))
+        if not requested:
+            return {}
+        scans: dict[tuple[str, str], RefScanMetadata] = {}
+        with self._db() as db:
+            _ensure_schema(db)
+            for chunk in _chunks(requested, 400):
+                placeholders = ",".join("(?, ?)" for _ in chunk)
+                params: list[object] = [
+                    value for ref_kind, source_ref in chunk for value in (ref_kind, source_ref)
+                ]
+                params.extend((source_key, source_repo))
+                rows = db.execute(
+                    f"""
+                    with requested(ref_kind, source_ref) as (
+                        values {placeholders}
+                    )
+                    select scans.source_key, scans.source_repo, scans.ref_kind, scans.source_ref,
+                           scans.source_sha, scans.backend, scans.clone_url, scans.clone_protocol,
+                           scans.dependency_paths_fingerprint, scans.aliases_fingerprint,
+                           scans.checked_at, scans.indexed_at, scans.last_error
+                    from source_ref_scans as scans
+                    join requested
+                      on requested.ref_kind = scans.ref_kind
+                     and requested.source_ref = scans.source_ref
+                    where scans.source_key = ? and scans.source_repo = ?
+                    """,
+                    params,
+                ).fetchall()
+                for row in rows:
+                    key = (str(row["ref_kind"]), str(row["source_ref"]))
+                    scans[key] = _ref_scan_from_row(row)
+        return scans
 
     def replace_ref_scan(self, scan: RefScan) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
@@ -486,25 +526,28 @@ def _prune_source_refs(
         """,
         (source_key,),
     ).fetchall()
+    stale: list[tuple[str, str, str]] = []
     for row in rows:
         key = (str(row["source_repo"]), str(row["ref_kind"]), str(row["source_ref"]))
-        if key in keep:
-            continue
-        db.execute(
-            """
-            delete from dependency_edges
-            where source_key = ? and source_repo = ? and source_ref = ?
-              and source_ref_kind = ?
-            """,
-            (source_key, key[0], key[2], key[1]),
-        )
-        db.execute(
-            """
-            delete from source_ref_scans
-            where source_key = ? and source_repo = ? and ref_kind = ? and source_ref = ?
-            """,
-            (source_key, key[0], key[1], key[2]),
-        )
+        if key not in keep:
+            stale.append(key)
+    if not stale:
+        return
+    db.executemany(
+        """
+        delete from dependency_edges
+        where source_key = ? and source_repo = ? and source_ref = ?
+          and source_ref_kind = ?
+        """,
+        [(source_key, repo, source_ref, ref_kind) for repo, ref_kind, source_ref in stale],
+    )
+    db.executemany(
+        """
+        delete from source_ref_scans
+        where source_key = ? and source_repo = ? and ref_kind = ? and source_ref = ?
+        """,
+        [(source_key, repo, ref_kind, source_ref) for repo, ref_kind, source_ref in stale],
+    )
 
 
 def _refresh_source_run_from_ref_scans(
@@ -557,6 +600,11 @@ def _dump_dt(value: datetime) -> str:
 
 def _load_dt(value: str) -> datetime:
     return datetime.fromisoformat(value)
+
+
+def _chunks[T](values: list[T], size: int) -> Iterator[list[T]]:
+    for start in range(0, len(values), size):
+        yield values[start : start + size]
 
 
 def _ensure_column(db: sqlite3.Connection, table: str, column: str, definition: str) -> None:

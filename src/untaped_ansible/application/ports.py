@@ -139,6 +139,13 @@ class IncrementalDependencyIndexWriter(DependencyIndexWriter, Protocol):
         source_ref: str,
     ) -> RefScanMetadata | None: ...
 
+    def ref_scans(
+        self,
+        source_key: str,
+        source_repo: str,
+        refs: Iterable[tuple[str, str]],
+    ) -> dict[tuple[str, str], RefScanMetadata]: ...
+
     def replace_ref_scan(self, scan: RefScan) -> None: ...
 
     def touch_ref_scan(

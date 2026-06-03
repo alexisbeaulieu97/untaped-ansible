@@ -22,10 +22,15 @@ class StubIndex:
                 if edge.source_ref is not None:
                     cached_refs.setdefault(edge.source_repo, set()).add(edge.source_ref)
         self._cached_refs = cached_refs
+        self.dependency_calls: dict[tuple[str, str | None, str | None], int] = {}
+        self.dependent_calls: dict[tuple[str, str | None, str | None], int] = {}
+        self.cached_refs_calls: dict[tuple[str, str | None], int] = {}
 
     def dependencies(
         self, repo: str, ref: str | None, *, source_key: str | None
     ) -> list[IndexedDependency]:
+        key = (repo, ref, source_key)
+        self.dependency_calls[key] = self.dependency_calls.get(key, 0) + 1
         return [
             edge
             for edge in self.edges
@@ -35,6 +40,8 @@ class StubIndex:
     def dependents(
         self, repo: str, ref: str | None, *, source_key: str | None
     ) -> list[IndexedDependency]:
+        key = (repo, ref, source_key)
+        self.dependent_calls[key] = self.dependent_calls.get(key, 0) + 1
         return [
             edge
             for edge in self.edges
@@ -45,6 +52,8 @@ class StubIndex:
         return self.stale
 
     def cached_refs(self, repo: str, *, source_key: str | None) -> set[str]:
+        key = (repo, source_key)
+        self.cached_refs_calls[key] = self.cached_refs_calls.get(key, 0) + 1
         if source_key is None:
             return set()
         return set(self._cached_refs.get(repo, set()))
@@ -377,3 +386,141 @@ def test_upstream_without_ref_keeps_each_matching_target_ref() -> None:
         ("acme/site@main", "acme/base@main", "impacts"),
         ("acme/site@release", "acme/base@v1", "impacts"),
     ]
+
+
+def test_graph_traversal_caches_repeated_index_reads_for_converging_paths() -> None:
+    index = StubIndex(
+        [
+            IndexedDependency(
+                source_repo="acme/root",
+                source_ref="main",
+                dependency_repo="acme/left",
+                dependency_name="left",
+                dependency_version="main",
+                source_path="roles/requirements.yml",
+            ),
+            IndexedDependency(
+                source_repo="acme/root",
+                source_ref="main",
+                dependency_repo="acme/right",
+                dependency_name="right",
+                dependency_version="main",
+                source_path="roles/requirements.yml",
+            ),
+            IndexedDependency(
+                source_repo="acme/left",
+                source_ref="main",
+                dependency_repo="acme/shared",
+                dependency_name="shared",
+                dependency_version="main",
+                source_path="roles/requirements.yml",
+            ),
+            IndexedDependency(
+                source_repo="acme/right",
+                source_ref="main",
+                dependency_repo="acme/shared",
+                dependency_name="shared",
+                dependency_version="main",
+                source_path="roles/requirements.yml",
+            ),
+            IndexedDependency(
+                source_repo="acme/shared",
+                source_ref="main",
+                dependency_repo="acme/leaf",
+                dependency_name="leaf",
+                dependency_version="main",
+                source_path="roles/requirements.yml",
+            ),
+        ],
+        cached_refs={
+            "acme/root": {"main"},
+            "acme/left": {"main"},
+            "acme/right": {"main"},
+            "acme/shared": {"main"},
+            "acme/leaf": {"main"},
+        },
+    )
+
+    graph = BuildGraph(index)(
+        GraphRequest(
+            repo="acme/root",
+            ref="main",
+            source_key="source:prod",
+            direction="deps",
+            depth=4,
+        )
+    )
+
+    assert ("acme/shared@main", "acme/leaf@main", "requires") in [
+        (edge.source_id, edge.target_id, edge.relation) for edge in graph.edges
+    ]
+    assert index.dependency_calls[("acme/shared", "main", "source:prod")] == 1
+
+
+def test_impact_traversal_caches_repeated_index_reads_for_converging_paths() -> None:
+    index = StubIndex(
+        [
+            IndexedDependency(
+                source_repo="acme/left",
+                source_ref="main",
+                dependency_repo="acme/root",
+                dependency_name="root",
+                dependency_version="main",
+                source_path="roles/requirements.yml",
+            ),
+            IndexedDependency(
+                source_repo="acme/right",
+                source_ref="main",
+                dependency_repo="acme/root",
+                dependency_name="root",
+                dependency_version="main",
+                source_path="roles/requirements.yml",
+            ),
+            IndexedDependency(
+                source_repo="acme/shared",
+                source_ref="main",
+                dependency_repo="acme/left",
+                dependency_name="left",
+                dependency_version="main",
+                source_path="roles/requirements.yml",
+            ),
+            IndexedDependency(
+                source_repo="acme/shared",
+                source_ref="main",
+                dependency_repo="acme/right",
+                dependency_name="right",
+                dependency_version="main",
+                source_path="roles/requirements.yml",
+            ),
+            IndexedDependency(
+                source_repo="acme/leaf",
+                source_ref="main",
+                dependency_repo="acme/shared",
+                dependency_name="shared",
+                dependency_version="main",
+                source_path="roles/requirements.yml",
+            ),
+        ],
+        cached_refs={
+            "acme/root": {"main"},
+            "acme/left": {"main"},
+            "acme/right": {"main"},
+            "acme/shared": {"main"},
+            "acme/leaf": {"main"},
+        },
+    )
+
+    graph = BuildGraph(index)(
+        GraphRequest(
+            repo="acme/root",
+            ref="main",
+            source_key="source:prod",
+            direction="impact",
+            depth=4,
+        )
+    )
+
+    assert ("acme/leaf@main", "acme/shared@main", "impacts") in [
+        (edge.source_id, edge.target_id, edge.relation) for edge in graph.edges
+    ]
+    assert index.dependent_calls[("acme/shared", "main", "source:prod")] == 1

@@ -386,6 +386,45 @@ def test_pruning_git_refs_removes_legacy_full_source_edges(tmp_path) -> None:
     assert index.dependents("acme/git", None, source_key="source:prod")
 
 
+def test_pruning_keeps_same_ref_name_separate_by_ref_kind(tmp_path) -> None:
+    index = SqliteDependencyIndex(tmp_path / "index.sqlite3")
+    now = datetime(2026, 6, 1, tzinfo=UTC)
+    for ref_kind, dependency_repo in (("heads", "acme/branch-base"), ("tags", "acme/tag-base")):
+        index.replace_ref_scan(
+            RefScan(
+                source_key="source:prod",
+                source_repo="acme/site",
+                ref_kind=ref_kind,
+                source_ref="v1",
+                source_sha=f"sha-{ref_kind}",
+                backend="git",
+                clone_url="https://github.com/acme/site.git",
+                clone_protocol="https",
+                dependency_paths_fingerprint="paths-a",
+                checked_at=now,
+                indexed_at=now,
+                dependencies=(
+                    IndexedDependency(
+                        source_repo="acme/site",
+                        source_ref="v1",
+                        source_sha=f"sha-{ref_kind}",
+                        dependency_repo=dependency_repo,
+                        dependency_name=dependency_repo.rsplit("/", maxsplit=1)[-1],
+                        dependency_version=None,
+                        source_path="roles/requirements.yml",
+                    ),
+                ),
+            )
+        )
+
+    index.prune_source_refs("source:prod", {("acme/site", "tags", "v1")})
+
+    assert index.ref_scan("source:prod", "acme/site", "heads", "v1") is None
+    assert index.ref_scan("source:prod", "acme/site", "tags", "v1") is not None
+    assert not index.dependents("acme/branch-base", None, source_key="source:prod")
+    assert index.dependents("acme/tag-base", None, source_key="source:prod")
+
+
 def test_schema_column_helper_rejects_invalid_identifiers(tmp_path) -> None:
     db_path = tmp_path / "index.sqlite3"
     db = sqlite3.connect(db_path)

@@ -9,7 +9,11 @@ from pathlib import Path
 import pytest
 
 from untaped_ansible.application.ports import GitRef
-from untaped_ansible.application.refresh_git_index import RefreshGitSourceIndex
+from untaped_ansible.application.refresh_git_index import (
+    RefreshGitSourceIndex,
+    _RefSelection,
+    _selected_refs,
+)
 from untaped_ansible.infrastructure.git_cache import GitCacheError
 from untaped_ansible.infrastructure.sqlite_index import SqliteDependencyIndex
 from untaped_ansible.settings import SourceDefinition
@@ -66,6 +70,7 @@ class FakeGitCache:
         self.files: dict[tuple[str, str, str], str] = {}
         self.fetches: list[tuple[str, tuple[str, ...], int, bool, str | None]] = []
         self.reads: list[tuple[str, str, str, str | None]] = []
+        self.list_ref_calls: list[tuple[str, str]] = []
         self.fail_fetches: set[str] = set()
 
     def ensure_bare(
@@ -91,6 +96,7 @@ class FakeGitCache:
         self.fetches.append((bare_path.name, tuple(refspecs), depth, blob_filter, auth_header))
 
     def list_refs(self, bare_path: Path, kind: str) -> list[GitRef]:
+        self.list_ref_calls.append((bare_path.name, kind))
         return self.refs.get((bare_path.name, kind), [])
 
     def read_file(
@@ -158,6 +164,62 @@ class SlowRefScanIndex:
         finally:
             with self._lock:
                 self.active_ref_scans -= 1
+
+    def ref_scans(self, source_key: str, source_repo: str, refs):
+        with self._lock:
+            self.active_ref_scans += 1
+            self.max_active_ref_scans = max(self.max_active_ref_scans, self.active_ref_scans)
+        try:
+            time.sleep(0.05)
+            return self._wrapped.ref_scans(source_key, source_repo, refs)
+        finally:
+            with self._lock:
+                self.active_ref_scans -= 1
+
+    def replace_ref_scan(self, scan):
+        return self._wrapped.replace_ref_scan(scan)
+
+    def touch_ref_scan(
+        self, source_key: str, source_repo: str, ref_kind: str, source_ref: str, **kwargs
+    ):
+        return self._wrapped.touch_ref_scan(
+            source_key,
+            source_repo,
+            ref_kind,
+            source_ref,
+            **kwargs,
+        )
+
+    def prune_source_refs(self, source_key: str, keep):
+        return self._wrapped.prune_source_refs(source_key, keep)
+
+    def commit_source_ref_refresh(self, source_key: str, **kwargs):
+        return self._wrapped.commit_source_ref_refresh(source_key, **kwargs)
+
+    def finalize_source_ref_scan(self, source_key: str, **kwargs):
+        return self._wrapped.finalize_source_ref_scan(source_key, **kwargs)
+
+    def replace_source_scan(self, scan):
+        return self._wrapped.replace_source_scan(scan)
+
+
+class CountingRefScanIndex:
+    def __init__(self, wrapped: SqliteDependencyIndex) -> None:
+        self._wrapped = wrapped
+        self.ref_scan_calls = 0
+        self.ref_scans_calls: list[tuple[str, str, tuple[tuple[str, str], ...]]] = []
+
+    def status(self, source_key: str):
+        return self._wrapped.status(source_key)
+
+    def ref_scan(self, source_key: str, source_repo: str, ref_kind: str, source_ref: str):
+        self.ref_scan_calls += 1
+        return self._wrapped.ref_scan(source_key, source_repo, ref_kind, source_ref)
+
+    def ref_scans(self, source_key: str, source_repo: str, refs):
+        refs_tuple = tuple(refs)
+        self.ref_scans_calls.append((source_key, source_repo, refs_tuple))
+        return self._wrapped.ref_scans(source_key, source_repo, refs_tuple)
 
     def replace_ref_scan(self, scan):
         return self._wrapped.replace_ref_scan(scan)
@@ -317,6 +379,48 @@ def test_git_refresh_processes_repositories_concurrently_and_reports_change_coun
     assert git.reads == []
 
 
+def test_git_refresh_reads_ref_metadata_in_one_batch_per_repo(tmp_path: Path) -> None:
+    github = FakeGitHub()
+    git = FakeGitCache()
+    git.refs[("site", "heads")] = [
+        GitRef(kind="heads", name="main", sha="sha-main"),
+        GitRef(kind="heads", name="release", sha="sha-release"),
+    ]
+    git.files[("site", "sha-main", "roles/requirements.yml")] = (
+        "- src: https://github.com/acme/base\n"
+    )
+    git.files[("site", "sha-release", "roles/requirements.yml")] = (
+        "- src: https://github.com/acme/release-base\n"
+    )
+    index = CountingRefScanIndex(SqliteDependencyIndex(tmp_path / "index.sqlite3"))
+
+    RefreshGitSourceIndex(
+        github=github,
+        git=git,
+        index=index,
+        aliases={},
+        default_dependency_paths=["roles/requirements.yml"],
+        repo_cache_path=tmp_path / "repos",
+        clone_protocol="https",
+        fetch_depth=1,
+        blob_filter=True,
+        auth_header=None,
+        ref_scan_default="default_branch",
+    )(
+        SourceDefinition(name="prod", orgs=["acme"], ref_patterns=["*"]),
+        source_key="source:prod",
+    )
+
+    assert index.ref_scan_calls == 0
+    assert index.ref_scans_calls == [
+        (
+            "source:prod",
+            "acme/site",
+            (("heads", "main"), ("heads", "release")),
+        )
+    ]
+
+
 def test_git_refresh_serializes_sqlite_metadata_reads_while_fetching_concurrently(
     tmp_path: Path,
 ) -> None:
@@ -343,6 +447,38 @@ def test_git_refresh_serializes_sqlite_metadata_reads_while_fetching_concurrentl
 
     assert git.max_active_fetches > 1
     assert index.max_active_ref_scans == 1
+
+
+def test_selected_refs_lists_each_ref_kind_once() -> None:
+    git = FakeGitCache()
+    bare = Path("site")
+    git.refs[("site", "heads")] = [
+        GitRef(kind="heads", name="main", sha="sha-main"),
+        GitRef(kind="heads", name="release/1", sha="sha-release"),
+    ]
+
+    refs = _selected_refs(
+        git,
+        bare,
+        [
+            _RefSelection(
+                kind="heads",
+                patterns=("main",),
+                refspecs=("+refs/heads/main:refs/heads/main",),
+            ),
+            _RefSelection(
+                kind="heads",
+                patterns=("release/*",),
+                refspecs=("+refs/heads/release/*:refs/heads/release/*",),
+            ),
+        ],
+    )
+
+    assert [(ref.kind, ref.name) for ref in refs] == [
+        ("heads", "main"),
+        ("heads", "release/1"),
+    ]
+    assert git.list_ref_calls == [("site", "heads")]
 
 
 def test_git_refresh_reuses_unchanged_ref_metadata_without_rereading_files(tmp_path: Path) -> None:

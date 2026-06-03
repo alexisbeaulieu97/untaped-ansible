@@ -20,6 +20,7 @@ from untaped_ansible.application.ports import (
     IncrementalDependencyIndexWriter,
     IndexedDependency,
     RefScan,
+    RefScanMetadata,
     RefScanTouch,
 )
 from untaped_ansible.application.refresh_index import RefreshResult
@@ -211,10 +212,11 @@ class RefreshGitSourceIndex:
             blob_filter=self._blob_filter,
             auth_header=self._auth_header,
         )
-        for ref in _selected_refs(self._git, bare, selections):
+        refs = _selected_refs(self._git, bare, selections)
+        metadata_by_ref = self._ref_scan_metadata(source_key, repo.full_name, refs)
+        for ref in refs:
             selected.add((repo.full_name, ref.kind, ref.name))
-            with self._index_lock:
-                metadata = self._index.ref_scan(source_key, repo.full_name, ref.kind, ref.name)
+            metadata = metadata_by_ref.get((ref.kind, ref.name))
             if (
                 metadata is not None
                 and metadata.source_sha == ref.sha
@@ -280,6 +282,19 @@ class RefreshGitSourceIndex:
             for candidate in _repo_candidates(self._github.list_team_repos(org, slug)):
                 repos.setdefault(candidate.full_name, candidate)
         return [repos[name] for name in sorted(repos)]
+
+    def _ref_scan_metadata(
+        self,
+        source_key: str,
+        repo: str,
+        refs: list[GitRef],
+    ) -> dict[tuple[str, str], RefScanMetadata]:
+        with self._index_lock:
+            return self._index.ref_scans(
+                source_key,
+                repo,
+                ((ref.kind, ref.name) for ref in refs),
+            )
 
     def _read_dependencies(
         self,
@@ -353,8 +368,12 @@ def _namespace_refspec(namespace: str) -> str:
 
 def _selected_refs(git: GitCache, bare: Path, selections: list[_RefSelection]) -> list[GitRef]:
     selected: dict[tuple[str, str], GitRef] = {}
+    refs_by_kind = {
+        kind: git.list_refs(bare, kind)
+        for kind in sorted({selection.kind for selection in selections})
+    }
     for selection in selections:
-        for ref in git.list_refs(bare, selection.kind):
+        for ref in refs_by_kind[selection.kind]:
             if not pattern_matches(ref.name, selection.patterns):
                 continue
             selected[(ref.kind, ref.name)] = ref
