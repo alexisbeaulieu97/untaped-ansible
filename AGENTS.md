@@ -81,6 +81,11 @@ SHAs, graph edges, unresolved declarations, and timestamps. SHA is
 authoritative. Branch and tag names are resolved during source refresh and
 cached with freshness metadata.
 
+Keep SQLite adapter methods in `infrastructure/sqlite_index.py` focused on
+transaction boundaries and query flow. Schema/migration helpers live in
+`infrastructure/sqlite_schema.py`, and row/datetime mapping lives in
+`infrastructure/sqlite_rows.py`.
+
 Source-index payload DTOs such as `IndexedDependency`, `GitRef`, `RefScan`,
 and `IndexScan` live in `domain/payloads.py` because they cross the
 application/infrastructure boundary. `application/ports.py` should stay
