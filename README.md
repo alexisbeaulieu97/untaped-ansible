@@ -31,6 +31,7 @@ untaped config set github.token ghp_xxx
 untaped ansible graph TARGET --downstream
 untaped ansible graph TARGET --org acme --team platform --upstream
 untaped ansible graph TARGET --source platform --upstream --cached
+untaped ansible graph TARGET --source platform --source ops --upstream --cached
 untaped ansible graph TARGET --source platform --upstream
 untaped ansible graph TARGET --source platform --downstream --live
 untaped ansible graph TARGET --source platform --both --concurrency 12
@@ -69,7 +70,9 @@ the remote freshness check, or `--live` to opt back into live GitHub reads for
 downstream traversal.
 
 Upstream graphs are source-backed because GitHub impact analysis needs a
-search boundary. Use inline selectors for one-off work:
+search boundary. Repeat `--source` to union multiple saved source caches in one
+graph. Each saved source is refreshed under its own cache key unless `--cached`
+is passed. Use inline selectors for one-off work:
 
 ```bash
 untaped ansible graph acme/base --org acme --team platform --upstream

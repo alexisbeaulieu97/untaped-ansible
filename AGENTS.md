@@ -105,11 +105,13 @@ Cached downstream traversal is strict about refs. If a dependency points at
 `repo@v1` and only `repo@main` is cached, traversal must warn and stop there
 instead of falling back to another cached ref.
 
-Saved sources are configured under `ansible.sources`. Inline graph selectors
-(`--org`, `--team`, `--repo`, `--path`, `--ref-kind`, `--ref-pattern`) are
-cached under deterministic internal source keys so repeated commands can reuse
-the same scan. Do not reintroduce user-facing `scope`, `index`, or `--direction`
-workflow concepts.
+Saved sources are configured under `ansible.sources`. `graph --source NAME` is
+repeatable; repeated saved sources are additive and graph reads union their
+existing `source:NAME` caches without creating a synthetic persisted source.
+Inline graph selectors (`--org`, `--team`, `--repo`, `--path`, `--ref-kind`,
+`--ref-pattern`) are cached under deterministic internal source keys so repeated
+commands can reuse the same scan. Do not reintroduce user-facing `scope`,
+`index`, or `--direction` workflow concepts.
 
 Saved source edits are patch-style list mutations. `source edit NAME` adds,
 removes, or clears source selector lists without requiring the user to restate

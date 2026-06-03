@@ -563,6 +563,298 @@ def test_graph_source_upstream_requires_refresh_when_index_missing(
     assert "untaped ansible graph acme/base --source platform --upstream --refresh" in result.output
 
 
+def test_graph_repeated_sources_union_cached_upstream(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    index_path = tmp_path / "index.sqlite3"
+    index = SqliteDependencyIndex(index_path)
+    scanned_at = datetime.now(UTC)
+    index.replace_source_scan(
+        IndexScan(
+            source_key="source:platform",
+            scanned_at=scanned_at,
+            dependencies=(
+                IndexedDependency(
+                    source_repo="acme/site",
+                    source_ref="main",
+                    dependency_repo="acme/base",
+                    dependency_name="base",
+                    dependency_version=None,
+                    source_path="roles/requirements.yml",
+                ),
+            ),
+        )
+    )
+    index.replace_source_scan(
+        IndexScan(
+            source_key="source:ops",
+            scanned_at=scanned_at,
+            dependencies=(
+                IndexedDependency(
+                    source_repo="acme/deploy",
+                    source_ref="release",
+                    dependency_repo="acme/base",
+                    dependency_name="base",
+                    dependency_version=None,
+                    source_path="roles/requirements.yml",
+                ),
+            ),
+        )
+    )
+    cfg = _write_config(
+        tmp_path,
+        index_path=index_path,
+        top_level_ansible={
+            "sources": [
+                {"name": "platform", "repos": ["acme/site"]},
+                {"name": "ops", "repos": ["acme/deploy"]},
+            ]
+        },
+    )
+    monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "graph",
+            "acme/base",
+            "--source",
+            "platform",
+            "--source",
+            "ops",
+            "--upstream",
+            "--cached",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "    +-- acme/site@main" in result.stdout
+    assert "    +-- acme/deploy@release" in result.stdout
+
+
+def test_graph_repeated_sources_refresh_each_saved_source(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    index_path = tmp_path / "index.sqlite3"
+    cfg = _write_config(
+        tmp_path,
+        index_path=index_path,
+        top_level_ansible={
+            "sources": [
+                {"name": "platform", "repos": ["acme/site"]},
+                {"name": "ops", "repos": ["acme/deploy"]},
+            ]
+        },
+    )
+    monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
+    calls: list[tuple[str, str]] = []
+
+    def fake_refresh(
+        source,
+        *,
+        source_key: str,
+        index: SqliteDependencyIndex,
+        aliases: dict[str, str],
+        settings,
+        cache_backend: str,
+        concurrency: int,
+    ) -> RefreshResult:
+        del aliases, settings, cache_backend, concurrency
+        calls.append((source.name, source_key))
+        source_repo = source.repos[0]
+        source_ref = "main" if source.name == "platform" else "release"
+        index.replace_source_scan(
+            IndexScan(
+                source_key=source_key,
+                scanned_at=datetime.now(UTC),
+                dependencies=(
+                    IndexedDependency(
+                        source_repo=source_repo,
+                        source_ref=source_ref,
+                        dependency_repo="acme/base",
+                        dependency_name="base",
+                        dependency_version=None,
+                        source_path="roles/requirements.yml",
+                    ),
+                ),
+            )
+        )
+        return RefreshResult(
+            source_key=source_key,
+            repos=1,
+            refs=1,
+            edges=1,
+            changed_refs=1,
+            unchanged_refs=0,
+        )
+
+    monkeypatch.setattr(source_commands, "_refresh_source", fake_refresh)
+
+    result = CliRunner().invoke(
+        app,
+        ["graph", "acme/base", "--source", "platform", "--source", "ops", "--upstream"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert calls == [("platform", "source:platform"), ("ops", "source:ops")]
+    assert "    +-- acme/site@main" in result.stdout
+    assert "    +-- acme/deploy@release" in result.stdout
+
+
+def test_graph_repeated_sources_cached_reports_missing_named_source(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    index_path = tmp_path / "index.sqlite3"
+    SqliteDependencyIndex(index_path).replace_source_scan(
+        IndexScan(
+            source_key="source:ops",
+            scanned_at=datetime.now(UTC),
+            dependencies=(
+                IndexedDependency(
+                    source_repo="acme/deploy",
+                    source_ref="main",
+                    dependency_repo="acme/base",
+                    dependency_name="base",
+                    dependency_version=None,
+                    source_path="roles/requirements.yml",
+                ),
+            ),
+        )
+    )
+    cfg = _write_config(
+        tmp_path,
+        index_path=index_path,
+        top_level_ansible={
+            "sources": [
+                {"name": "platform", "repos": ["acme/site"]},
+                {"name": "ops", "repos": ["acme/deploy"]},
+            ]
+        },
+    )
+    monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "graph",
+            "acme/base",
+            "--source",
+            "platform",
+            "--source",
+            "ops",
+            "--upstream",
+            "--cached",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "no cached source data found for source 'platform'" in result.output
+
+
+def test_graph_repeated_sources_downstream_cached_reports_missing_named_source(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    index_path = tmp_path / "index.sqlite3"
+    SqliteDependencyIndex(index_path).replace_source_scan(
+        IndexScan(
+            source_key="source:ops",
+            scanned_at=datetime.now(UTC),
+            dependencies=(
+                IndexedDependency(
+                    source_repo="acme/deploy",
+                    source_ref="main",
+                    dependency_repo="acme/base",
+                    dependency_name="base",
+                    dependency_version=None,
+                    source_path="roles/requirements.yml",
+                ),
+            ),
+        )
+    )
+    cfg = _write_config(
+        tmp_path,
+        index_path=index_path,
+        top_level_ansible={
+            "sources": [
+                {"name": "platform", "repos": ["acme/site"]},
+                {"name": "ops", "repos": ["acme/deploy"]},
+            ]
+        },
+    )
+    monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "graph",
+            "acme/deploy",
+            "--source",
+            "platform",
+            "--source",
+            "ops",
+            "--downstream",
+            "--cached",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "no cached source data found for source 'platform'" in result.output
+
+
+def test_graph_repeated_sources_both_cached_reports_missing_named_source(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    index_path = tmp_path / "index.sqlite3"
+    SqliteDependencyIndex(index_path).replace_source_scan(
+        IndexScan(
+            source_key="source:ops",
+            scanned_at=datetime.now(UTC),
+            dependencies=(
+                IndexedDependency(
+                    source_repo="acme/deploy",
+                    source_ref="main",
+                    dependency_repo="acme/base",
+                    dependency_name="base",
+                    dependency_version=None,
+                    source_path="roles/requirements.yml",
+                ),
+            ),
+        )
+    )
+    cfg = _write_config(
+        tmp_path,
+        index_path=index_path,
+        top_level_ansible={
+            "sources": [
+                {"name": "platform", "repos": ["acme/site"]},
+                {"name": "ops", "repos": ["acme/deploy"]},
+            ]
+        },
+    )
+    monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "graph",
+            "acme/base",
+            "--source",
+            "platform",
+            "--source",
+            "ops",
+            "--cached",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "no cached source data found for source 'platform'" in result.output
+
+
 def test_source_save_clears_cached_data_for_redefined_source(
     tmp_path: Path,
     monkeypatch,
@@ -1401,6 +1693,83 @@ def test_graph_inline_upstream_with_ref_renders_all_matching_source_refs(
     assert captured == {"ref_kinds": [], "ref_patterns": []}
     assert "    +-- acme/playbook@master" in result.stdout
     assert "    +-- acme/playbook@v3" in result.stdout
+
+
+def test_graph_inline_source_preserves_repeated_selectors(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    index_path = tmp_path / "index.sqlite3"
+    cfg = _write_config(tmp_path, index_path=index_path)
+    monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
+    captured: dict[str, object] = {}
+
+    def fake_refresh(
+        source,
+        *,
+        source_key: str,
+        index: SqliteDependencyIndex,
+        aliases: dict[str, str],
+        settings,
+        cache_backend: str,
+        concurrency: int,
+    ) -> RefreshResult:
+        del aliases, settings, cache_backend, concurrency
+        captured["orgs"] = source.orgs
+        captured["teams"] = source.teams
+        captured["repos"] = source.repos
+        captured["paths"] = source.dependency_paths
+        captured["ref_kinds"] = source.ref_kinds
+        captured["ref_patterns"] = source.ref_patterns
+        index.replace_source_scan(
+            IndexScan(source_key=source_key, scanned_at=datetime.now(UTC), dependencies=())
+        )
+        return RefreshResult(source_key=source_key, repos=0, refs=0, edges=0)
+
+    monkeypatch.setattr(source_commands, "_refresh_source", fake_refresh)
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "graph",
+            "acme/base",
+            "--org",
+            "acme",
+            "--org",
+            "beta",
+            "--team",
+            "acme/platform",
+            "--team",
+            "beta/platform",
+            "--repo",
+            "acme/site",
+            "--repo",
+            "beta/site",
+            "--path",
+            "roles/requirements.yml",
+            "--path",
+            "meta/main.yml",
+            "--ref-kind",
+            "heads",
+            "--ref-kind",
+            "tags",
+            "--ref-pattern",
+            "main",
+            "--ref-pattern",
+            "v*",
+            "--upstream",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured == {
+        "orgs": ["acme", "beta"],
+        "teams": ["acme/platform", "beta/platform"],
+        "repos": ["acme/site", "beta/site"],
+        "paths": ["meta/main.yml", "roles/requirements.yml"],
+        "ref_kinds": ["heads", "tags"],
+        "ref_patterns": ["main", "v*"],
+    }
 
 
 def test_graph_cached_skips_source_refresh(tmp_path: Path, monkeypatch) -> None:

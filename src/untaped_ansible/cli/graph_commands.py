@@ -31,6 +31,7 @@ from untaped_ansible.domain.renderers import GraphFormat, render_graph
 from untaped_ansible.infrastructure import (
     AliasRepository,
     GithubDependencyIndex,
+    MultiSourceDependencyIndex,
     OverlayDependencyIndex,
     SourceRepository,
     SqliteDependencyIndex,
@@ -70,10 +71,10 @@ def graph_command(
         "--ref",
         help="Target branch, tag, or SHA for live dependency reads and cached upstream lookup.",
     ),
-    source: str | None = typer.Option(
+    source: list[str] | None = typer.Option(
         None,
         "--source",
-        help="Saved source to use for cached graph data and upstream impact.",
+        help="Saved source to use for cached graph data and upstream impact; repeat to union.",
     ),
     upstream: bool = typer.Option(False, "--upstream", help="Show who depends on TARGET."),
     downstream: bool = typer.Option(False, "--downstream", help="Show what TARGET depends on."),
@@ -153,7 +154,7 @@ def graph_command(
         selected_backend = cache_backend or settings.cache_backend
         git_concurrency = concurrency or settings.git_fetch_concurrency
         graph_source = _graph_source(
-            source_name=source,
+            source_names=source,
             orgs=orgs,
             teams=teams,
             repos=source_repos,
@@ -162,6 +163,7 @@ def graph_command(
             ref_patterns=ref_patterns,
         )
         sqlite_index = SqliteDependencyIndex(settings.index_path)
+        index: DependencyIndex = _dependency_index_for_graph_source(sqlite_index, graph_source)
         should_refresh_source = _should_refresh_source(
             source_state=graph_source,
             direction=direction,
@@ -170,40 +172,39 @@ def graph_command(
             refresh=refresh,
         )
         if should_refresh_source:
-            if graph_source.definition is None:
+            if not graph_source.selections:
                 raise typer.BadParameter("--refresh requires --source or inline source selectors")
-            if graph_source.key is None or graph_source.label is None:
-                raise typer.BadParameter("--refresh requires --source or inline source selectors")
-            started_at = time.perf_counter()
-            result = source_commands._refresh_source(
-                graph_source.definition,
-                source_key=graph_source.key,
-                index=sqlite_index,
-                aliases=aliases,
-                settings=settings,
-                cache_backend=selected_backend,
-                concurrency=git_concurrency,
-            )
-            typer.echo(
-                source_commands._refresh_summary(
-                    "refreshed" if refresh else "checked",
-                    graph_source.label or "source",
-                    result,
+            for selection in graph_source.selections:
+                started_at = time.perf_counter()
+                result = source_commands._refresh_source(
+                    selection.definition,
+                    source_key=selection.key,
+                    index=sqlite_index,
+                    aliases=aliases,
+                    settings=settings,
                     cache_backend=selected_backend,
                     concurrency=git_concurrency,
-                    elapsed=time.perf_counter() - started_at,
-                ),
-                err=True,
-            )
+                )
+                typer.echo(
+                    source_commands._refresh_summary(
+                        "refreshed" if refresh else "checked",
+                        selection.label,
+                        result,
+                        cache_backend=selected_backend,
+                        concurrency=git_concurrency,
+                        elapsed=time.perf_counter() - started_at,
+                    ),
+                    err=True,
+                )
 
         direction, graph_warnings = _effective_direction(
             target=target,
             source_state=graph_source,
             index=sqlite_index,
             direction=direction,
+            cached=cached,
         )
 
-        index: DependencyIndex = sqlite_index
         target_path = Path(target).expanduser()
         if target_path.exists():
             local_edges = _local_dependencies(
@@ -278,8 +279,15 @@ def graph_command(
 
 
 @dataclass(frozen=True)
+class _GraphSourceSelection:
+    definition: SourceDefinition
+    key: str
+    label: str
+
+
+@dataclass(frozen=True)
 class _GraphSource:
-    definition: SourceDefinition | None
+    selections: tuple[_GraphSourceSelection, ...]
     key: str | None
     label: str | None
     saved: bool
@@ -298,7 +306,7 @@ def _graph_direction(*, upstream: bool, downstream: bool, both: bool) -> GraphDi
 
 def _graph_source(
     *,
-    source_name: str | None,
+    source_names: list[str] | None,
     orgs: list[str] | None,
     teams: list[str] | None,
     repos: list[str] | None,
@@ -307,19 +315,30 @@ def _graph_source(
     ref_patterns: list[str] | None,
 ) -> _GraphSource:
     has_inline = any((orgs, teams, repos, paths, ref_kinds, ref_patterns))
-    if source_name is not None and has_inline:
+    selected_source_names = _dedupe_preserve_order(source_names or [])
+    if selected_source_names and has_inline:
         raise typer.BadParameter(
             "--source cannot be combined with --org, --team, --repo, --path, "
             "--ref-kind, or --ref-pattern"
         )
-    if source_name is not None:
-        source = SourceRepository().get(source_name)
-        if source is None:
-            raise UntapedError(f"unknown source: {source_name!r}")
+    if selected_source_names:
+        source_repository = SourceRepository()
+        selections: list[_GraphSourceSelection] = []
+        for source_name in selected_source_names:
+            source = source_repository.get(source_name)
+            if source is None:
+                raise UntapedError(f"unknown source: {source_name!r}")
+            selections.append(
+                _GraphSourceSelection(
+                    definition=source,
+                    key=source_commands._saved_source_key(source_name),
+                    label=source_name,
+                )
+            )
         return _GraphSource(
-            definition=source,
-            key=source_commands._saved_source_key(source_name),
-            label=source_name,
+            selections=tuple(selections),
+            key=_graph_source_key(selections),
+            label=_graph_source_label(selections),
             saved=True,
         )
     if has_inline:
@@ -334,12 +353,47 @@ def _graph_source(
         )
         key = source_commands._inline_source_key(source)
         return _GraphSource(
-            definition=source,
+            selections=(
+                _GraphSourceSelection(
+                    definition=source,
+                    key=key,
+                    label=f"inline source {key.removeprefix('inline:')}",
+                ),
+            ),
             key=key,
             label=f"inline source {key.removeprefix('inline:')}",
             saved=False,
         )
-    return _GraphSource(definition=None, key=None, label=None, saved=False)
+    return _GraphSource(selections=(), key=None, label=None, saved=False)
+
+
+def _dedupe_preserve_order(values: list[str]) -> list[str]:
+    return list(dict.fromkeys(values))
+
+
+def _graph_source_key(selections: list[_GraphSourceSelection]) -> str:
+    if len(selections) == 1:
+        return selections[0].key
+    names = ",".join(selection.key.removeprefix("source:") for selection in selections)
+    return f"sources:{names}"
+
+
+def _graph_source_label(selections: list[_GraphSourceSelection]) -> str:
+    if len(selections) == 1:
+        return selections[0].label
+    return f"sources {', '.join(selection.label for selection in selections)}"
+
+
+def _dependency_index_for_graph_source(
+    index: DependencyIndex,
+    source_state: _GraphSource,
+) -> DependencyIndex:
+    if len(source_state.selections) <= 1:
+        return index
+    return MultiSourceDependencyIndex(
+        index,
+        tuple(selection.key for selection in source_state.selections),
+    )
 
 
 def _should_refresh_source(
@@ -352,7 +406,7 @@ def _should_refresh_source(
 ) -> bool:
     if refresh:
         return True
-    if cached or source_state.definition is None:
+    if cached or not source_state.selections:
         return False
     return not (live and direction == "deps")
 
@@ -363,10 +417,11 @@ def _effective_direction(
     source_state: _GraphSource,
     index: SqliteDependencyIndex,
     direction: GraphDirection,
+    cached: bool,
 ) -> tuple[GraphDirection, list[str]]:
-    if direction == "deps":
-        return direction, []
-    if source_state.key is None:
+    if not source_state.selections:
+        if direction == "deps":
+            return direction, []
         message = (
             "upstream requires --source NAME or inline selectors like --org, --team, or --repo"
         )
@@ -376,17 +431,41 @@ def _effective_direction(
             "only showing downstream; upstream omitted because no source is configured. "
             "Pass --source NAME or inline selectors."
         ]
-    if index.status(source_state.key) is not None:
+    missing = tuple(
+        selection for selection in source_state.selections if index.status(selection.key) is None
+    )
+    if cached and source_state.saved and missing:
+        raise UntapedError(_missing_source_index_message(target, source_state, missing))
+    if direction == "deps":
         return direction, []
-    message = _missing_source_index_message(target, source_state)
+    if not missing:
+        return direction, []
+    message = _missing_source_index_message(target, source_state, missing)
     if direction == "impact":
         raise UntapedError(message)
     return "deps", [f"upstream omitted: {message}"]
 
 
-def _missing_source_index_message(target: str, source_state: _GraphSource) -> str:
+def _missing_source_index_message(
+    target: str,
+    source_state: _GraphSource,
+    missing: tuple[_GraphSourceSelection, ...],
+) -> str:
     if source_state.saved:
-        label = source_state.label or "unknown"
+        if len(missing) > 1:
+            labels = ", ".join(repr(selection.label) for selection in missing)
+            refresh_commands = " and ".join(
+                f"`untaped ansible source refresh {selection.label}`" for selection in missing
+            )
+            source_flags = " ".join(
+                f"--source {selection.label}" for selection in source_state.selections
+            )
+            return (
+                f"no cached source data found for sources {labels}. Run: {refresh_commands}. "
+                f"Or re-run graph with: "
+                f"`untaped ansible graph {target} {source_flags} --upstream --refresh`."
+            )
+        label = missing[0].label
         return (
             f"no cached source data found for source {label!r}. Run: "
             f"`untaped ansible source refresh {label}`. Or re-run graph with: "
