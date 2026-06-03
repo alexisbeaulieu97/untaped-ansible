@@ -90,15 +90,17 @@ share one parsed edge set. `source_ref_scans` remains the authoritative
 repo/ref identity table for graph reads and display metadata.
 
 Keep SQLite adapter methods in `infrastructure/sqlite_index.py` focused on
-transaction boundaries and query flow. Schema/migration helpers live in
+transaction boundaries and query flow. Schema creation helpers live in
 `infrastructure/sqlite_schema.py`, and row/datetime mapping lives in
-`infrastructure/sqlite_rows.py`.
+`infrastructure/sqlite_rows.py`. Cache schema compatibility is intentionally
+not preserved yet; schema-breaking changes should document that users must
+delete `ansible.index_path` and refresh saved sources.
 
 Source-index payload DTOs such as `IndexedDependency`, `GitRef`, `RefScan`,
-and `IndexScan` live in `domain/payloads.py` because they cross the
-application/infrastructure boundary. `application/ports.py` should stay
-protocol-only, and the layering tests enforce that `application` and
-`infrastructure` do not import each other at runtime.
+`RefScanTouch`, and `SourceRepoMetadata` live in `domain/payloads.py` because
+they cross the application/infrastructure boundary. `application/ports.py`
+should stay protocol-only, and the layering tests enforce that `application`
+and `infrastructure` do not import each other at runtime.
 
 `graph` is the primary user command. Downstream dependency reads do not require
 a source or cached data. When a source is configured, downstream graphing
@@ -134,16 +136,14 @@ repo's default branch under `refs/heads/`. `--ref-pattern` narrows source refs
 across branches and tags unless paired with `--ref-kind`; `--ref-kind tags`
 without a pattern scans all tags.
 
-`ansible.cache_backend` defaults to `git`. The Git backend keeps bare
-repositories under `ansible.repo_cache_path`, checks selected remote ref SHAs
-before touching the local bare cache, fetches only changed or missing refs,
-reads dependency files with Git object plumbing, and replaces SQLite ref scans
-per `(source_key, repo, ref_kind, ref_name)`. Do not create working checkouts
-for source indexing. `ansible.cache_backend: api` keeps the REST tree/content
-path as an explicit fallback, but it writes through the same incremental
-per-ref scan commit path as the Git backend. `--cache-backend` can override the
-backend for one graph refresh or source refresh.
-Git-backed source refresh supports bounded per-repo concurrency through
+Source refresh is git-only. Git refresh keeps bare repositories under
+`ansible.repo_cache_path`, checks selected remote ref SHAs before touching the
+local bare cache, fetches only changed or missing refs, reads dependency files
+with Git object plumbing, and commits SQLite ref scans per `(source_key, repo,
+ref_kind, ref_name)`. Do not create working checkouts for source indexing. Do
+not reintroduce `ansible.cache_backend`, `--cache-backend`, or a REST/API
+source-refresh fallback.
+Git source refresh supports bounded per-repo concurrency through
 `ansible.git_fetch_concurrency` and `--concurrency`; repo/team/org expansion
 remains serial, and SQLite mutation remains a single atomic commit after repo
 workers finish successfully. Refresh status and progress belong on stderr.

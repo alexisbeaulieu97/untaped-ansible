@@ -39,7 +39,6 @@ from untaped_ansible.infrastructure import (
 from untaped_ansible.settings import AnsibleSettings, SourceDefinition
 
 GraphDirection = Literal["deps", "impact", "both"]
-CacheBackend = source_commands.CacheBackend
 GraphFormatOption = Annotated[
     GraphFormat,
     typer.Option("--format", "-f", help="Graph output format."),
@@ -84,11 +83,6 @@ def graph_command(
         False,
         "--cached",
         help="Use cached source data without checking remote refs.",
-    ),
-    cache_backend: CacheBackend | None = typer.Option(
-        None,
-        "--cache-backend",
-        help="Source refresh backend: git or api; defaults to ansible.cache_backend.",
     ),
     concurrency: int | None = typer.Option(
         None,
@@ -151,7 +145,6 @@ def graph_command(
         direction = _graph_direction(upstream=upstream, downstream=downstream, both=both)
         if cached and refresh:
             raise typer.BadParameter("--cached cannot be combined with --refresh")
-        selected_backend = cache_backend or settings.cache_backend
         git_concurrency = concurrency or settings.git_fetch_concurrency
         graph_source = _graph_source(
             source_names=source,
@@ -182,7 +175,6 @@ def graph_command(
                     index=sqlite_index,
                     aliases=aliases,
                     settings=settings,
-                    cache_backend=selected_backend,
                     concurrency=git_concurrency,
                 )
                 typer.echo(
@@ -190,7 +182,6 @@ def graph_command(
                         "refreshed" if refresh else "checked",
                         selection.label,
                         result,
-                        cache_backend=selected_backend,
                         concurrency=git_concurrency,
                         elapsed=time.perf_counter() - started_at,
                     ),

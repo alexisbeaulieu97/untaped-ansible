@@ -5,72 +5,130 @@ from __future__ import annotations
 import sqlite3
 from datetime import UTC, datetime, timedelta
 
-import pytest
-
 from untaped_ansible.domain.payloads import (
     CachedRef,
     IndexedDependency,
     RefScan,
+    RefScanTouch,
     SourceRepoMetadata,
 )
-from untaped_ansible.infrastructure.sqlite_index import (
-    IndexScan,
-    SqliteDependencyIndex,
-)
-from untaped_ansible.infrastructure.sqlite_schema import ensure_column
+from untaped_ansible.infrastructure.sqlite_index import SqliteDependencyIndex
 
 
-def test_replace_source_scan_supports_dependency_and_reverse_lookup(tmp_path) -> None:
-    index = SqliteDependencyIndex(tmp_path / "index.sqlite3")
-    scanned_at = datetime(2026, 5, 29, tzinfo=UTC)
-
-    index.replace_source_scan(
-        IndexScan(
-            source_key="source:prod",
-            scanned_at=scanned_at,
-            dependencies=(
-                IndexedDependency(
-                    source_repo="acme/site",
-                    source_ref="main",
-                    source_sha="sha-main",
-                    dependency_repo="acme/base",
-                    dependency_name="base",
-                    dependency_version="v1",
-                    source_path="roles/requirements.yml",
-                ),
-                IndexedDependency(
-                    source_repo="acme/site",
-                    source_ref="main",
-                    source_sha="sha-main",
-                    dependency_name="common",
-                    dependency_version=None,
-                    source_path="meta/main.yml",
-                    unresolved="common",
-                ),
-            ),
-        )
+def _edge(
+    *,
+    source_repo: str = "acme/site",
+    source_ref: str = "main",
+    source_ref_kind: str = "heads",
+    source_sha: str = "sha-main",
+    dependency_repo: str | None = "acme/base",
+    dependency_name: str = "base",
+    dependency_version: str | None = "v1",
+    source_path: str = "roles/requirements.yml",
+    unresolved: str | None = None,
+) -> IndexedDependency:
+    return IndexedDependency(
+        source_repo=source_repo,
+        source_ref=source_ref,
+        source_ref_kind=source_ref_kind,
+        source_sha=source_sha,
+        dependency_repo=dependency_repo,
+        dependency_name=dependency_name,
+        dependency_version=dependency_version,
+        source_path=source_path,
+        unresolved=unresolved,
     )
 
-    assert index.dependencies("acme/site", "main", source_key="source:prod") == [
-        IndexedDependency(
-            source_repo="acme/site",
-            source_ref="main",
-            source_sha="sha-main",
-            dependency_repo="acme/base",
-            dependency_name="base",
-            dependency_version="v1",
-            source_path="roles/requirements.yml",
-        ),
-        IndexedDependency(
-            source_repo="acme/site",
-            source_ref="main",
-            source_sha="sha-main",
+
+def _scan(
+    *,
+    source_key: str = "source:prod",
+    source_repo: str = "acme/site",
+    ref_kind: str = "heads",
+    source_ref: str = "main",
+    source_sha: str = "sha-main",
+    backend: str = "git",
+    clone_url: str | None = "https://github.com/acme/site.git",
+    clone_protocol: str | None = "https",
+    dependency_paths_fingerprint: str = "paths-a",
+    aliases_fingerprint: str = "",
+    checked_at: datetime | None = None,
+    indexed_at: datetime | None = None,
+    dependencies: tuple[IndexedDependency, ...] | None = None,
+) -> RefScan:
+    checked = checked_at or datetime(2026, 6, 1, tzinfo=UTC)
+    indexed = indexed_at or checked
+    if dependencies is None:
+        dependencies = (
+            _edge(
+                source_repo=source_repo,
+                source_ref=source_ref,
+                source_ref_kind=ref_kind,
+                source_sha=source_sha,
+            ),
+        )
+    return RefScan(
+        source_key=source_key,
+        source_repo=source_repo,
+        ref_kind=ref_kind,
+        source_ref=source_ref,
+        source_sha=source_sha,
+        backend=backend,
+        clone_url=clone_url,
+        clone_protocol=clone_protocol,
+        dependency_paths_fingerprint=dependency_paths_fingerprint,
+        aliases_fingerprint=aliases_fingerprint,
+        checked_at=checked,
+        indexed_at=indexed,
+        dependencies=dependencies,
+    )
+
+
+def _commit(
+    index: SqliteDependencyIndex,
+    *,
+    source_key: str = "source:prod",
+    scans: tuple[RefScan, ...] = (),
+    touches: tuple[RefScanTouch, ...] = (),
+    keep: set[tuple[str, str, str]] | None = None,
+    repo_metadata: tuple[SourceRepoMetadata, ...] = (),
+    scanned_at: datetime | None = None,
+) -> None:
+    if keep is None:
+        keep = {(scan.source_repo, scan.ref_kind, scan.source_ref) for scan in scans} | {
+            (touch.source_repo, touch.ref_kind, touch.source_ref) for touch in touches
+        }
+    index.commit_source_ref_refresh(
+        source_key,
+        scans=scans,
+        touches=touches,
+        keep=keep,
+        repo_metadata=repo_metadata,
+        scanned_at=scanned_at or datetime(2026, 6, 1, tzinfo=UTC),
+    )
+
+
+def test_source_ref_refresh_supports_dependency_and_reverse_lookup(tmp_path) -> None:
+    index = SqliteDependencyIndex(tmp_path / "index.sqlite3")
+    scanned_at = datetime(2026, 5, 29, tzinfo=UTC)
+    dependencies = (
+        _edge(),
+        _edge(
+            dependency_repo=None,
             dependency_name="common",
             dependency_version=None,
             source_path="meta/main.yml",
             unresolved="common",
         ),
-    ]
+    )
+
+    _commit(
+        index,
+        scans=(_scan(checked_at=scanned_at, indexed_at=scanned_at, dependencies=dependencies),),
+        scanned_at=scanned_at,
+    )
+
+    assert index.dependencies("acme/site", "main", source_key="source:prod") == list(dependencies)
     assert index.dependents("acme/base", "v1", source_key="source:prod")[0].source_repo == (
         "acme/site"
     )
@@ -87,21 +145,11 @@ def test_replace_source_scan_supports_dependency_and_reverse_lookup(tmp_path) ->
 def test_status_staleness_and_clear_source(tmp_path) -> None:
     index = SqliteDependencyIndex(tmp_path / "index.sqlite3")
     scanned_at = datetime.now(UTC) - timedelta(days=2)
-    index.replace_source_scan(
-        IndexScan(
-            source_key="source:prod",
-            scanned_at=scanned_at,
-            dependencies=(
-                IndexedDependency(
-                    source_repo="acme/site",
-                    source_ref="main",
-                    dependency_repo="acme/base",
-                    dependency_name="base",
-                    dependency_version="v1",
-                    source_path="roles/requirements.yml",
-                ),
-            ),
-        )
+
+    _commit(
+        index,
+        scans=(_scan(checked_at=scanned_at, indexed_at=scanned_at),),
+        scanned_at=scanned_at,
     )
 
     status = index.status("source:prod")
@@ -117,120 +165,97 @@ def test_status_staleness_and_clear_source(tmp_path) -> None:
 
     assert index.status("source:prod") is None
     assert not index.is_stale("source:prod", max_age_seconds=60)
+    assert index.dependencies("acme/site", "main", source_key="source:prod") == []
 
 
-def test_status_uses_scan_metadata_when_source_has_no_edges(tmp_path) -> None:
+def test_empty_ref_scan_is_retained_and_pruned_by_selected_refs(tmp_path) -> None:
     index = SqliteDependencyIndex(tmp_path / "index.sqlite3")
-    index.replace_source_scan(
-        IndexScan(
-            source_key="source:prod",
-            scanned_at=datetime.now(UTC),
-            repos=2,
-            refs=5,
-            dependencies=(),
-        )
+    now = datetime(2026, 6, 1, tzinfo=UTC)
+    empty = _scan(
+        source_repo="acme/empty",
+        source_ref="main",
+        source_sha="sha-empty",
+        clone_url="https://github.com/acme/empty.git",
+        dependencies=(),
+    )
+    old = _scan(
+        source_repo="acme/old",
+        source_ref="main",
+        source_sha="sha-old",
+        clone_url="https://github.com/acme/old.git",
+        dependencies=(),
     )
 
-    status = index.status("source:prod")
+    _commit(index, scans=(empty, old), scanned_at=now)
+    assert index.status("source:prod").refs == 2  # type: ignore[union-attr]
 
-    assert status is not None
-    assert status.repos == 2
-    assert status.refs == 5
-    assert status.edges == 0
+    _commit(index, keep={("acme/empty", "heads", "main")}, scanned_at=now)
+
+    assert index.ref_scans("source:prod", "acme/empty", [("heads", "main")])
+    assert index.ref_scans("source:prod", "acme/old", [("heads", "main")]) == {}
+    assert index.status("source:prod").refs == 1  # type: ignore[union-attr]
 
 
-def test_replace_ref_scan_tracks_metadata_and_replaces_only_that_ref(tmp_path) -> None:
+def test_source_ref_refresh_replaces_one_ref_and_keeps_existing_refs(tmp_path) -> None:
     index = SqliteDependencyIndex(tmp_path / "index.sqlite3")
     indexed_at = datetime(2026, 6, 1, 12, tzinfo=UTC)
     checked_at = datetime(2026, 6, 1, 12, 5, tzinfo=UTC)
-
-    index.replace_ref_scan(
-        RefScan(
-            source_key="source:prod",
-            source_repo="acme/site",
-            ref_kind="heads",
-            source_ref="main",
-            source_sha="sha-main-1",
-            backend="git",
-            clone_url="https://github.com/acme/site.git",
-            clone_protocol="https",
-            dependency_paths_fingerprint="paths-a",
-            checked_at=checked_at,
-            indexed_at=indexed_at,
-            dependencies=(
-                IndexedDependency(
-                    source_repo="acme/site",
-                    source_ref="main",
-                    source_sha="sha-main-1",
-                    dependency_repo="acme/base",
-                    dependency_name="base",
-                    dependency_version="v1",
-                    source_path="roles/requirements.yml",
-                ),
+    release = _scan(
+        source_ref="release",
+        source_sha="sha-release",
+        checked_at=checked_at,
+        indexed_at=indexed_at,
+        dependencies=(
+            _edge(
+                source_ref="release",
+                source_sha="sha-release",
+                dependency_repo="acme/release-base",
+                dependency_name="release-base",
+                dependency_version=None,
             ),
-        )
-    )
-    index.replace_ref_scan(
-        RefScan(
-            source_key="source:prod",
-            source_repo="acme/site",
-            ref_kind="heads",
-            source_ref="release",
-            source_sha="sha-release",
-            backend="git",
-            clone_url="https://github.com/acme/site.git",
-            clone_protocol="https",
-            dependency_paths_fingerprint="paths-a",
-            checked_at=checked_at,
-            indexed_at=indexed_at,
-            dependencies=(
-                IndexedDependency(
-                    source_repo="acme/site",
-                    source_ref="release",
-                    source_sha="sha-release",
-                    dependency_repo="acme/release-base",
-                    dependency_name="release-base",
-                    dependency_version=None,
-                    source_path="roles/requirements.yml",
-                ),
-            ),
-        )
+        ),
     )
 
-    index.replace_ref_scan(
-        RefScan(
-            source_key="source:prod",
-            source_repo="acme/site",
-            ref_kind="heads",
-            source_ref="main",
-            source_sha="sha-main-2",
-            backend="git",
-            clone_url="https://github.com/acme/site.git",
-            clone_protocol="https",
-            dependency_paths_fingerprint="paths-a",
-            checked_at=checked_at,
-            indexed_at=indexed_at,
-            dependencies=(
-                IndexedDependency(
-                    source_repo="acme/site",
-                    source_ref="main",
-                    source_sha="sha-main-2",
-                    dependency_repo="acme/new-base",
-                    dependency_name="new-base",
-                    dependency_version="v2",
-                    source_path="roles/requirements.yml",
+    _commit(
+        index,
+        scans=(
+            _scan(
+                source_sha="sha-main-1",
+                checked_at=checked_at,
+                indexed_at=indexed_at,
+                dependencies=(_edge(source_sha="sha-main-1"),),
+            ),
+            release,
+        ),
+        scanned_at=checked_at,
+    )
+    _commit(
+        index,
+        scans=(
+            _scan(
+                source_sha="sha-main-2",
+                checked_at=checked_at,
+                indexed_at=indexed_at,
+                dependencies=(
+                    _edge(
+                        source_sha="sha-main-2",
+                        dependency_repo="acme/new-base",
+                        dependency_name="new-base",
+                        dependency_version="v2",
+                    ),
                 ),
             ),
-        )
+        ),
+        keep={("acme/site", "heads", "main"), ("acme/site", "heads", "release")},
+        scanned_at=checked_at,
     )
 
-    metadata = index.ref_scan("source:prod", "acme/site", "heads", "main")
+    metadata = index.ref_scans("source:prod", "acme/site", [("heads", "main")])
 
-    assert metadata is not None
-    assert metadata.source_sha == "sha-main-2"
-    assert metadata.backend == "git"
-    assert metadata.checked_at == checked_at
-    assert metadata.aliases_fingerprint == ""
+    assert metadata[("heads", "main")].source_sha == "sha-main-2"
+    assert metadata[("heads", "main")].backend == "git"
+    assert metadata[("heads", "main")].checked_at == checked_at
+    assert metadata[("heads", "main")].aliases_fingerprint == ""
     assert (
         index.dependencies("acme/site", "main", source_key="source:prod")[0].source_ref_kind
         == "heads"
@@ -239,150 +264,59 @@ def test_replace_ref_scan_tracks_metadata_and_replaces_only_that_ref(tmp_path) -
         edge.dependency_repo
         for edge in index.dependencies("acme/site", None, source_key="source:prod")
     ]
-    assert dependency_repos == [
-        "acme/release-base",
-        "acme/new-base",
-    ]
-    assert index.status("source:prod") is None
-
-    index.finalize_source_ref_scan("source:prod", scanned_at=checked_at)
-    status = index.status("source:prod")
-
-    assert status is not None
-    assert status.repos == 1
-    assert status.refs == 2
-    assert status.edges == 2
-
-
-def test_empty_ref_scan_is_retained_and_pruned_by_selected_refs(tmp_path) -> None:
-    index = SqliteDependencyIndex(tmp_path / "index.sqlite3")
-    now = datetime(2026, 6, 1, tzinfo=UTC)
-
-    index.replace_ref_scan(
-        RefScan(
-            source_key="source:prod",
-            source_repo="acme/empty",
-            ref_kind="heads",
-            source_ref="main",
-            source_sha="sha-empty",
-            backend="git",
-            clone_url="https://github.com/acme/empty.git",
-            clone_protocol="https",
-            dependency_paths_fingerprint="paths-a",
-            checked_at=now,
-            indexed_at=now,
-            dependencies=(),
-        )
-    )
-    index.replace_ref_scan(
-        RefScan(
-            source_key="source:prod",
-            source_repo="acme/old",
-            ref_kind="heads",
-            source_ref="main",
-            source_sha="sha-old",
-            backend="git",
-            clone_url="https://github.com/acme/old.git",
-            clone_protocol="https",
-            dependency_paths_fingerprint="paths-a",
-            checked_at=now,
-            indexed_at=now,
-            dependencies=(),
-        )
-    )
-
-    assert index.status("source:prod") is None
-
-    index.finalize_source_ref_scan("source:prod", scanned_at=now)
+    assert dependency_repos == ["acme/release-base", "acme/new-base"]
     assert index.status("source:prod").refs == 2  # type: ignore[union-attr]
-
-    index.prune_source_refs("source:prod", {("acme/empty", "heads", "main")})
-    index.finalize_source_ref_scan("source:prod", scanned_at=now)
-
-    assert index.ref_scan("source:prod", "acme/empty", "heads", "main") is not None
-    assert index.ref_scan("source:prod", "acme/old", "heads", "main") is None
-    assert index.status("source:prod").refs == 1  # type: ignore[union-attr]
+    assert index.status("source:prod").edges == 2  # type: ignore[union-attr]
 
 
-def test_cached_refs_include_ref_scans_and_legacy_source_edges(tmp_path) -> None:
-    index = SqliteDependencyIndex(tmp_path / "index.sqlite3")
-    now = datetime(2026, 6, 1, tzinfo=UTC)
-    index.replace_source_scan(
-        IndexScan(
-            source_key="source:prod",
-            scanned_at=now,
-            dependencies=(
-                IndexedDependency(
-                    source_repo="acme/legacy",
-                    source_ref="main",
-                    dependency_repo="acme/base",
-                    dependency_name="base",
-                    dependency_version=None,
-                    source_path="roles/requirements.yml",
-                ),
-            ),
-        )
+def test_touch_updates_checked_at_without_reindexing_snapshot(tmp_path) -> None:
+    db_path = tmp_path / "index.sqlite3"
+    index = SqliteDependencyIndex(db_path)
+    indexed_at = datetime(2026, 6, 1, 12, tzinfo=UTC)
+    checked_at = datetime(2026, 6, 1, 12, 5, tzinfo=UTC)
+    touched_at = datetime(2026, 6, 1, 13, tzinfo=UTC)
+
+    _commit(
+        index,
+        scans=(_scan(checked_at=checked_at, indexed_at=indexed_at),),
+        scanned_at=checked_at,
     )
-    index.replace_ref_scan(
-        RefScan(
-            source_key="source:prod",
-            source_repo="acme/site",
-            ref_kind="heads",
-            source_ref="release/1",
-            source_sha="sha-release",
-            backend="git",
-            clone_url="https://github.com/acme/site.git",
-            clone_protocol="https",
-            dependency_paths_fingerprint="paths-a",
-            checked_at=now,
-            indexed_at=now,
-            dependencies=(),
-        )
-    )
-
-    assert index.cached_refs("acme/site", source_key="source:prod") == {"release/1"}
-    assert index.cached_refs("acme/legacy", source_key="source:prod") == {"main"}
-    assert index.cached_refs("acme/site", source_key=None) == set()
-
-
-def test_cached_ref_metadata_includes_ref_kind_and_default_branch(tmp_path) -> None:
-    index = SqliteDependencyIndex(tmp_path / "index.sqlite3")
-    now = datetime(2026, 6, 1, tzinfo=UTC)
-
-    index.commit_source_ref_refresh(
-        "source:prod",
-        scans=(
-            RefScan(
-                source_key="source:prod",
-                source_repo="acme/site",
-                ref_kind="tags",
-                source_ref="v2.0.0",
-                source_sha="sha-v2",
-                backend="git",
-                clone_url="https://github.com/acme/site.git",
-                clone_protocol="https",
-                dependency_paths_fingerprint="paths-a",
-                checked_at=now,
-                indexed_at=now,
-                dependencies=(),
-            ),
-            RefScan(
+    _commit(
+        index,
+        touches=(
+            RefScanTouch(
                 source_key="source:prod",
                 source_repo="acme/site",
                 ref_kind="heads",
-                source_ref="trunk",
-                source_sha="sha-trunk",
-                backend="git",
-                clone_url="https://github.com/acme/site.git",
-                clone_protocol="https",
-                dependency_paths_fingerprint="paths-a",
-                checked_at=now,
-                indexed_at=now,
-                dependencies=(),
+                source_ref="main",
+                checked_at=touched_at,
             ),
         ),
-        touches=(),
-        keep={("acme/site", "tags", "v2.0.0"), ("acme/site", "heads", "trunk")},
+        scanned_at=touched_at,
+    )
+
+    metadata = index.ref_scans("source:prod", "acme/site", [("heads", "main")])
+    db = sqlite3.connect(db_path)
+    try:
+        snapshot_count = db.execute("select count(*) from dependency_snapshots").fetchone()[0]
+    finally:
+        db.close()
+    assert metadata[("heads", "main")].checked_at == touched_at
+    assert metadata[("heads", "main")].indexed_at == indexed_at
+    assert snapshot_count == 1
+    assert index.status("source:prod").scanned_at == touched_at  # type: ignore[union-attr]
+
+
+def test_cached_refs_and_metadata_include_default_branch(tmp_path) -> None:
+    index = SqliteDependencyIndex(tmp_path / "index.sqlite3")
+    now = datetime(2026, 6, 1, tzinfo=UTC)
+
+    _commit(
+        index,
+        scans=(
+            _scan(ref_kind="tags", source_ref="v2.0.0", source_sha="sha-v2", dependencies=()),
+            _scan(ref_kind="heads", source_ref="trunk", source_sha="sha-trunk", dependencies=()),
+        ),
         repo_metadata=(
             SourceRepoMetadata(
                 source_key="source:prod",
@@ -393,6 +327,8 @@ def test_cached_ref_metadata_includes_ref_kind_and_default_branch(tmp_path) -> N
         scanned_at=now,
     )
 
+    assert index.cached_refs("acme/site", source_key="source:prod") == {"v2.0.0", "trunk"}
+    assert index.cached_refs("acme/site", source_key=None) == set()
     assert set(index.cached_ref_metadata("acme/site", source_key="source:prod")) == {
         CachedRef(name="v2.0.0", kind="tags", default_branch="trunk"),
         CachedRef(name="trunk", kind="heads", default_branch="trunk"),
@@ -403,65 +339,27 @@ def test_ref_scans_share_one_dependency_snapshot_for_duplicate_shas(tmp_path) ->
     db_path = tmp_path / "index.sqlite3"
     index = SqliteDependencyIndex(db_path)
     now = datetime(2026, 6, 1, tzinfo=UTC)
+    shared_dependency = _edge(
+        source_sha="sha-shared",
+        dependency_version=None,
+    )
 
-    index.commit_source_ref_refresh(
-        "source:prod",
+    _commit(
+        index,
         scans=(
-            RefScan(
-                source_key="source:prod",
-                source_repo="acme/site",
-                ref_kind="heads",
+            _scan(
                 source_ref="main",
                 source_sha="sha-shared",
-                backend="git",
-                clone_url="https://github.com/acme/site.git",
-                clone_protocol="https",
-                dependency_paths_fingerprint="paths-a",
                 aliases_fingerprint="aliases-a",
-                checked_at=now,
-                indexed_at=now,
-                dependencies=(
-                    IndexedDependency(
-                        source_repo="acme/site",
-                        source_ref="main",
-                        source_ref_kind="heads",
-                        source_sha="sha-shared",
-                        dependency_repo="acme/base",
-                        dependency_name="base",
-                        dependency_version=None,
-                        source_path="roles/requirements.yml",
-                    ),
-                ),
+                dependencies=(shared_dependency,),
             ),
-            RefScan(
-                source_key="source:prod",
-                source_repo="acme/site",
-                ref_kind="heads",
+            _scan(
                 source_ref="release",
                 source_sha="sha-shared",
-                backend="git",
-                clone_url="https://github.com/acme/site.git",
-                clone_protocol="https",
-                dependency_paths_fingerprint="paths-a",
                 aliases_fingerprint="aliases-a",
-                checked_at=now,
-                indexed_at=now,
-                dependencies=(
-                    IndexedDependency(
-                        source_repo="acme/site",
-                        source_ref="release",
-                        source_ref_kind="heads",
-                        source_sha="sha-shared",
-                        dependency_repo="acme/base",
-                        dependency_name="base",
-                        dependency_version=None,
-                        source_path="roles/requirements.yml",
-                    ),
-                ),
+                dependencies=(shared_dependency.model_copy(update={"source_ref": "release"}),),
             ),
         ),
-        touches=(),
-        keep={("acme/site", "heads", "main"), ("acme/site", "heads", "release")},
         scanned_at=now,
     )
 
@@ -481,240 +379,89 @@ def test_ref_scans_share_one_dependency_snapshot_for_duplicate_shas(tmp_path) ->
     assert edge_count == 1
 
 
-def test_v1_index_tables_are_rebuilt_without_dropping_unrelated_tables(tmp_path) -> None:
-    db_path = tmp_path / "index.sqlite3"
-    db = sqlite3.connect(db_path)
-    try:
-        db.executescript(
-            """
-            create table source_runs (
-                source_key text primary key,
-                scanned_at text not null,
-                repos integer not null default 0,
-                refs integer not null default 0,
-                edges integer not null default 0
-            );
-            create table dependency_edges (
-                id integer primary key autoincrement,
-                source_key text not null,
-                source_repo text not null,
-                source_ref text,
-                source_ref_kind text,
-                source_sha text,
-                dependency_repo text,
-                dependency_name text not null,
-                dependency_version text,
-                source_path text not null,
-                unresolved text
-            );
-            create table source_ref_scans (
-                source_key text not null,
-                source_repo text not null,
-                ref_kind text not null,
-                source_ref text not null,
-                source_sha text not null,
-                backend text not null,
-                clone_url text,
-                clone_protocol text,
-                dependency_paths_fingerprint text not null,
-                aliases_fingerprint text not null default '',
-                checked_at text not null,
-                indexed_at text not null,
-                last_error text,
-                primary key (source_key, source_repo, ref_kind, source_ref)
-            );
-            create table source_repo_metadata (
-                source_key text not null,
-                source_repo text not null,
-                default_branch text not null,
-                primary key (source_key, source_repo)
-            );
-            create table unrelated_plugin_state (
-                name text primary key
-            );
-            insert into source_runs(source_key, scanned_at, repos, refs, edges)
-            values ('source:prod', '2026-06-01T00:00:00+00:00', 1, 1, 1);
-            insert into unrelated_plugin_state(name) values ('keep-me');
-            """
-        )
-    finally:
-        db.close()
-
-    index = SqliteDependencyIndex(db_path)
-
-    assert index.status("source:prod") is None
-    db = sqlite3.connect(db_path)
-    try:
-        assert db.execute("select name from unrelated_plugin_state").fetchone()[0] == "keep-me"
-        source_ref_columns = {
-            row[1] for row in db.execute("pragma table_info(source_ref_scans)").fetchall()
-        }
-    finally:
-        db.close()
-    assert "snapshot_id" in source_ref_columns
-
-
-def test_pruning_git_refs_removes_legacy_full_source_edges(tmp_path) -> None:
-    index = SqliteDependencyIndex(tmp_path / "index.sqlite3")
-    now = datetime(2026, 6, 1, tzinfo=UTC)
-    index.replace_source_scan(
-        IndexScan(
-            source_key="source:prod",
-            scanned_at=now,
-            dependencies=(
-                IndexedDependency(
-                    source_repo="acme/site",
-                    source_ref="main",
-                    dependency_repo="acme/legacy",
-                    dependency_name="legacy",
-                    dependency_version=None,
-                    source_path="roles/requirements.yml",
-                ),
-            ),
-        )
-    )
-    index.replace_ref_scan(
-        RefScan(
-            source_key="source:prod",
-            source_repo="acme/site",
-            ref_kind="heads",
-            source_ref="main",
-            source_sha="sha-main",
-            backend="git",
-            clone_url="https://github.com/acme/site.git",
-            clone_protocol="https",
-            dependency_paths_fingerprint="paths-a",
-            checked_at=now,
-            indexed_at=now,
-            dependencies=(
-                IndexedDependency(
-                    source_repo="acme/site",
-                    source_ref="main",
-                    source_sha="sha-main",
-                    dependency_repo="acme/git",
-                    dependency_name="git",
-                    dependency_version=None,
-                    source_path="roles/requirements.yml",
-                ),
-            ),
-        )
-    )
-
-    index.prune_source_refs("source:prod", {("acme/site", "heads", "main")})
-
-    assert not index.dependents("acme/legacy", None, source_key="source:prod")
-    assert index.dependents("acme/git", None, source_key="source:prod")
-
-
 def test_pruning_keeps_same_ref_name_separate_by_ref_kind(tmp_path) -> None:
     index = SqliteDependencyIndex(tmp_path / "index.sqlite3")
     now = datetime(2026, 6, 1, tzinfo=UTC)
-    for ref_kind, dependency_repo in (("heads", "acme/branch-base"), ("tags", "acme/tag-base")):
-        index.replace_ref_scan(
-            RefScan(
-                source_key="source:prod",
-                source_repo="acme/site",
-                ref_kind=ref_kind,
+
+    _commit(
+        index,
+        scans=(
+            _scan(
+                ref_kind="heads",
                 source_ref="v1",
-                source_sha=f"sha-{ref_kind}",
-                backend="git",
-                clone_url="https://github.com/acme/site.git",
-                clone_protocol="https",
-                dependency_paths_fingerprint="paths-a",
-                checked_at=now,
-                indexed_at=now,
+                source_sha="sha-heads",
                 dependencies=(
-                    IndexedDependency(
-                        source_repo="acme/site",
+                    _edge(
                         source_ref="v1",
-                        source_sha=f"sha-{ref_kind}",
-                        dependency_repo=dependency_repo,
-                        dependency_name=dependency_repo.rsplit("/", maxsplit=1)[-1],
+                        source_sha="sha-heads",
+                        dependency_repo="acme/branch-base",
+                        dependency_name="branch-base",
                         dependency_version=None,
-                        source_path="roles/requirements.yml",
                     ),
                 ),
-            )
-        )
+            ),
+            _scan(
+                ref_kind="tags",
+                source_ref="v1",
+                source_sha="sha-tags",
+                dependencies=(
+                    _edge(
+                        source_ref="v1",
+                        source_ref_kind="tags",
+                        source_sha="sha-tags",
+                        dependency_repo="acme/tag-base",
+                        dependency_name="tag-base",
+                        dependency_version=None,
+                    ),
+                ),
+            ),
+        ),
+        scanned_at=now,
+    )
 
-    index.prune_source_refs("source:prod", {("acme/site", "tags", "v1")})
+    _commit(index, keep={("acme/site", "tags", "v1")}, scanned_at=now)
 
-    assert index.ref_scan("source:prod", "acme/site", "heads", "v1") is None
-    assert index.ref_scan("source:prod", "acme/site", "tags", "v1") is not None
+    assert index.ref_scans("source:prod", "acme/site", [("heads", "v1")]) == {}
+    assert index.ref_scans("source:prod", "acme/site", [("tags", "v1")])
     assert not index.dependents("acme/branch-base", None, source_key="source:prod")
     assert index.dependents("acme/tag-base", None, source_key="source:prod")
 
 
-def test_schema_column_helper_rejects_invalid_identifiers(tmp_path) -> None:
+def test_schema_creates_graph_read_indexes(tmp_path) -> None:
     db_path = tmp_path / "index.sqlite3"
-    db = sqlite3.connect(db_path)
-    try:
-        with pytest.raises(ValueError, match="invalid sqlite identifier"):
-            ensure_column(db, "dependency_edges; drop table source_runs", "source_sha", "text")
-        with pytest.raises(ValueError, match="invalid sqlite identifier"):
-            ensure_column(db, "dependency_edges", "source_sha; drop table source_runs", "text")
-    finally:
-        db.close()
-
-
-def test_legacy_scope_schema_is_replaced(tmp_path) -> None:
-    db_path = tmp_path / "index.sqlite3"
-    db = sqlite3.connect(db_path)
-    try:
-        db.executescript(
-            """
-            create table scan_runs (
-                scope text primary key,
-                scanned_at text not null
-            );
-
-            create table dependency_edges (
-                id integer primary key autoincrement,
-                scope text not null,
-                source_repo text not null,
-                source_ref text,
-                dependency_repo text,
-                dependency_name text not null,
-                dependency_version text,
-                source_path text not null,
-                unresolved text
-            );
-
-            insert into scan_runs(scope, scanned_at)
-            values ('prod', '2026-05-29T00:00:00+00:00');
-            insert into dependency_edges(
-                scope, source_repo, source_ref, dependency_repo, dependency_name,
-                dependency_version, source_path, unresolved
-            ) values (
-                'prod', 'acme/site', 'main', 'acme/base', 'base', 'v1',
-                'roles/requirements.yml', null
-            );
-            """
-        )
-    finally:
-        db.close()
-
     index = SqliteDependencyIndex(db_path)
 
     assert index.status("source:prod") is None
-    index.replace_source_scan(
-        IndexScan(
-            source_key="source:prod",
-            scanned_at=datetime(2026, 5, 30, tzinfo=UTC),
-            dependencies=(
-                IndexedDependency(
-                    source_repo="acme/new",
-                    source_ref="main",
-                    dependency_repo="acme/base",
-                    dependency_name="base",
-                    dependency_version="v2",
-                    source_path="roles/requirements.yml",
-                ),
-            ),
-        )
-    )
 
-    assert index.dependencies("acme/site", "main", source_key="source:prod") == []
-    assert index.dependents("acme/base", "v2", source_key="source:prod")[0].source_repo == (
-        "acme/new"
+    db = sqlite3.connect(db_path)
+    try:
+        indexes = {
+            row[1]: row[0]
+            for row in db.execute(
+                "select tbl_name, name from sqlite_master where type = 'index'"
+            ).fetchall()
+        }
+        indexed_columns = {
+            name: tuple(row[2] for row in db.execute(f"pragma index_info({name})").fetchall())
+            for name in indexes
+        }
+    finally:
+        db.close()
+
+    assert indexes["idx_snapshot_edges_dependency_ref"] == "snapshot_edges"
+    assert indexed_columns["idx_snapshot_edges_dependency_ref"] == (
+        "dependency_repo",
+        "dependency_version",
+        "snapshot_id",
+    )
+    assert indexes["idx_source_ref_scans_source_ref"] == "source_ref_scans"
+    assert indexed_columns["idx_source_ref_scans_source_ref"] == (
+        "source_key",
+        "source_repo",
+        "source_ref",
+    )
+    assert indexes["idx_source_ref_scans_source_snapshot"] == "source_ref_scans"
+    assert indexed_columns["idx_source_ref_scans_source_snapshot"] == (
+        "source_key",
+        "snapshot_id",
     )

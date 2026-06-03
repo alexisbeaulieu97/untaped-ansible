@@ -54,7 +54,6 @@ class AnsibleSettings(BaseModel):
 
     index_path: Path = Path("~/.untaped/ansible-index.sqlite3")
     stale_after: int = 86_400
-    cache_backend: Literal["git", "api"] = "git"
     ref_scan_default: Literal["all", "default_branch"] = "all"
     repo_cache_path: Path = Path("~/.untaped/ansible-repositories")
     git_clone_protocol: Literal["https", "ssh"] = "https"

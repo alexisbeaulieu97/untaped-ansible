@@ -17,7 +17,7 @@ from untaped_ansible import app
 from untaped_ansible.application.refresh_index import RefreshResult
 from untaped_ansible.cli import source_commands
 from untaped_ansible.domain.payloads import IndexedDependency, RefScan, SourceRepoMetadata
-from untaped_ansible.infrastructure import IndexScan, SqliteDependencyIndex
+from untaped_ansible.infrastructure import SqliteDependencyIndex
 
 
 def _write_config(
@@ -95,6 +95,53 @@ def _mock_refresh_repo(
     )
     mock.get(f"/repos/{owner}/{name}/contents/roles/requirements.yml").mock(
         return_value=httpx.Response(200, text=content)
+    )
+
+
+def _seed_index(
+    index: SqliteDependencyIndex,
+    source_key: str,
+    dependencies: tuple[IndexedDependency, ...] = (),
+    *,
+    scanned_at: datetime | None = None,
+    repo_metadata: tuple[SourceRepoMetadata, ...] = (),
+) -> None:
+    now = scanned_at or datetime.now(UTC)
+    grouped: dict[tuple[str, str, str], list[IndexedDependency]] = {}
+    for edge in dependencies:
+        grouped.setdefault(
+            (edge.source_repo, edge.source_ref or "main", edge.source_ref_kind or "heads"),
+            [],
+        ).append(edge)
+    if not grouped:
+        grouped[("acme/site", "main", "heads")] = []
+    scans = tuple(
+        RefScan(
+            source_key=source_key,
+            source_repo=source_repo,
+            ref_kind=ref_kind,
+            source_ref=source_ref,
+            source_sha=next(
+                (edge.source_sha for edge in edges if edge.source_sha is not None),
+                f"sha-{source_ref}",
+            ),
+            backend="git",
+            clone_url=f"https://github.com/{source_repo}.git",
+            clone_protocol="https",
+            dependency_paths_fingerprint="paths-a",
+            checked_at=now,
+            indexed_at=now,
+            dependencies=tuple(edges),
+        )
+        for (source_repo, source_ref, ref_kind), edges in grouped.items()
+    )
+    index.commit_source_ref_refresh(
+        source_key,
+        scans=scans,
+        touches=(),
+        keep={(scan.source_repo, scan.ref_kind, scan.source_ref) for scan in scans},
+        repo_metadata=repo_metadata,
+        scanned_at=now,
     )
 
 
@@ -329,21 +376,19 @@ def test_source_edit_noop_preserves_cached_data(
     monkeypatch,
 ) -> None:
     index_path = tmp_path / "index.sqlite3"
-    SqliteDependencyIndex(index_path).replace_source_scan(
-        IndexScan(
-            source_key="source:platform",
-            scanned_at=datetime.now(UTC),
-            dependencies=(
-                IndexedDependency(
-                    source_repo="acme/site",
-                    source_ref="main",
-                    dependency_repo="acme/base",
-                    dependency_name="base",
-                    dependency_version=None,
-                    source_path="roles/requirements.yml",
-                ),
+    _seed_index(
+        SqliteDependencyIndex(index_path),
+        "source:platform",
+        (
+            IndexedDependency(
+                source_repo="acme/site",
+                source_ref="main",
+                dependency_repo="acme/base",
+                dependency_name="base",
+                dependency_version=None,
+                source_path="roles/requirements.yml",
             ),
-        )
+        ),
     )
     cfg = _write_config(
         tmp_path,
@@ -370,21 +415,19 @@ def test_source_edit_real_change_clears_cached_data(
     monkeypatch,
 ) -> None:
     index_path = tmp_path / "index.sqlite3"
-    SqliteDependencyIndex(index_path).replace_source_scan(
-        IndexScan(
-            source_key="source:platform",
-            scanned_at=datetime.now(UTC),
-            dependencies=(
-                IndexedDependency(
-                    source_repo="acme/site",
-                    source_ref="main",
-                    dependency_repo="acme/base",
-                    dependency_name="base",
-                    dependency_version=None,
-                    source_path="roles/requirements.yml",
-                ),
+    _seed_index(
+        SqliteDependencyIndex(index_path),
+        "source:platform",
+        (
+            IndexedDependency(
+                source_repo="acme/site",
+                source_ref="main",
+                dependency_repo="acme/base",
+                dependency_name="base",
+                dependency_version=None,
+                source_path="roles/requirements.yml",
             ),
-        )
+        ),
     )
     cfg = _write_config(
         tmp_path,
@@ -434,41 +477,52 @@ def test_graph_inline_upstream_refreshes_and_renders_impact(
     monkeypatch,
 ) -> None:
     index_path = tmp_path / "index.sqlite3"
-    cfg = _write_config(
-        tmp_path,
-        index_path=index_path,
-        extra_profile={"github": {"token": "ghp_test"}},
-    )
+    cfg = _write_config(tmp_path, index_path=index_path)
     monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
 
-    with respx.mock(base_url="https://api.github.com") as mock:
-        mock.get("/orgs/acme/repos").mock(
-            return_value=httpx.Response(200, json=[{"full_name": "acme/site"}])
+    def fake_refresh(
+        source,
+        *,
+        source_key: str,
+        index: SqliteDependencyIndex,
+        aliases: dict[str, str],
+        settings,
+        concurrency: int,
+    ) -> RefreshResult:
+        del source, aliases, settings, concurrency
+        _seed_index(
+            index,
+            source_key,
+            (
+                IndexedDependency(
+                    source_repo="acme/site",
+                    source_ref="main",
+                    dependency_repo="acme/base",
+                    dependency_name="base",
+                    dependency_version="v1",
+                    source_path="roles/requirements.yml",
+                ),
+            ),
         )
-        _mock_refresh_repo(
-            mock,
-            "acme/site",
-            sha="sha-main",
-            content="- src: https://github.com/acme/base\n  version: v1\n",
-            refs_path="heads",
-        )
-        result = CliRunner().invoke(
-            app,
-            [
-                "graph",
-                "acme/base",
-                "--ref",
-                "v1",
-                "--org",
-                "acme",
-                "--ref-kind",
-                "heads",
-                "--upstream",
-                "--refresh",
-                "--cache-backend",
-                "api",
-            ],
-        )
+        return RefreshResult(source_key=source_key, repos=1, refs=1, edges=1, changed_refs=1)
+
+    monkeypatch.setattr(source_commands, "_refresh_source", fake_refresh)
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "graph",
+            "acme/base",
+            "--ref",
+            "v1",
+            "--org",
+            "acme",
+            "--ref-kind",
+            "heads",
+            "--upstream",
+            "--refresh",
+        ],
+    )
 
     assert result.exit_code == 0, result.output
     assert "+-- upstream" in result.stdout
@@ -482,61 +536,74 @@ def test_graph_inline_source_reuses_fingerprint_cache_without_refresh(
     monkeypatch,
 ) -> None:
     index_path = tmp_path / "index.sqlite3"
-    cfg = _write_config(
-        tmp_path,
-        index_path=index_path,
-        extra_profile={"github": {"token": "ghp_test"}},
-    )
+    cfg = _write_config(tmp_path, index_path=index_path)
     monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
     runner = CliRunner()
+    refresh_calls = 0
 
-    with respx.mock(base_url="https://api.github.com") as mock:
-        mock.get("/orgs/acme/repos").mock(
-            return_value=httpx.Response(200, json=[{"full_name": "acme/site"}])
+    def fake_refresh(
+        source,
+        *,
+        source_key: str,
+        index: SqliteDependencyIndex,
+        aliases: dict[str, str],
+        settings,
+        concurrency: int,
+    ) -> RefreshResult:
+        nonlocal refresh_calls
+        del source, aliases, settings, concurrency
+        refresh_calls += 1
+        _seed_index(
+            index,
+            source_key,
+            (
+                IndexedDependency(
+                    source_repo="acme/site",
+                    source_ref="main",
+                    dependency_repo="acme/base",
+                    dependency_name="base",
+                    dependency_version=None,
+                    source_path="roles/requirements.yml",
+                ),
+            ),
         )
-        _mock_refresh_repo(
-            mock,
-            "acme/site",
-            sha="sha-main",
-            content="- src: https://github.com/acme/base\n",
-            refs_path="heads",
-        )
-        first = runner.invoke(
-            app,
-            [
-                "graph",
-                "acme/base",
-                "--org",
-                "acme",
-                "--ref-kind",
-                "heads",
-                "--upstream",
-                "--refresh",
-                "--cache-backend",
-                "api",
-            ],
-        )
+        return RefreshResult(source_key=source_key, repos=1, refs=1, edges=1, changed_refs=1)
+
+    monkeypatch.setattr(source_commands, "_refresh_source", fake_refresh)
+
+    first = runner.invoke(
+        app,
+        [
+            "graph",
+            "acme/base",
+            "--org",
+            "acme",
+            "--ref-kind",
+            "heads",
+            "--upstream",
+            "--refresh",
+        ],
+    )
 
     assert first.exit_code == 0, first.output
 
-    with respx.mock(base_url="https://api.github.com", assert_all_called=False) as mock:
-        second = runner.invoke(
-            app,
-            [
-                "graph",
-                "acme/base",
-                "--org",
-                "acme",
-                "--ref-kind",
-                "heads",
-                "--upstream",
-                "--cached",
-            ],
-        )
-        assert len(mock.calls) == 0
+    second = runner.invoke(
+        app,
+        [
+            "graph",
+            "acme/base",
+            "--org",
+            "acme",
+            "--ref-kind",
+            "heads",
+            "--upstream",
+            "--cached",
+        ],
+    )
 
     assert second.exit_code == 0, second.output
     assert "    +-- acme/site@main" in second.stdout
+    assert refresh_calls == 1
 
 
 def test_graph_source_upstream_requires_refresh_when_index_missing(
@@ -568,37 +635,35 @@ def test_graph_repeated_sources_union_cached_upstream(
     index_path = tmp_path / "index.sqlite3"
     index = SqliteDependencyIndex(index_path)
     scanned_at = datetime.now(UTC)
-    index.replace_source_scan(
-        IndexScan(
-            source_key="source:platform",
-            scanned_at=scanned_at,
-            dependencies=(
-                IndexedDependency(
-                    source_repo="acme/site",
-                    source_ref="main",
-                    dependency_repo="acme/base",
-                    dependency_name="base",
-                    dependency_version=None,
-                    source_path="roles/requirements.yml",
-                ),
+    _seed_index(
+        index,
+        "source:platform",
+        (
+            IndexedDependency(
+                source_repo="acme/site",
+                source_ref="main",
+                dependency_repo="acme/base",
+                dependency_name="base",
+                dependency_version=None,
+                source_path="roles/requirements.yml",
             ),
-        )
+        ),
+        scanned_at=scanned_at,
     )
-    index.replace_source_scan(
-        IndexScan(
-            source_key="source:ops",
-            scanned_at=scanned_at,
-            dependencies=(
-                IndexedDependency(
-                    source_repo="acme/deploy",
-                    source_ref="release",
-                    dependency_repo="acme/base",
-                    dependency_name="base",
-                    dependency_version=None,
-                    source_path="roles/requirements.yml",
-                ),
+    _seed_index(
+        index,
+        "source:ops",
+        (
+            IndexedDependency(
+                source_repo="acme/deploy",
+                source_ref="release",
+                dependency_repo="acme/base",
+                dependency_name="base",
+                dependency_version=None,
+                source_path="roles/requirements.yml",
             ),
-        )
+        ),
+        scanned_at=scanned_at,
     )
     cfg = _write_config(
         tmp_path,
@@ -656,28 +721,25 @@ def test_graph_repeated_sources_refresh_each_saved_source(
         index: SqliteDependencyIndex,
         aliases: dict[str, str],
         settings,
-        cache_backend: str,
         concurrency: int,
     ) -> RefreshResult:
-        del aliases, settings, cache_backend, concurrency
+        del aliases, settings, concurrency
         calls.append((source.name, source_key))
         source_repo = source.repos[0]
         source_ref = "main" if source.name == "platform" else "release"
-        index.replace_source_scan(
-            IndexScan(
-                source_key=source_key,
-                scanned_at=datetime.now(UTC),
-                dependencies=(
-                    IndexedDependency(
-                        source_repo=source_repo,
-                        source_ref=source_ref,
-                        dependency_repo="acme/base",
-                        dependency_name="base",
-                        dependency_version=None,
-                        source_path="roles/requirements.yml",
-                    ),
+        _seed_index(
+            index,
+            source_key,
+            (
+                IndexedDependency(
+                    source_repo=source_repo,
+                    source_ref=source_ref,
+                    dependency_repo="acme/base",
+                    dependency_name="base",
+                    dependency_version=None,
+                    source_path="roles/requirements.yml",
                 ),
-            )
+            ),
         )
         return RefreshResult(
             source_key=source_key,
@@ -706,21 +768,19 @@ def test_graph_repeated_sources_cached_reports_missing_named_source(
     monkeypatch,
 ) -> None:
     index_path = tmp_path / "index.sqlite3"
-    SqliteDependencyIndex(index_path).replace_source_scan(
-        IndexScan(
-            source_key="source:ops",
-            scanned_at=datetime.now(UTC),
-            dependencies=(
-                IndexedDependency(
-                    source_repo="acme/deploy",
-                    source_ref="main",
-                    dependency_repo="acme/base",
-                    dependency_name="base",
-                    dependency_version=None,
-                    source_path="roles/requirements.yml",
-                ),
+    _seed_index(
+        SqliteDependencyIndex(index_path),
+        "source:ops",
+        (
+            IndexedDependency(
+                source_repo="acme/deploy",
+                source_ref="main",
+                dependency_repo="acme/base",
+                dependency_name="base",
+                dependency_version=None,
+                source_path="roles/requirements.yml",
             ),
-        )
+        ),
     )
     cfg = _write_config(
         tmp_path,
@@ -757,21 +817,19 @@ def test_graph_repeated_sources_downstream_cached_reports_missing_named_source(
     monkeypatch,
 ) -> None:
     index_path = tmp_path / "index.sqlite3"
-    SqliteDependencyIndex(index_path).replace_source_scan(
-        IndexScan(
-            source_key="source:ops",
-            scanned_at=datetime.now(UTC),
-            dependencies=(
-                IndexedDependency(
-                    source_repo="acme/deploy",
-                    source_ref="main",
-                    dependency_repo="acme/base",
-                    dependency_name="base",
-                    dependency_version=None,
-                    source_path="roles/requirements.yml",
-                ),
+    _seed_index(
+        SqliteDependencyIndex(index_path),
+        "source:ops",
+        (
+            IndexedDependency(
+                source_repo="acme/deploy",
+                source_ref="main",
+                dependency_repo="acme/base",
+                dependency_name="base",
+                dependency_version=None,
+                source_path="roles/requirements.yml",
             ),
-        )
+        ),
     )
     cfg = _write_config(
         tmp_path,
@@ -808,21 +866,19 @@ def test_graph_repeated_sources_both_cached_reports_missing_named_source(
     monkeypatch,
 ) -> None:
     index_path = tmp_path / "index.sqlite3"
-    SqliteDependencyIndex(index_path).replace_source_scan(
-        IndexScan(
-            source_key="source:ops",
-            scanned_at=datetime.now(UTC),
-            dependencies=(
-                IndexedDependency(
-                    source_repo="acme/deploy",
-                    source_ref="main",
-                    dependency_repo="acme/base",
-                    dependency_name="base",
-                    dependency_version=None,
-                    source_path="roles/requirements.yml",
-                ),
+    _seed_index(
+        SqliteDependencyIndex(index_path),
+        "source:ops",
+        (
+            IndexedDependency(
+                source_repo="acme/deploy",
+                source_ref="main",
+                dependency_repo="acme/base",
+                dependency_name="base",
+                dependency_version=None,
+                source_path="roles/requirements.yml",
             ),
-        )
+        ),
     )
     cfg = _write_config(
         tmp_path,
@@ -858,21 +914,19 @@ def test_source_save_clears_cached_data_for_redefined_source(
     monkeypatch,
 ) -> None:
     index_path = tmp_path / "index.sqlite3"
-    SqliteDependencyIndex(index_path).replace_source_scan(
-        IndexScan(
-            source_key="source:platform",
-            scanned_at=datetime.now(UTC),
-            dependencies=(
-                IndexedDependency(
-                    source_repo="acme/old-site",
-                    source_ref="main",
-                    dependency_repo="acme/base",
-                    dependency_name="base",
-                    dependency_version=None,
-                    source_path="roles/requirements.yml",
-                ),
+    _seed_index(
+        SqliteDependencyIndex(index_path),
+        "source:platform",
+        (
+            IndexedDependency(
+                source_repo="acme/old-site",
+                source_ref="main",
+                dependency_repo="acme/base",
+                dependency_name="base",
+                dependency_version=None,
+                source_path="roles/requirements.yml",
             ),
-        )
+        ),
     )
     cfg = _write_config(
         tmp_path,
@@ -898,21 +952,19 @@ def test_source_save_preserves_cached_data_for_identical_source(
     monkeypatch,
 ) -> None:
     index_path = tmp_path / "index.sqlite3"
-    SqliteDependencyIndex(index_path).replace_source_scan(
-        IndexScan(
-            source_key="source:platform",
-            scanned_at=datetime.now(UTC),
-            dependencies=(
-                IndexedDependency(
-                    source_repo="acme/site",
-                    source_ref="main",
-                    dependency_repo="acme/base",
-                    dependency_name="base",
-                    dependency_version=None,
-                    source_path="roles/requirements.yml",
-                ),
+    _seed_index(
+        SqliteDependencyIndex(index_path),
+        "source:platform",
+        (
+            IndexedDependency(
+                source_repo="acme/site",
+                source_ref="main",
+                dependency_repo="acme/base",
+                dependency_name="base",
+                dependency_version=None,
+                source_path="roles/requirements.yml",
             ),
-        )
+        ),
     )
     cfg = _write_config(
         tmp_path,
@@ -1030,21 +1082,19 @@ def test_graph_downstream_with_source_uses_cached_data_without_live_reads(
     monkeypatch,
 ) -> None:
     index_path = tmp_path / "index.sqlite3"
-    SqliteDependencyIndex(index_path).replace_source_scan(
-        IndexScan(
-            source_key="source:platform",
-            scanned_at=datetime.now(UTC),
-            dependencies=(
-                IndexedDependency(
-                    source_repo="acme/site",
-                    source_ref="main",
-                    dependency_repo="acme/cached",
-                    dependency_name="cached",
-                    dependency_version=None,
-                    source_path="roles/requirements.yml",
-                ),
+    _seed_index(
+        SqliteDependencyIndex(index_path),
+        "source:platform",
+        (
+            IndexedDependency(
+                source_repo="acme/site",
+                source_ref="main",
+                dependency_repo="acme/cached",
+                dependency_name="cached",
+                dependency_version=None,
+                source_path="roles/requirements.yml",
             ),
-        )
+        ),
     )
     cfg = _write_config(
         tmp_path,
@@ -1083,21 +1133,19 @@ def test_graph_downstream_with_source_live_flag_reads_remote_dependencies(
     monkeypatch,
 ) -> None:
     index_path = tmp_path / "index.sqlite3"
-    SqliteDependencyIndex(index_path).replace_source_scan(
-        IndexScan(
-            source_key="source:platform",
-            scanned_at=datetime.now(UTC),
-            dependencies=(
-                IndexedDependency(
-                    source_repo="acme/site",
-                    source_ref="main",
-                    dependency_repo="acme/cached",
-                    dependency_name="cached",
-                    dependency_version=None,
-                    source_path="roles/requirements.yml",
-                ),
+    _seed_index(
+        SqliteDependencyIndex(index_path),
+        "source:platform",
+        (
+            IndexedDependency(
+                source_repo="acme/site",
+                source_ref="main",
+                dependency_repo="acme/cached",
+                dependency_name="cached",
+                dependency_version=None,
+                source_path="roles/requirements.yml",
             ),
-        )
+        ),
     )
     cfg = _write_config(
         tmp_path,
@@ -1201,70 +1249,86 @@ def test_config_loaded_source_uses_same_validation(tmp_path: Path, monkeypatch) 
 
 def test_inline_source_cache_key_is_order_insensitive(tmp_path: Path, monkeypatch) -> None:
     index_path = tmp_path / "index.sqlite3"
-    cfg = _write_config(
-        tmp_path,
-        index_path=index_path,
-        extra_profile={"github": {"token": "ghp_test"}},
-    )
+    cfg = _write_config(tmp_path, index_path=index_path)
     monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
     runner = CliRunner()
+    refresh_calls = 0
 
-    with respx.mock(base_url="https://api.github.com") as mock:
-        _mock_refresh_repo(
-            mock,
+    def fake_refresh(
+        source,
+        *,
+        source_key: str,
+        index: SqliteDependencyIndex,
+        aliases: dict[str, str],
+        settings,
+        concurrency: int,
+    ) -> RefreshResult:
+        nonlocal refresh_calls
+        del aliases, settings, concurrency
+        refresh_calls += 1
+        _seed_index(
+            index,
+            source_key,
+            tuple(
+                IndexedDependency(
+                    source_repo=repo,
+                    source_ref="main",
+                    dependency_repo="acme/base",
+                    dependency_name="base",
+                    dependency_version=None,
+                    source_path="roles/requirements.yml",
+                )
+                for repo in source.repos
+            ),
+        )
+        return RefreshResult(
+            source_key=source_key,
+            repos=len(source.repos),
+            refs=len(source.repos),
+            edges=len(source.repos),
+            changed_refs=len(source.repos),
+        )
+
+    monkeypatch.setattr(source_commands, "_refresh_source", fake_refresh)
+
+    first = runner.invoke(
+        app,
+        [
+            "graph",
+            "acme/base",
+            "--repo",
             "acme/a",
-            sha="sha-a",
-            content="- src: https://github.com/acme/base\n",
-            refs_path="heads",
-        )
-        _mock_refresh_repo(
-            mock,
+            "--repo",
             "acme/b",
-            sha="sha-b",
-            content="- src: https://github.com/acme/base\n",
-            refs_path="heads",
-        )
-        first = runner.invoke(
-            app,
-            [
-                "graph",
-                "acme/base",
-                "--repo",
-                "acme/a",
-                "--repo",
-                "acme/b",
-                "--ref-kind",
-                "heads",
-                "--upstream",
-                "--refresh",
-                "--cache-backend",
-                "api",
-            ],
-        )
+            "--ref-kind",
+            "heads",
+            "--upstream",
+            "--refresh",
+        ],
+    )
 
     assert first.exit_code == 0, first.output
 
-    with respx.mock(base_url="https://api.github.com", assert_all_called=False) as mock:
-        second = runner.invoke(
-            app,
-            [
-                "graph",
-                "acme/base",
-                "--repo",
-                "acme/b",
-                "--repo",
-                "acme/a",
-                "--ref-kind",
-                "heads",
-                "--upstream",
-                "--cached",
-            ],
-        )
-        assert len(mock.calls) == 0
+    second = runner.invoke(
+        app,
+        [
+            "graph",
+            "acme/base",
+            "--repo",
+            "acme/b",
+            "--repo",
+            "acme/a",
+            "--ref-kind",
+            "heads",
+            "--upstream",
+            "--cached",
+        ],
+    )
 
     assert second.exit_code == 0, second.output
     assert "acme/a@main" in second.stdout
     assert "acme/b@main" in second.stdout
+    assert refresh_calls == 1
 
 
 def test_graph_repo_is_source_selector_and_target_repo_overrides_local_identity(
@@ -1363,21 +1427,19 @@ def test_graph_empty_local_dependency_result_does_not_fall_back_to_cache(
     monkeypatch,
 ) -> None:
     index_path = tmp_path / "index.sqlite3"
-    SqliteDependencyIndex(index_path).replace_source_scan(
-        IndexScan(
-            source_key="source:platform",
-            scanned_at=datetime.now(UTC),
-            dependencies=(
-                IndexedDependency(
-                    source_repo="acme/empty",
-                    source_ref=None,
-                    dependency_repo="acme/stale",
-                    dependency_name="stale",
-                    dependency_version=None,
-                    source_path="roles/requirements.yml",
-                ),
+    _seed_index(
+        SqliteDependencyIndex(index_path),
+        "source:platform",
+        (
+            IndexedDependency(
+                source_repo="acme/empty",
+                source_ref="main",
+                dependency_repo="acme/stale",
+                dependency_name="stale",
+                dependency_version=None,
+                source_path="roles/requirements.yml",
             ),
-        )
+        ),
     )
     target = tmp_path / "role"
     target.mkdir()
@@ -1430,21 +1492,19 @@ def test_graph_output_writes_data_to_file_and_keeps_stdout_clean(
 
 def test_graph_alias_resolves_upstream_target(tmp_path: Path, monkeypatch) -> None:
     index_path = tmp_path / "index.sqlite3"
-    SqliteDependencyIndex(index_path).replace_source_scan(
-        IndexScan(
-            source_key="source:platform",
-            scanned_at=datetime.now(UTC),
-            dependencies=(
-                IndexedDependency(
-                    source_repo="acme/site",
-                    source_ref="main",
-                    dependency_repo="acme/base",
-                    dependency_name="base",
-                    dependency_version=None,
-                    source_path="roles/requirements.yml",
-                ),
+    _seed_index(
+        SqliteDependencyIndex(index_path),
+        "source:platform",
+        (
+            IndexedDependency(
+                source_repo="acme/site",
+                source_ref="main",
+                dependency_repo="acme/base",
+                dependency_name="base",
+                dependency_version=None,
+                source_path="roles/requirements.yml",
             ),
-        )
+        ),
     )
     cfg = _write_config(
         tmp_path,
@@ -1475,7 +1535,7 @@ def test_graph_help_teaches_clean_source_first_workflow() -> None:
     assert "--source" in output
     assert "--refresh" in output
     assert "--cached" in output
-    assert "--cache-backend" in output
+    assert "--cache-backend" not in output
     assert "--concurrency" in output
     assert "--live" in output
     assert "--target-repo" in output
@@ -1494,8 +1554,10 @@ def test_source_status_classifies_missing_unindexed_and_stale_sources(
     monkeypatch,
 ) -> None:
     index_path = tmp_path / "index.sqlite3"
-    SqliteDependencyIndex(index_path).replace_source_scan(
-        IndexScan(source_key="source:stale", scanned_at=datetime(2026, 1, 1, tzinfo=UTC))
+    _seed_index(
+        SqliteDependencyIndex(index_path),
+        "source:stale",
+        scanned_at=datetime(2026, 1, 1, tzinfo=UTC),
     )
     cfg = _write_config(
         tmp_path,
@@ -1522,7 +1584,7 @@ def test_source_status_classifies_missing_unindexed_and_stale_sources(
     assert "unknown source: 'missing'" in result.output
 
 
-def test_source_refresh_scans_source_with_github_client(tmp_path: Path, monkeypatch) -> None:
+def test_source_refresh_scans_source_with_git_backend(tmp_path: Path, monkeypatch) -> None:
     index_path = tmp_path / "index.sqlite3"
     cfg = _write_config(
         tmp_path,
@@ -1542,14 +1604,40 @@ def test_source_refresh_scans_source_with_github_client(tmp_path: Path, monkeypa
     )
     monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
 
-    with respx.mock(base_url="https://api.github.com") as mock:
-        _mock_refresh_repo(
-            mock,
-            "acme/site",
-            sha="abc",
-            content="- common\n",
-        )
-        result = CliRunner().invoke(app, ["source", "refresh", "prod", "--cache-backend", "api"])
+    class FakeGitRefresh:
+        def __init__(self, **kwargs) -> None:
+            assert kwargs["aliases"] == {"common": "acme/common"}
+            self._index = kwargs["index"]
+
+        def __call__(self, source, *, source_key: str) -> RefreshResult:
+            assert source.repos == ["acme/site"]
+            _seed_index(
+                self._index,
+                source_key,
+                (
+                    IndexedDependency(
+                        source_repo="acme/site",
+                        source_ref="main",
+                        dependency_repo="acme/common",
+                        dependency_name="common",
+                        dependency_version=None,
+                        source_path="roles/requirements.yml",
+                    ),
+                ),
+                scanned_at=datetime.now(UTC),
+            )
+            return RefreshResult(
+                source_key=source_key,
+                repos=1,
+                refs=1,
+                edges=1,
+                changed_refs=1,
+                unchanged_refs=0,
+            )
+
+    monkeypatch.setattr(source_commands, "RefreshGitSourceIndex", FakeGitRefresh)
+
+    result = CliRunner().invoke(app, ["source", "refresh", "prod"])
 
     assert result.exit_code == 0, result.output
     assert "refreshed source 'prod': 1 repos, 1 refs, 1 edges" in result.stderr
@@ -1625,7 +1713,7 @@ def test_source_refresh_allows_git_concurrency_override(tmp_path: Path, monkeypa
     assert "concurrency 5" in result.stderr
 
 
-def test_graph_with_source_refreshes_by_default_with_configured_backend(
+def test_graph_with_source_refreshes_by_default_with_git_backend(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -1636,7 +1724,7 @@ def test_graph_with_source_refreshes_by_default_with_configured_backend(
         top_level_ansible={"sources": [{"name": "platform", "repos": ["acme/site"]}]},
     )
     monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
-    calls: list[str] = []
+    calls: list[int] = []
 
     def fake_refresh(
         source,
@@ -1645,25 +1733,23 @@ def test_graph_with_source_refreshes_by_default_with_configured_backend(
         index: SqliteDependencyIndex,
         aliases: dict[str, str],
         settings,
-        cache_backend: str,
         concurrency: int,
     ) -> RefreshResult:
-        calls.append(f"{cache_backend}:{concurrency}")
-        index.replace_source_scan(
-            IndexScan(
-                source_key=source_key,
-                scanned_at=datetime.now(UTC),
-                dependencies=(
-                    IndexedDependency(
-                        source_repo="acme/site",
-                        source_ref="main",
-                        dependency_repo="acme/base",
-                        dependency_name="base",
-                        dependency_version=None,
-                        source_path="roles/requirements.yml",
-                    ),
+        del source, aliases, settings
+        calls.append(concurrency)
+        _seed_index(
+            index,
+            source_key,
+            (
+                IndexedDependency(
+                    source_repo="acme/site",
+                    source_ref="main",
+                    dependency_repo="acme/base",
+                    dependency_name="base",
+                    dependency_version=None,
+                    source_path="roles/requirements.yml",
                 ),
-            )
+            ),
         )
         return RefreshResult(
             source_key=source_key,
@@ -1682,7 +1768,7 @@ def test_graph_with_source_refreshes_by_default_with_configured_backend(
     )
 
     assert result.exit_code == 0, result.output
-    assert calls == ["git:4"]
+    assert calls == [4]
     assert "    +-- acme/site@main" in result.stdout
     assert "1 changed, 0 unchanged" in result.stderr
     assert "concurrency 4" in result.stderr
@@ -1704,34 +1790,32 @@ def test_graph_inline_upstream_with_ref_renders_all_matching_source_refs(
         index: SqliteDependencyIndex,
         aliases: dict[str, str],
         settings,
-        cache_backend: str,
         concurrency: int,
     ) -> RefreshResult:
+        del aliases, settings, concurrency
         captured["ref_kinds"] = source.ref_kinds
         captured["ref_patterns"] = source.ref_patterns
-        index.replace_source_scan(
-            IndexScan(
-                source_key=source_key,
-                scanned_at=datetime.now(UTC),
-                dependencies=(
-                    IndexedDependency(
-                        source_repo="acme/playbook",
-                        source_ref="master",
-                        dependency_repo="acme/base",
-                        dependency_name="base",
-                        dependency_version="v3",
-                        source_path="roles/requirements.yml",
-                    ),
-                    IndexedDependency(
-                        source_repo="acme/playbook",
-                        source_ref="v3",
-                        dependency_repo="acme/base",
-                        dependency_name="base",
-                        dependency_version="v3",
-                        source_path="roles/requirements.yml",
-                    ),
+        _seed_index(
+            index,
+            source_key,
+            (
+                IndexedDependency(
+                    source_repo="acme/playbook",
+                    source_ref="master",
+                    dependency_repo="acme/base",
+                    dependency_name="base",
+                    dependency_version="v3",
+                    source_path="roles/requirements.yml",
                 ),
-            )
+                IndexedDependency(
+                    source_repo="acme/playbook",
+                    source_ref="v3",
+                    dependency_repo="acme/base",
+                    dependency_name="base",
+                    dependency_version="v3",
+                    source_path="roles/requirements.yml",
+                ),
+            ),
         )
         return RefreshResult(source_key=source_key, repos=1, refs=2, edges=2)
 
@@ -1774,19 +1858,16 @@ def test_graph_inline_source_preserves_repeated_selectors(
         index: SqliteDependencyIndex,
         aliases: dict[str, str],
         settings,
-        cache_backend: str,
         concurrency: int,
     ) -> RefreshResult:
-        del aliases, settings, cache_backend, concurrency
+        del aliases, settings, concurrency
         captured["orgs"] = source.orgs
         captured["teams"] = source.teams
         captured["repos"] = source.repos
         captured["paths"] = source.dependency_paths
         captured["ref_kinds"] = source.ref_kinds
         captured["ref_patterns"] = source.ref_patterns
-        index.replace_source_scan(
-            IndexScan(source_key=source_key, scanned_at=datetime.now(UTC), dependencies=())
-        )
+        _seed_index(index, source_key)
         return RefreshResult(source_key=source_key, repos=0, refs=0, edges=0)
 
     monkeypatch.setattr(source_commands, "_refresh_source", fake_refresh)
@@ -1837,21 +1918,19 @@ def test_graph_inline_source_preserves_repeated_selectors(
 
 def test_graph_cached_skips_source_refresh(tmp_path: Path, monkeypatch) -> None:
     index_path = tmp_path / "index.sqlite3"
-    SqliteDependencyIndex(index_path).replace_source_scan(
-        IndexScan(
-            source_key="source:platform",
-            scanned_at=datetime.now(UTC),
-            dependencies=(
-                IndexedDependency(
-                    source_repo="acme/site",
-                    source_ref="main",
-                    dependency_repo="acme/base",
-                    dependency_name="base",
-                    dependency_version=None,
-                    source_path="roles/requirements.yml",
-                ),
+    _seed_index(
+        SqliteDependencyIndex(index_path),
+        "source:platform",
+        (
+            IndexedDependency(
+                source_repo="acme/site",
+                source_ref="main",
+                dependency_repo="acme/base",
+                dependency_name="base",
+                dependency_version=None,
+                source_path="roles/requirements.yml",
             ),
-        )
+        ),
     )
     cfg = _write_config(
         tmp_path,
