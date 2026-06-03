@@ -84,6 +84,47 @@ class GitRepositoryCache:
         args.extend(refspecs)
         self._run(args, cwd=bare_path, timeout=self._slow_timeout, auth_header=auth_header)
 
+    def list_remote_refs(
+        self,
+        url: str,
+        *,
+        namespaces: list[str],
+        auth_header: str | None,
+    ) -> list[GitRef]:
+        """List refs from ``url`` without updating the local bare cache."""
+        if not namespaces:
+            return []
+        patterns = [
+            pattern for namespace in namespaces for pattern in _remote_ref_patterns(namespace)
+        ]
+        out = self._run(
+            ["ls-remote", url, *patterns],
+            capture=True,
+            timeout=self._slow_timeout,
+            auth_header=auth_header,
+        )
+        refs: dict[tuple[str, str], GitRef] = {}
+        peeled_tags: dict[tuple[str, str], str] = {}
+        for line in out.splitlines():
+            sha, full_ref = _split_remote_ref_line(line)
+            if sha is None or full_ref is None:
+                continue
+            peeled = full_ref.endswith("^{}")
+            if peeled:
+                full_ref = full_ref.removesuffix("^{}")
+            kind, name = _kind_and_name(full_ref)
+            if kind is None or name is None:
+                continue
+            key = (kind, name)
+            if peeled:
+                peeled_tags[key] = sha
+                continue
+            refs[key] = GitRef(kind=kind, name=name, sha=sha)
+        for key, sha in peeled_tags.items():
+            if key in refs:
+                refs[key] = refs[key].model_copy(update={"sha": sha})
+        return [refs[key] for key in sorted(refs)]
+
     def list_refs(self, bare_path: Path, kind: str) -> list[GitRef]:
         """List locally fetched refs under ``refs/<kind>``."""
         prefix = f"refs/{kind}/"
@@ -200,6 +241,37 @@ def _split_ref_line(line: str) -> tuple[str, str, str, str]:
     while len(parts) < 4:
         parts.append("")
     return parts[0], parts[1], parts[2], parts[3]
+
+
+def _split_remote_ref_line(line: str) -> tuple[str | None, str | None]:
+    sha, separator, ref = line.partition("\t")
+    if not separator or not sha or not ref:
+        return None, None
+    return sha, ref
+
+
+def _kind_and_name(full_ref: str) -> tuple[str | None, str | None]:
+    for kind in ("heads", "tags"):
+        prefix = f"refs/{kind}/"
+        if full_ref.startswith(prefix):
+            return kind, full_ref.removeprefix(prefix)
+    return None, None
+
+
+def _remote_ref_patterns(namespace: str) -> tuple[str, ...]:
+    kind, _, suffix = namespace.partition("/")
+    if not suffix:
+        return (f"refs/{kind}/*",)
+    if suffix.endswith("/"):
+        return (f"refs/{kind}/{suffix}*",)
+    pattern = f"refs/{kind}/{suffix}"
+    if kind == "tags" and not _has_ref_wildcard(pattern):
+        return (pattern, f"{pattern}^{{}}")
+    return (pattern,)
+
+
+def _has_ref_wildcard(pattern: str) -> bool:
+    return any(token in pattern for token in ("*", "?", "["))
 
 
 def _auth_config_env(auth_header: str) -> tuple[dict[str, str], Path]:

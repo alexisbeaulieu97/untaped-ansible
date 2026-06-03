@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from collections.abc import Iterable
 from datetime import UTC, datetime
 from typing import Any
@@ -9,8 +11,8 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict
 
 from untaped_ansible.application.ports import (
-    DependencyIndexWriter,
     GitHubDependencyReader,
+    IncrementalDependencyIndexWriter,
 )
 from untaped_ansible.application.source_refs import (
     RefScanDefault,
@@ -22,7 +24,7 @@ from untaped_ansible.domain.parser import parse_dependency_file
 from untaped_ansible.domain.payloads import (
     GitRef,
     IndexedDependency,
-    IndexScan,
+    RefScan,
     SourceRepoMetadata,
 )
 from untaped_ansible.settings import SourceDefinition, normalize_team_refs
@@ -56,7 +58,7 @@ class RefreshSourceIndex:
         self,
         *,
         github: GitHubDependencyReader,
-        index: DependencyIndexWriter,
+        index: IncrementalDependencyIndexWriter,
         aliases: dict[str, str],
         default_dependency_paths: list[str],
         ref_scan_default: RefScanDefault = "all",
@@ -69,14 +71,19 @@ class RefreshSourceIndex:
 
     def __call__(self, source: SourceDefinition, *, source_key: str) -> RefreshResult:
         repos = self._expand_repos(source)
-        dependencies: list[IndexedDependency] = []
+        scans: list[RefScan] = []
         ignored_collections: set[str] = set()
         ref_count = 0
+        scanned_at = datetime.now(UTC)
+        paths = source.dependency_paths or self._default_dependency_paths
+        paths_fingerprint = _dependency_paths_fingerprint(paths)
+        aliases_fingerprint = _aliases_fingerprint(self._aliases)
+        resolver = IdentityResolver(self._aliases)
         for repo in repos:
             owner, name = repo.full_name.split("/", maxsplit=1)
             for ref in self._refs(owner, name, source, default_branch=repo.default_branch):
                 ref_count += 1
-                paths = source.dependency_paths or self._default_dependency_paths
+                edges: list[IndexedDependency] = []
                 tree_paths = self._tree_paths(owner, name, ref.sha)
                 for path in paths:
                     if path not in tree_paths:
@@ -86,10 +93,9 @@ class RefreshSourceIndex:
                         self._github.get_raw_content(owner, name, path, ref=ref.sha),
                     )
                     ignored_collections.update(report.ignored_collections)
-                    resolver = IdentityResolver(self._aliases)
                     for declaration in report.dependencies:
                         resolved = resolver.resolve(declaration)
-                        dependencies.append(
+                        edges.append(
                             IndexedDependency(
                                 source_repo=repo.full_name,
                                 source_ref=ref.name,
@@ -102,27 +108,44 @@ class RefreshSourceIndex:
                                 unresolved=resolved.unresolved,
                             )
                         )
-        scan = IndexScan(
-            source_key=source_key,
-            scanned_at=datetime.now(UTC),
-            repos=len(repos),
-            refs=ref_count,
-            repo_metadata=tuple(
-                SourceRepoMetadata(
-                    source_key=source_key,
-                    source_repo=repo.full_name,
-                    default_branch=repo.default_branch,
+                scans.append(
+                    RefScan(
+                        source_key=source_key,
+                        source_repo=repo.full_name,
+                        ref_kind=ref.kind,
+                        source_ref=ref.name,
+                        source_sha=ref.sha,
+                        backend="api",
+                        clone_url=None,
+                        clone_protocol=None,
+                        dependency_paths_fingerprint=paths_fingerprint,
+                        aliases_fingerprint=aliases_fingerprint,
+                        checked_at=scanned_at,
+                        indexed_at=scanned_at,
+                        dependencies=tuple(edges),
+                    )
                 )
-                for repo in repos
-            ),
-            dependencies=tuple(dependencies),
+        repo_metadata = tuple(
+            SourceRepoMetadata(
+                source_key=source_key,
+                source_repo=repo.full_name,
+                default_branch=repo.default_branch,
+            )
+            for repo in repos
         )
-        self._index.replace_source_scan(scan)
+        self._index.commit_source_ref_refresh(
+            source_key,
+            scans=tuple(scans),
+            touches=(),
+            keep={(scan.source_repo, scan.ref_kind, scan.source_ref) for scan in scans},
+            repo_metadata=repo_metadata,
+            scanned_at=scanned_at,
+        )
         return RefreshResult(
             source_key=source_key,
             repos=len(repos),
             refs=ref_count,
-            edges=len(dependencies),
+            edges=sum(len(scan.dependencies) for scan in scans),
             ignored_collections=tuple(sorted(ignored_collections)),
             changed_refs=ref_count,
             unchanged_refs=0,
@@ -238,3 +261,13 @@ def _object_sha(value: Any) -> str | None:
 
 def _str(value: object) -> str | None:
     return value if isinstance(value, str) and value else None
+
+
+def _dependency_paths_fingerprint(paths: list[str]) -> str:
+    payload = json.dumps(paths, separators=(",", ":")).encode()
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _aliases_fingerprint(aliases: dict[str, str]) -> str:
+    payload = json.dumps(aliases, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(payload).hexdigest()

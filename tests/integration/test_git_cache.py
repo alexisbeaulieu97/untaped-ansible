@@ -120,3 +120,35 @@ def test_bare_git_cache_peels_annotated_tags_for_file_reads(tmp_path: Path) -> N
     assert "version: v1" in (
         cache.read_file(bare, tag.sha, "roles/requirements.yml", auth_header=None) or ""
     )
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git is not installed")
+def test_remote_ref_listing_expands_namespaces_and_peels_exact_tags(tmp_path: Path) -> None:
+    upstream = tmp_path / "upstream"
+    _git(tmp_path, "init", str(upstream))
+    _git(upstream, "config", "user.email", "tests@example.com")
+    _git(upstream, "config", "user.name", "Tests")
+    _git(upstream, "config", "commit.gpgsign", "false")
+    commit_sha = _commit(
+        upstream,
+        "roles/requirements.yml",
+        "- src: https://github.com/acme/base\n  version: v1\n",
+        "first",
+    )
+    _git(upstream, "branch", "-M", "main")
+    _git(upstream, "branch", "release/one")
+    _git(upstream, "tag", "-a", "v1", "-m", "v1")
+    tag_object_sha = _git(upstream, "rev-parse", "refs/tags/v1")
+
+    refs = GitRepositoryCache().list_remote_refs(
+        f"file://{upstream}",
+        namespaces=["heads", "heads/release/", "tags/v1"],
+        auth_header=None,
+    )
+
+    assert [(ref.kind, ref.name, ref.sha) for ref in refs] == [
+        ("heads", "main", commit_sha),
+        ("heads", "release/one", commit_sha),
+        ("tags", "v1", commit_sha),
+    ]
+    assert tag_object_sha != commit_sha

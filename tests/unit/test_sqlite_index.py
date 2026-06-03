@@ -41,6 +41,7 @@ def test_replace_source_scan_supports_dependency_and_reverse_lookup(tmp_path) ->
                 IndexedDependency(
                     source_repo="acme/site",
                     source_ref="main",
+                    source_sha="sha-main",
                     dependency_name="common",
                     dependency_version=None,
                     source_path="meta/main.yml",
@@ -63,6 +64,7 @@ def test_replace_source_scan_supports_dependency_and_reverse_lookup(tmp_path) ->
         IndexedDependency(
             source_repo="acme/site",
             source_ref="main",
+            source_sha="sha-main",
             dependency_name="common",
             dependency_version=None,
             source_path="meta/main.yml",
@@ -395,6 +397,161 @@ def test_cached_ref_metadata_includes_ref_kind_and_default_branch(tmp_path) -> N
         CachedRef(name="v2.0.0", kind="tags", default_branch="trunk"),
         CachedRef(name="trunk", kind="heads", default_branch="trunk"),
     }
+
+
+def test_ref_scans_share_one_dependency_snapshot_for_duplicate_shas(tmp_path) -> None:
+    db_path = tmp_path / "index.sqlite3"
+    index = SqliteDependencyIndex(db_path)
+    now = datetime(2026, 6, 1, tzinfo=UTC)
+
+    index.commit_source_ref_refresh(
+        "source:prod",
+        scans=(
+            RefScan(
+                source_key="source:prod",
+                source_repo="acme/site",
+                ref_kind="heads",
+                source_ref="main",
+                source_sha="sha-shared",
+                backend="git",
+                clone_url="https://github.com/acme/site.git",
+                clone_protocol="https",
+                dependency_paths_fingerprint="paths-a",
+                aliases_fingerprint="aliases-a",
+                checked_at=now,
+                indexed_at=now,
+                dependencies=(
+                    IndexedDependency(
+                        source_repo="acme/site",
+                        source_ref="main",
+                        source_ref_kind="heads",
+                        source_sha="sha-shared",
+                        dependency_repo="acme/base",
+                        dependency_name="base",
+                        dependency_version=None,
+                        source_path="roles/requirements.yml",
+                    ),
+                ),
+            ),
+            RefScan(
+                source_key="source:prod",
+                source_repo="acme/site",
+                ref_kind="heads",
+                source_ref="release",
+                source_sha="sha-shared",
+                backend="git",
+                clone_url="https://github.com/acme/site.git",
+                clone_protocol="https",
+                dependency_paths_fingerprint="paths-a",
+                aliases_fingerprint="aliases-a",
+                checked_at=now,
+                indexed_at=now,
+                dependencies=(
+                    IndexedDependency(
+                        source_repo="acme/site",
+                        source_ref="release",
+                        source_ref_kind="heads",
+                        source_sha="sha-shared",
+                        dependency_repo="acme/base",
+                        dependency_name="base",
+                        dependency_version=None,
+                        source_path="roles/requirements.yml",
+                    ),
+                ),
+            ),
+        ),
+        touches=(),
+        keep={("acme/site", "heads", "main"), ("acme/site", "heads", "release")},
+        scanned_at=now,
+    )
+
+    assert [
+        edge.source_ref for edge in index.dependencies("acme/site", None, source_key="source:prod")
+    ] == ["main", "release"]
+    assert {
+        edge.source_ref for edge in index.dependents("acme/base", None, source_key="source:prod")
+    } == {"main", "release"}
+    db = sqlite3.connect(db_path)
+    try:
+        snapshot_count = db.execute("select count(*) from dependency_snapshots").fetchone()[0]
+        edge_count = db.execute("select count(*) from snapshot_edges").fetchone()[0]
+    finally:
+        db.close()
+    assert snapshot_count == 1
+    assert edge_count == 1
+
+
+def test_v1_index_tables_are_rebuilt_without_dropping_unrelated_tables(tmp_path) -> None:
+    db_path = tmp_path / "index.sqlite3"
+    db = sqlite3.connect(db_path)
+    try:
+        db.executescript(
+            """
+            create table source_runs (
+                source_key text primary key,
+                scanned_at text not null,
+                repos integer not null default 0,
+                refs integer not null default 0,
+                edges integer not null default 0
+            );
+            create table dependency_edges (
+                id integer primary key autoincrement,
+                source_key text not null,
+                source_repo text not null,
+                source_ref text,
+                source_ref_kind text,
+                source_sha text,
+                dependency_repo text,
+                dependency_name text not null,
+                dependency_version text,
+                source_path text not null,
+                unresolved text
+            );
+            create table source_ref_scans (
+                source_key text not null,
+                source_repo text not null,
+                ref_kind text not null,
+                source_ref text not null,
+                source_sha text not null,
+                backend text not null,
+                clone_url text,
+                clone_protocol text,
+                dependency_paths_fingerprint text not null,
+                aliases_fingerprint text not null default '',
+                checked_at text not null,
+                indexed_at text not null,
+                last_error text,
+                primary key (source_key, source_repo, ref_kind, source_ref)
+            );
+            create table source_repo_metadata (
+                source_key text not null,
+                source_repo text not null,
+                default_branch text not null,
+                primary key (source_key, source_repo)
+            );
+            create table unrelated_plugin_state (
+                name text primary key
+            );
+            insert into source_runs(source_key, scanned_at, repos, refs, edges)
+            values ('source:prod', '2026-06-01T00:00:00+00:00', 1, 1, 1);
+            insert into unrelated_plugin_state(name) values ('keep-me');
+            """
+        )
+    finally:
+        db.close()
+
+    index = SqliteDependencyIndex(db_path)
+
+    assert index.status("source:prod") is None
+    db = sqlite3.connect(db_path)
+    try:
+        assert db.execute("select name from unrelated_plugin_state").fetchone()[0] == "keep-me"
+        source_ref_columns = {
+            row[1] for row in db.execute("pragma table_info(source_ref_scans)").fetchall()
+        }
+    finally:
+        db.close()
+    assert "snapshot_id" in source_ref_columns
 
 
 def test_pruning_git_refs_removes_legacy_full_source_edges(tmp_path) -> None:
