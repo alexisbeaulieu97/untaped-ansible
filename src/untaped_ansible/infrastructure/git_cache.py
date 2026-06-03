@@ -94,7 +94,9 @@ class GitRepositoryCache:
         """List refs from ``url`` without updating the local bare cache."""
         if not namespaces:
             return []
-        patterns = [f"refs/{namespace}" for namespace in namespaces]
+        patterns = [
+            pattern for namespace in namespaces for pattern in _remote_ref_patterns(namespace)
+        ]
         out = self._run(
             ["ls-remote", url, *patterns],
             capture=True,
@@ -254,6 +256,22 @@ def _kind_and_name(full_ref: str) -> tuple[str | None, str | None]:
         if full_ref.startswith(prefix):
             return kind, full_ref.removeprefix(prefix)
     return None, None
+
+
+def _remote_ref_patterns(namespace: str) -> tuple[str, ...]:
+    kind, _, suffix = namespace.partition("/")
+    if not suffix:
+        return (f"refs/{kind}/*",)
+    if suffix.endswith("/"):
+        return (f"refs/{kind}/{suffix}*",)
+    pattern = f"refs/{kind}/{suffix}"
+    if kind == "tags" and not _has_ref_wildcard(pattern):
+        return (pattern, f"{pattern}^{{}}")
+    return (pattern,)
+
+
+def _has_ref_wildcard(pattern: str) -> bool:
+    return any(token in pattern for token in ("*", "?", "["))
 
 
 def _auth_config_env(auth_header: str) -> tuple[dict[str, str], Path]:
