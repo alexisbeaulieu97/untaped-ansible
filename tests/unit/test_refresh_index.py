@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+
 from untaped_ansible.application.refresh_index import RefreshSourceIndex
-from untaped_ansible.domain.payloads import SourceRepoMetadata
+from untaped_ansible.domain.payloads import RefScan, RefScanTouch, SourceRepoMetadata
 from untaped_ansible.infrastructure import IndexScan
 from untaped_ansible.settings import SourceDefinition
 
@@ -66,9 +68,40 @@ class FakeGitHub:
 class CapturingIndex:
     def __init__(self) -> None:
         self.scan: IndexScan | None = None
+        self.committed_scans: tuple[RefScan, ...] = ()
+        self.committed_touches: tuple[RefScanTouch, ...] = ()
+        self.committed_keep: set[tuple[str, str, str]] = set()
+        self.committed_repo_metadata: tuple[SourceRepoMetadata, ...] = ()
+        self.replace_calls = 0
+        self.commit_calls = 0
 
     def replace_source_scan(self, scan: IndexScan) -> None:
+        self.replace_calls += 1
         self.scan = scan
+
+    def commit_source_ref_refresh(
+        self,
+        source_key: str,
+        *,
+        scans: tuple[RefScan, ...],
+        touches: tuple[RefScanTouch, ...],
+        keep: set[tuple[str, str, str]],
+        repo_metadata: tuple[SourceRepoMetadata, ...] = (),
+        scanned_at: datetime,
+    ) -> None:
+        self.commit_calls += 1
+        self.committed_scans = scans
+        self.committed_touches = touches
+        self.committed_keep = keep
+        self.committed_repo_metadata = repo_metadata
+        self.scan = IndexScan(
+            source_key=source_key,
+            scanned_at=scanned_at,
+            repos=len({scan.source_repo for scan in scans}),
+            refs=len(scans),
+            repo_metadata=repo_metadata,
+            dependencies=tuple(edge for scan in scans for edge in scan.dependencies),
+        )
 
 
 def test_refresh_index_expands_source_refs_parses_dependencies_and_aliases() -> None:
@@ -108,6 +141,38 @@ def test_refresh_index_expands_source_refs_parses_dependencies_and_aliases() -> 
         "acme-site-heads-sha",
     }
     assert result.ignored_collections == ("community.general",)
+
+
+def test_refresh_index_commits_incremental_ref_scans_without_full_replacement() -> None:
+    index = CapturingIndex()
+    source = SourceDefinition(
+        name="prod",
+        repos=["acme/explicit"],
+        ref_kinds=["heads"],
+        ref_patterns=["main"],
+    )
+
+    result = RefreshSourceIndex(
+        github=FakeGitHub(),
+        index=index,
+        aliases={"common": "acme/common"},
+        default_dependency_paths=["roles/requirements.yml"],
+    )(source, source_key="source:prod")
+
+    assert result.refs == 1
+    assert index.replace_calls == 0
+    assert index.commit_calls == 1
+    assert index.committed_touches == ()
+    assert index.committed_keep == {("acme/explicit", "heads", "main")}
+    assert len(index.committed_scans) == 1
+    scan = index.committed_scans[0]
+    assert scan.source_key == "source:prod"
+    assert scan.source_repo == "acme/explicit"
+    assert scan.ref_kind == "heads"
+    assert scan.source_ref == "main"
+    assert scan.source_sha == "acme-explicit-heads-sha"
+    assert scan.backend == "api"
+    assert {edge.dependency_repo for edge in scan.dependencies} == {"acme/base", "acme/common"}
 
 
 def test_refresh_index_expands_bare_team_slug_with_single_source_org() -> None:

@@ -9,7 +9,6 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from threading import Lock
 from typing import Protocol
 
 from pydantic import BaseModel, ConfigDict
@@ -25,6 +24,7 @@ from untaped_ansible.application.source_refs import (
     source_ref_selections,
 )
 from untaped_ansible.domain.identity import IdentityResolver
+from untaped_ansible.domain.models import ParseReport
 from untaped_ansible.domain.parser import parse_dependency_file
 from untaped_ansible.domain.payloads import (
     GitRef,
@@ -58,6 +58,14 @@ class GitCache(Protocol):
         auth_header: str | None,
     ) -> None: ...
 
+    def list_remote_refs(
+        self,
+        url: str,
+        *,
+        namespaces: list[str],
+        auth_header: str | None,
+    ) -> list[GitRef]: ...
+
     def list_refs(self, bare_path: Path, kind: str) -> list[GitRef]: ...
 
     def read_file(
@@ -86,6 +94,7 @@ class _RefSelection(BaseModel):
     kind: str
     patterns: tuple[str, ...]
     refspecs: tuple[str, ...]
+    namespaces: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -94,6 +103,12 @@ class _RepoRefreshResult:
     scans: tuple[RefScan, ...]
     touches: tuple[RefScanTouch, ...]
     repo_metadata: SourceRepoMetadata
+    ignored_collections: frozenset[str]
+
+
+@dataclass(frozen=True)
+class _ParsedDependencyFiles:
+    reports: tuple[tuple[str, ParseReport], ...]
     ignored_collections: frozenset[str]
 
 
@@ -132,7 +147,6 @@ class RefreshGitSourceIndex:
         self._auth_header = auth_header if clone_protocol == "https" else None
         self._ref_scan_default = ref_scan_default
         self._concurrency = concurrency
-        self._index_lock = Lock()
 
     def __call__(self, source: SourceDefinition, *, source_key: str) -> RefreshResult:
         repos = self._expand_repos(source)
@@ -205,22 +219,15 @@ class RefreshGitSourceIndex:
         pending_scans: list[RefScan] = []
         pending_touches: list[RefScanTouch] = []
         clone_url = _clone_url(repo, self._clone_protocol)
-        bare = self._git.ensure_bare(
-            clone_url,
-            cache_dir=self._repo_cache_path,
-            auth_header=self._auth_header,
-        )
         selections = _ref_selections(source, repo.default_branch, self._ref_scan_default)
-        refspecs = sorted({refspec for selection in selections for refspec in selection.refspecs})
-        self._git.fetch_refs(
-            bare,
-            refspecs=refspecs,
-            depth=self._fetch_depth,
-            blob_filter=self._blob_filter,
+        refs = _selected_remote_refs(
+            self._git,
+            clone_url,
+            selections,
             auth_header=self._auth_header,
         )
-        refs = _selected_refs(self._git, bare, selections)
         metadata_by_ref = self._ref_scan_metadata(source_key, repo.full_name, refs)
+        changed_refs: list[GitRef] = []
         for ref in refs:
             selected.add((repo.full_name, ref.kind, ref.name))
             metadata = metadata_by_ref.get((ref.kind, ref.name))
@@ -243,13 +250,50 @@ class RefreshGitSourceIndex:
                     )
                 )
                 continue
-            edges, ignored = self._read_dependencies(
-                bare,
+            changed_refs.append(ref)
+        if not changed_refs:
+            return _RepoRefreshResult(
+                selected=frozenset(selected),
+                scans=(),
+                touches=tuple(pending_touches),
+                repo_metadata=SourceRepoMetadata(
+                    source_key=source_key,
+                    source_repo=repo.full_name,
+                    default_branch=repo.default_branch,
+                ),
+                ignored_collections=frozenset(),
+            )
+
+        bare = self._git.ensure_bare(
+            clone_url,
+            cache_dir=self._repo_cache_path,
+            auth_header=self._auth_header,
+        )
+        self._git.fetch_refs(
+            bare,
+            refspecs=[_exact_refspec(ref) for ref in changed_refs],
+            depth=self._fetch_depth,
+            blob_filter=self._blob_filter,
+            auth_header=self._auth_header,
+        )
+        parsed_by_sha: dict[str, _ParsedDependencyFiles] = {}
+        resolver = IdentityResolver(self._aliases)
+        for ref in changed_refs:
+            parsed = parsed_by_sha.get(ref.sha)
+            if parsed is None:
+                parsed = self._read_dependency_files(
+                    bare,
+                    ref=ref,
+                    paths=paths,
+                )
+                parsed_by_sha[ref.sha] = parsed
+            ignored_collections.update(parsed.ignored_collections)
+            edges = self._edges_from_reports(
+                parsed,
                 repo=repo.full_name,
                 ref=ref,
-                paths=paths,
+                resolver=resolver,
             )
-            ignored_collections.update(ignored)
             pending_scans.append(
                 RefScan(
                     source_key=source_key,
@@ -301,24 +345,21 @@ class RefreshGitSourceIndex:
         repo: str,
         refs: list[GitRef],
     ) -> dict[tuple[str, str], RefScanMetadata]:
-        with self._index_lock:
-            return self._index.ref_scans(
-                source_key,
-                repo,
-                ((ref.kind, ref.name) for ref in refs),
-            )
+        return self._index.ref_scans(
+            source_key,
+            repo,
+            ((ref.kind, ref.name) for ref in refs),
+        )
 
-    def _read_dependencies(
+    def _read_dependency_files(
         self,
         bare: Path,
         *,
-        repo: str,
         ref: GitRef,
         paths: list[str],
-    ) -> tuple[list[IndexedDependency], set[str]]:
-        edges: list[IndexedDependency] = []
+    ) -> _ParsedDependencyFiles:
+        reports: list[tuple[str, ParseReport]] = []
         ignored_collections: set[str] = set()
-        resolver = IdentityResolver(self._aliases)
         for path in paths:
             content = self._git.read_file(
                 bare,
@@ -330,6 +371,22 @@ class RefreshGitSourceIndex:
                 continue
             report = parse_dependency_file(path, content)
             ignored_collections.update(report.ignored_collections)
+            reports.append((path, report))
+        return _ParsedDependencyFiles(
+            reports=tuple(reports),
+            ignored_collections=frozenset(ignored_collections),
+        )
+
+    def _edges_from_reports(
+        self,
+        parsed: _ParsedDependencyFiles,
+        *,
+        repo: str,
+        ref: GitRef,
+        resolver: IdentityResolver,
+    ) -> list[IndexedDependency]:
+        edges: list[IndexedDependency] = []
+        for path, report in parsed.reports:
             for declaration in report.dependencies:
                 resolved = resolver.resolve(declaration)
                 edges.append(
@@ -345,7 +402,7 @@ class RefreshGitSourceIndex:
                         unresolved=resolved.unresolved,
                     )
                 )
-        return edges, ignored_collections
+        return edges
 
 
 def _ref_selections(
@@ -365,6 +422,7 @@ def _ref_selections(
                 kind=selection.kind,
                 patterns=selection.patterns,
                 refspecs=refspecs,
+                namespaces=tuple(selection.namespaces),
             )
         )
     return selections
@@ -391,6 +449,34 @@ def _selected_refs(git: GitCache, bare: Path, selections: list[_RefSelection]) -
                 continue
             selected[(ref.kind, ref.name)] = ref
     return [selected[key] for key in sorted(selected)]
+
+
+def _selected_remote_refs(
+    git: GitCache,
+    url: str,
+    selections: list[_RefSelection],
+    *,
+    auth_header: str | None,
+) -> list[GitRef]:
+    selected: dict[tuple[str, str], GitRef] = {}
+    namespaces = sorted(
+        {namespace for selection in selections for namespace in selection.namespaces}
+    )
+    refs = git.list_remote_refs(url, namespaces=namespaces, auth_header=auth_header)
+    refs_by_kind: dict[str, list[GitRef]] = {}
+    for ref in refs:
+        refs_by_kind.setdefault(ref.kind, []).append(ref)
+    for selection in selections:
+        for ref in refs_by_kind.get(selection.kind, []):
+            if not pattern_matches(ref.name, selection.patterns):
+                continue
+            selected[(ref.kind, ref.name)] = ref
+    return [selected[key] for key in sorted(selected)]
+
+
+def _exact_refspec(ref: GitRef) -> str:
+    full_ref = f"refs/{ref.kind}/{ref.name}"
+    return f"+{full_ref}:{full_ref}"
 
 
 def _repo_candidates(rows: Iterable[dict[str, object]]) -> list[_RepoCandidate]:

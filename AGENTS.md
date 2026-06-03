@@ -84,6 +84,10 @@ stores named and fingerprinted source scans, repo/ref scan metadata, per-source
 repo metadata such as exact default branch, resolved SHAs, graph edges,
 unresolved declarations, and timestamps. SHA is authoritative. Branch and tag
 names are resolved during source refresh and cached with freshness metadata.
+Ref scans point at dependency snapshots keyed by source repo, SHA, dependency
+path fingerprint, and alias fingerprint so multiple refs at the same commit can
+share one parsed edge set. `source_ref_scans` remains the authoritative
+repo/ref identity table for graph reads and display metadata.
 
 Keep SQLite adapter methods in `infrastructure/sqlite_index.py` focused on
 transaction boundaries and query flow. Schema/migration helpers live in
@@ -131,12 +135,14 @@ across branches and tags unless paired with `--ref-kind`; `--ref-kind tags`
 without a pattern scans all tags.
 
 `ansible.cache_backend` defaults to `git`. The Git backend keeps bare
-repositories under `ansible.repo_cache_path`, fetches only selected refs, reads
-dependency files with Git object plumbing, and replaces SQLite edges per
-`(source_key, repo, ref_kind, ref_name)`. Do not create working checkouts for
-source indexing. `ansible.cache_backend: api` keeps the REST tree/content path
-as an explicit fallback, and `--cache-backend` can override the backend for one
-graph refresh or source refresh.
+repositories under `ansible.repo_cache_path`, checks selected remote ref SHAs
+before touching the local bare cache, fetches only changed or missing refs,
+reads dependency files with Git object plumbing, and replaces SQLite ref scans
+per `(source_key, repo, ref_kind, ref_name)`. Do not create working checkouts
+for source indexing. `ansible.cache_backend: api` keeps the REST tree/content
+path as an explicit fallback, but it writes through the same incremental
+per-ref scan commit path as the Git backend. `--cache-backend` can override the
+backend for one graph refresh or source refresh.
 Git-backed source refresh supports bounded per-repo concurrency through
 `ansible.git_fetch_concurrency` and `--concurrency`; repo/team/org expansion
 remains serial, and SQLite mutation remains a single atomic commit after repo

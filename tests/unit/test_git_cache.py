@@ -83,6 +83,60 @@ def test_auth_header_is_not_passed_in_git_argv(monkeypatch, tmp_path: Path) -> N
     assert not captured["auth_config_path"].exists()
 
 
+def test_list_remote_refs_parses_heads_tags_and_peeled_tags(monkeypatch) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        cmd = args[0]
+        assert isinstance(cmd, list)
+        env = kwargs.get("env")
+        assert isinstance(env, dict)
+        auth_config_path = Path(env["GIT_CONFIG_VALUE_0"])
+        captured["cmd"] = cmd
+        captured["env"] = env
+        captured["auth_config_path"] = auth_config_path
+        captured["auth_config"] = auth_config_path.read_text()
+        return subprocess.CompletedProcess(
+            cmd,
+            0,
+            stdout=(
+                "sha-main\trefs/heads/main\n"
+                "sha-tag-object\trefs/tags/v1.0.0\n"
+                "sha-tag-commit\trefs/tags/v1.0.0^{}\n"
+                "sha-lightweight\trefs/tags/v2.0.0\n"
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr("shutil.which", lambda _: "/usr/bin/git")
+    monkeypatch.setattr("subprocess.run", fake_run)
+    monkeypatch.delenv("GIT_CONFIG_COUNT", raising=False)
+
+    refs = GitRepositoryCache().list_remote_refs(
+        "https://github.com/acme/site.git",
+        namespaces=["heads/main", "tags/v*"],
+        auth_header="AUTHORIZATION: bearer secret-token",
+    )
+
+    assert [(ref.kind, ref.name, ref.sha) for ref in refs] == [
+        ("heads", "main", "sha-main"),
+        ("tags", "v1.0.0", "sha-tag-commit"),
+        ("tags", "v2.0.0", "sha-lightweight"),
+    ]
+    assert captured["cmd"][1:] == [
+        "ls-remote",
+        "https://github.com/acme/site.git",
+        "refs/heads/main",
+        "refs/tags/v*",
+    ]
+    assert "secret-token" not in " ".join(captured["cmd"])
+    assert "secret-token" not in "\n".join(
+        value for key, value in captured["env"].items() if key.startswith("GIT_CONFIG_")
+    )
+    assert "AUTHORIZATION: bearer secret-token" in captured["auth_config"]
+    assert not captured["auth_config_path"].exists()
+
+
 def test_fetch_refs_propagates_missing_remote_ref(monkeypatch, tmp_path: Path) -> None:
     def fake_run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
         cmd = args[0]
