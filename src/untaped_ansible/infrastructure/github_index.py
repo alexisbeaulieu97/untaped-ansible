@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-from untaped_ansible.application.ports import (
-    DependencyIndex,
-    GitHubDependencyReader,
-    IndexedDependency,
-)
+from typing import TYPE_CHECKING
+
 from untaped_ansible.domain.identity import IdentityResolver
 from untaped_ansible.domain.parser import parse_dependency_file
+from untaped_ansible.domain.payloads import IndexedDependency
+
+if TYPE_CHECKING:
+    from untaped_ansible.application.ports import DependencyIndex, GitHubDependencyReader
 
 
 class GithubDependencyIndex:

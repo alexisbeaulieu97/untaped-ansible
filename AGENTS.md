@@ -77,6 +77,12 @@ SHAs, graph edges, unresolved declarations, and timestamps. SHA is
 authoritative. Branch and tag names are resolved during source refresh and
 cached with freshness metadata.
 
+Source-index payload DTOs such as `IndexedDependency`, `GitRef`, `RefScan`,
+and `IndexScan` live in `domain/payloads.py` because they cross the
+application/infrastructure boundary. `application/ports.py` should stay
+protocol-only, and the layering tests enforce that `application` and
+`infrastructure` do not import each other at runtime.
+
 `graph` is the primary user command. Downstream dependency reads do not require
 a source or cached data. When a source is configured, downstream graphing
 checks selected remote refs and prefers the refreshed cache; `--cached` skips

@@ -6,8 +6,9 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict
 
-from untaped_ansible.application.ports import DependencyIndex, IndexedDependency
+from untaped_ansible.application.ports import DependencyIndex
 from untaped_ansible.domain.graph import DependencyGraph, GraphEdge, GraphNode
+from untaped_ansible.domain.payloads import IndexedDependency
 
 GraphDirection = Literal["deps", "impact", "both"]
 

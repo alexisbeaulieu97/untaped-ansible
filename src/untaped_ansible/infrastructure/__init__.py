@@ -1,4 +1,4 @@
-from untaped_ansible.application.ports import IndexScan
+from untaped_ansible.domain.payloads import IndexScan
 from untaped_ansible.infrastructure.config_repo import AliasRepository, SourceRepository
 from untaped_ansible.infrastructure.git_cache import GitCacheError, GitRepositoryCache
 from untaped_ansible.infrastructure.github_index import GithubDependencyIndex

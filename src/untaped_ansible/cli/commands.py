@@ -26,13 +26,14 @@ from untaped import (
 from untaped_github import GithubClient, GithubSettings
 
 from untaped_ansible.application import BuildGraph, GraphRequest
-from untaped_ansible.application.ports import DependencyIndex, IndexedDependency
+from untaped_ansible.application.ports import DependencyIndex
 from untaped_ansible.application.refresh_git_index import RefreshGitSourceIndex
 from untaped_ansible.application.refresh_index import RefreshResult, RefreshSourceIndex
 from untaped_ansible.domain.graph import DependencyGraph
 from untaped_ansible.domain.identity import IdentityResolver
 from untaped_ansible.domain.models import DependencyDeclaration
 from untaped_ansible.domain.parser import parse_dependency_file
+from untaped_ansible.domain.payloads import IndexedDependency
 from untaped_ansible.domain.renderers import GraphFormat, render_graph
 from untaped_ansible.infrastructure import (
     AliasRepository,

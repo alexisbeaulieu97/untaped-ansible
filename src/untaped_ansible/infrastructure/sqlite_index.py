@@ -8,7 +8,7 @@ from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
-from untaped_ansible.application.ports import (
+from untaped_ansible.domain.payloads import (
     IndexedDependency,
     IndexScan,
     RefScan,

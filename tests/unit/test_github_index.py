@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from untaped_ansible.application.ports import IndexedDependency
+from untaped_ansible.domain.payloads import IndexedDependency
 from untaped_ansible.infrastructure.github_index import GithubDependencyIndex
 
 
