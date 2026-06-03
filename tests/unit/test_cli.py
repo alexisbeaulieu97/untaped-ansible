@@ -15,7 +15,7 @@ from untaped.settings import get_settings
 
 from untaped_ansible import app
 from untaped_ansible.application.refresh_index import RefreshResult
-from untaped_ansible.cli import commands
+from untaped_ansible.cli import source_commands
 from untaped_ansible.domain.payloads import IndexedDependency
 from untaped_ansible.infrastructure import IndexScan, SqliteDependencyIndex
 
@@ -1227,7 +1227,7 @@ def test_source_refresh_uses_basic_auth_for_git_backend(tmp_path: Path, monkeypa
                 unchanged_refs=0,
             )
 
-    monkeypatch.setattr(commands, "RefreshGitSourceIndex", FakeGitRefresh)
+    monkeypatch.setattr(source_commands, "RefreshGitSourceIndex", FakeGitRefresh)
 
     result = CliRunner().invoke(app, ["source", "refresh", "prod"])
 
@@ -1260,7 +1260,7 @@ def test_source_refresh_allows_git_concurrency_override(tmp_path: Path, monkeypa
                 unchanged_refs=0,
             )
 
-    monkeypatch.setattr(commands, "RefreshGitSourceIndex", FakeGitRefresh)
+    monkeypatch.setattr(source_commands, "RefreshGitSourceIndex", FakeGitRefresh)
 
     result = CliRunner().invoke(app, ["source", "refresh", "prod", "--concurrency", "5"])
 
@@ -1319,7 +1319,7 @@ def test_graph_with_source_refreshes_by_default_with_configured_backend(
             unchanged_refs=0,
         )
 
-    monkeypatch.setattr(commands, "_refresh_source", fake_refresh)
+    monkeypatch.setattr(source_commands, "_refresh_source", fake_refresh)
 
     result = CliRunner().invoke(
         app,
@@ -1380,7 +1380,7 @@ def test_graph_inline_upstream_with_ref_renders_all_matching_source_refs(
         )
         return RefreshResult(source_key=source_key, repos=1, refs=2, edges=2)
 
-    monkeypatch.setattr(commands, "_refresh_source", fake_refresh)
+    monkeypatch.setattr(source_commands, "_refresh_source", fake_refresh)
 
     result = CliRunner().invoke(
         app,
@@ -1431,7 +1431,7 @@ def test_graph_cached_skips_source_refresh(tmp_path: Path, monkeypatch) -> None:
     def fail_refresh(*args, **kwargs) -> RefreshResult:
         raise AssertionError("--cached must not refresh source data")
 
-    monkeypatch.setattr(commands, "_refresh_source", fail_refresh)
+    monkeypatch.setattr(source_commands, "_refresh_source", fail_refresh)
 
     result = CliRunner().invoke(
         app,
