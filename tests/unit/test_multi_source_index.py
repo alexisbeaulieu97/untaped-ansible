@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from untaped_ansible.domain.payloads import IndexedDependency
+from untaped_ansible.domain.payloads import CachedRef, IndexedDependency
 from untaped_ansible.infrastructure.multi_source_index import MultiSourceDependencyIndex
 
 
@@ -12,10 +12,12 @@ class StubIndex:
         edges_by_source: dict[str, list[IndexedDependency]],
         *,
         refs_by_source: dict[tuple[str, str], set[str]] | None = None,
+        metadata_by_source: dict[tuple[str, str], tuple[CachedRef, ...]] | None = None,
         stale_sources: set[str] | None = None,
     ) -> None:
         self.edges_by_source = edges_by_source
         self.refs_by_source = refs_by_source or {}
+        self.metadata_by_source = metadata_by_source or {}
         self.stale_sources = stale_sources or set()
 
     def dependencies(
@@ -46,6 +48,9 @@ class StubIndex:
 
     def cached_refs(self, repo: str, *, source_key: str | None) -> set[str]:
         return set(self.refs_by_source.get((source_key or "", repo), set()))
+
+    def cached_ref_metadata(self, repo: str, *, source_key: str | None) -> tuple[CachedRef, ...]:
+        return self.metadata_by_source.get((source_key or "", repo), ())
 
     def is_stale(self, source_key: str | None, *, max_age_seconds: int) -> bool:
         return source_key in self.stale_sources
@@ -134,3 +139,29 @@ def test_multi_source_index_unions_dependents_cached_refs_and_staleness() -> Non
         "release",
     }
     assert index.is_stale("sources:platform,ops", max_age_seconds=60)
+
+
+def test_multi_source_index_unions_cached_ref_metadata_with_first_default_branch() -> None:
+    index = MultiSourceDependencyIndex(
+        StubIndex(
+            {},
+            metadata_by_source={
+                ("source:platform", "acme/site"): (
+                    CachedRef(name="main", kind="heads", default_branch="main"),
+                    CachedRef(name="v1.0.0", kind="tags", default_branch="main"),
+                ),
+                ("source:ops", "acme/site"): (
+                    CachedRef(name="release", kind="heads", default_branch="release"),
+                    CachedRef(name="v2.0.0", kind="tags", default_branch="release"),
+                ),
+            },
+        ),
+        ("source:platform", "source:ops"),
+    )
+
+    assert index.cached_ref_metadata("acme/site", source_key="sources:platform,ops") == (
+        CachedRef(name="main", kind="heads", default_branch="main"),
+        CachedRef(name="v1.0.0", kind="tags", default_branch="main"),
+        CachedRef(name="release", kind="heads", default_branch="main"),
+        CachedRef(name="v2.0.0", kind="tags", default_branch="main"),
+    )

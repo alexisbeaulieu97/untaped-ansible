@@ -16,7 +16,7 @@ from untaped.settings import get_settings
 from untaped_ansible import app
 from untaped_ansible.application.refresh_index import RefreshResult
 from untaped_ansible.cli import source_commands
-from untaped_ansible.domain.payloads import IndexedDependency
+from untaped_ansible.domain.payloads import IndexedDependency, RefScan, SourceRepoMetadata
 from untaped_ansible.infrastructure import IndexScan, SqliteDependencyIndex
 
 
@@ -451,7 +451,6 @@ def test_graph_inline_upstream_refreshes_and_renders_impact(
             sha="sha-main",
             content="- src: https://github.com/acme/base\n  version: v1\n",
             refs_path="heads",
-            default_branch=None,
         )
         result = CliRunner().invoke(
             app,
@@ -501,7 +500,6 @@ def test_graph_inline_source_reuses_fingerprint_cache_without_refresh(
             sha="sha-main",
             content="- src: https://github.com/acme/base\n",
             refs_path="heads",
-            default_branch=None,
         )
         first = runner.invoke(
             app,
@@ -935,6 +933,74 @@ def test_source_save_preserves_cached_data_for_identical_source(
     assert "    +-- acme/site@main" in result.stdout
 
 
+def test_graph_cached_missing_ref_lists_available_refs_in_display_order(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    index_path = tmp_path / "index.sqlite3"
+    now = datetime(2026, 6, 1, tzinfo=UTC)
+    scans = tuple(
+        RefScan(
+            source_key="source:platform",
+            source_repo="acme/site",
+            ref_kind=ref_kind,
+            source_ref=source_ref,
+            source_sha=f"sha-{source_ref}",
+            backend="git",
+            clone_url="https://github.com/acme/site.git",
+            clone_protocol="https",
+            dependency_paths_fingerprint="paths-a",
+            checked_at=now,
+            indexed_at=now,
+            dependencies=(),
+        )
+        for ref_kind, source_ref in (
+            ("tags", "v1.0.0"),
+            ("heads", "trunk"),
+            ("tags", "v2.0.0"),
+            ("heads", "feature/2"),
+            ("heads", "docs"),
+        )
+    )
+    SqliteDependencyIndex(index_path).commit_source_ref_refresh(
+        "source:platform",
+        scans=scans,
+        touches=(),
+        keep={(scan.source_repo, scan.ref_kind, scan.source_ref) for scan in scans},
+        repo_metadata=(
+            SourceRepoMetadata(
+                source_key="source:platform",
+                source_repo="acme/site",
+                default_branch="trunk",
+            ),
+        ),
+        scanned_at=now,
+    )
+    cfg = _write_config(
+        tmp_path,
+        index_path=index_path,
+        top_level_ansible={"sources": [{"name": "platform", "repos": ["acme/site"]}]},
+    )
+    monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "graph",
+            "acme/site",
+            "--ref",
+            "missing",
+            "--source",
+            "platform",
+            "--downstream",
+            "--cached",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert ("available refs: trunk, docs, feature/2, v2.0.0, v1.0.0") in result.stdout
+
+
 def test_graph_both_renders_downstream_and_warns_when_upstream_unavailable(
     tmp_path: Path,
     monkeypatch,
@@ -1150,7 +1216,6 @@ def test_inline_source_cache_key_is_order_insensitive(tmp_path: Path, monkeypatc
             sha="sha-a",
             content="- src: https://github.com/acme/base\n",
             refs_path="heads",
-            default_branch=None,
         )
         _mock_refresh_repo(
             mock,
@@ -1158,7 +1223,6 @@ def test_inline_source_cache_key_is_order_insensitive(tmp_path: Path, monkeypatc
             sha="sha-b",
             content="- src: https://github.com/acme/base\n",
             refs_path="heads",
-            default_branch=None,
         )
         first = runner.invoke(
             app,
@@ -1484,7 +1548,6 @@ def test_source_refresh_scans_source_with_github_client(tmp_path: Path, monkeypa
             "acme/site",
             sha="abc",
             content="- common\n",
-            default_branch=None,
         )
         result = CliRunner().invoke(app, ["source", "refresh", "prod", "--cache-backend", "api"])
 

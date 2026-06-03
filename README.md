@@ -59,7 +59,10 @@ Tree output renders each direction as a nested traversal. Each populated
 direction starts with the target node for that direction, then continues to its
 children. When the graph target omits `--ref` and cached or live data contains
 multiple matching refs, those refs are shown separately as `target@ref` roots.
-A repo/ref that appears in both directions is rendered in both sections.
+A repo/ref that appears in both directions is rendered in both sections. In
+tree output, refs are ordered for scanning: branches first with the repo's
+default branch first, then tags in newest-first semantic-version order, then
+refs without cached branch/tag metadata.
 
 Downstream graphs do not require a source or cached data. Local targets are read
 from disk. GitHub URL and `owner/repo` targets read declared dependencies live
@@ -107,9 +110,10 @@ source key.
 
 Source-backed downstream traversal is strict about refs. If the graph needs
 `repo@v1` and the source cache only has `repo@main`, graph stops at that node
-and warns instead of silently falling back. Scan the matching branch/tag, use
-`--cached` only when the existing SQLite index is known to be complete, or pass
-`--live` when you explicitly want downstream dependencies read from GitHub.
+and warns instead of silently falling back. Available-ref warnings use the same
+branch/tag ordering as tree output. Scan the matching branch/tag, use `--cached`
+only when the existing SQLite index is known to be complete, or pass `--live`
+when you explicitly want downstream dependencies read from GitHub.
 
 Save a reusable source for repeated work or CI:
 

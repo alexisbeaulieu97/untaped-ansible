@@ -9,12 +9,14 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from untaped_ansible.domain.payloads import (
+    CachedRef,
     IndexedDependency,
     IndexScan,
     RefScan,
     RefScanMetadata,
     RefScanTouch,
     SourceIndexStatus,
+    SourceRepoMetadata,
 )
 from untaped_ansible.infrastructure.sqlite_rows import (
     dump_dt,
@@ -53,6 +55,7 @@ class SqliteDependencyIndex:
             db.execute("delete from dependency_edges where source_key = ?", (scan.source_key,))
             db.execute("delete from source_runs where source_key = ?", (scan.source_key,))
             db.execute("delete from source_ref_scans where source_key = ?", (scan.source_key,))
+            db.execute("delete from source_repo_metadata where source_key = ?", (scan.source_key,))
             db.execute(
                 """
                 insert into source_runs(source_key, scanned_at, repos, refs, edges)
@@ -72,7 +75,7 @@ class SqliteDependencyIndex:
                         scan.source_key,
                         edge.source_repo,
                         edge.source_ref,
-                        None,
+                        edge.source_ref_kind,
                         edge.source_sha,
                         edge.dependency_repo,
                         edge.dependency_name,
@@ -83,6 +86,7 @@ class SqliteDependencyIndex:
                     for edge in scan.dependencies
                 ],
             )
+            _replace_source_repo_metadata(db, scan.source_key, scan.repo_metadata)
 
     def ref_scan(
         self,
@@ -187,6 +191,7 @@ class SqliteDependencyIndex:
         scans: tuple[RefScan, ...],
         touches: tuple[RefScanTouch, ...],
         keep: set[tuple[str, str, str]],
+        repo_metadata: tuple[SourceRepoMetadata, ...] = (),
         scanned_at: datetime,
     ) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
@@ -197,6 +202,7 @@ class SqliteDependencyIndex:
             for touch in touches:
                 _touch_ref_scan(db, touch)
             _prune_source_refs(db, source_key, keep)
+            _replace_source_repo_metadata(db, source_key, repo_metadata)
             _refresh_source_run_from_ref_scans(db, source_key, scanned_at=scanned_at)
 
     def finalize_source_ref_scan(self, source_key: str, *, scanned_at: datetime) -> None:
@@ -257,6 +263,44 @@ class SqliteDependencyIndex:
             ).fetchall()
         return {str(row["source_ref"]) for row in rows}
 
+    def cached_ref_metadata(self, repo: str, *, source_key: str | None) -> tuple[CachedRef, ...]:
+        if source_key is None:
+            return ()
+        with self._db() as db:
+            ensure_schema(db)
+            rows = db.execute(
+                """
+                select scans.source_ref as name, scans.ref_kind as kind, metadata.default_branch
+                from source_ref_scans as scans
+                left join source_repo_metadata as metadata
+                  on metadata.source_key = scans.source_key
+                 and metadata.source_repo = scans.source_repo
+                where scans.source_key = ? and scans.source_repo = ?
+                union all
+                select edges.source_ref as name, edges.source_ref_kind as kind,
+                       metadata.default_branch
+                from dependency_edges as edges
+                left join source_repo_metadata as metadata
+                  on metadata.source_key = edges.source_key
+                 and metadata.source_repo = edges.source_repo
+                where edges.source_key = ? and edges.source_repo = ?
+                  and edges.source_ref is not null
+                """,
+                (source_key, repo, source_key, repo),
+            ).fetchall()
+        refs: dict[tuple[str, str | None], CachedRef] = {}
+        for row in rows:
+            key = (str(row["name"]), _optional_str(row["kind"]))
+            refs.setdefault(
+                key,
+                CachedRef(
+                    name=key[0],
+                    kind=key[1],
+                    default_branch=_optional_str(row["default_branch"]),
+                ),
+            )
+        return tuple(refs.values())
+
     def status(self, source_key: str) -> IndexStatus | None:
         with self._db() as db:
             ensure_schema(db)
@@ -290,10 +334,12 @@ class SqliteDependencyIndex:
                 db.execute("delete from dependency_edges")
                 db.execute("delete from source_runs")
                 db.execute("delete from source_ref_scans")
+                db.execute("delete from source_repo_metadata")
                 return
             db.execute("delete from dependency_edges where source_key = ?", (source_key,))
             db.execute("delete from source_runs where source_key = ?", (source_key,))
             db.execute("delete from source_ref_scans where source_key = ?", (source_key,))
+            db.execute("delete from source_repo_metadata where source_key = ?", (source_key,))
 
     def _select_edges(self, clauses: list[str], params: list[object]) -> list[IndexedDependency]:
         where = " and ".join(clauses)
@@ -301,8 +347,8 @@ class SqliteDependencyIndex:
             ensure_schema(db)
             rows = db.execute(
                 f"""
-                select source_repo, source_ref, source_sha, dependency_repo, dependency_name,
-                       dependency_version, source_path, unresolved
+                select source_repo, source_ref, source_ref_kind, source_sha, dependency_repo,
+                       dependency_name, dependency_version, source_path, unresolved
                 from dependency_edges
                 where {where}
                 order by id
@@ -411,6 +457,37 @@ def _touch_ref_scan(db: sqlite3.Connection, touch: RefScanTouch) -> None:
     )
 
 
+def _replace_source_repo_metadata(
+    db: sqlite3.Connection,
+    source_key: str,
+    metadata: tuple[SourceRepoMetadata, ...],
+) -> None:
+    by_repo = {row.source_repo: row for row in metadata if row.source_key == source_key}
+    if not by_repo:
+        db.execute("delete from source_repo_metadata where source_key = ?", (source_key,))
+        return
+    placeholders = ",".join("?" for _ in by_repo)
+    db.execute(
+        f"""
+        delete from source_repo_metadata
+        where source_key = ? and source_repo not in ({placeholders})
+        """,
+        (source_key, *by_repo),
+    )
+    db.executemany(
+        """
+        insert into source_repo_metadata(source_key, source_repo, default_branch)
+        values (?, ?, ?)
+        on conflict(source_key, source_repo) do update set
+            default_branch = excluded.default_branch
+        """,
+        [
+            (source_key, row.source_repo, row.default_branch)
+            for row in sorted(by_repo.values(), key=lambda item: item.source_repo)
+        ],
+    )
+
+
 def _prune_source_refs(
     db: sqlite3.Connection,
     source_key: str,
@@ -502,3 +579,7 @@ def _refresh_source_run_from_ref_scans(
 def _chunks[T](values: list[T], size: int) -> Iterator[list[T]]:
     for start in range(0, len(values), size):
         yield values[start : start + size]
+
+
+def _optional_str(value: object) -> str | None:
+    return value if isinstance(value, str) and value else None

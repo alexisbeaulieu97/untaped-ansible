@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 
 from untaped_ansible.domain.identity import IdentityResolver
 from untaped_ansible.domain.parser import parse_dependency_file
-from untaped_ansible.domain.payloads import IndexedDependency
+from untaped_ansible.domain.payloads import CachedRef, IndexedDependency
 
 if TYPE_CHECKING:
     from untaped_ansible.application.ports import DependencyIndex, GitHubDependencyReader
@@ -58,6 +58,15 @@ class GithubDependencyIndex:
             if cached_repo == repo and cached_ref is not None
         )
         return refs
+
+    def cached_ref_metadata(self, repo: str, *, source_key: str | None) -> tuple[CachedRef, ...]:
+        metadata = list(self._wrapped.cached_ref_metadata(repo, source_key=source_key))
+        known = {(cached_ref.name, cached_ref.kind) for cached_ref in metadata}
+        for cached_repo, cached_ref in self._cache:
+            if cached_repo != repo or cached_ref is None or (cached_ref, None) in known:
+                continue
+            metadata.append(CachedRef(name=cached_ref))
+        return tuple(metadata)
 
     def is_stale(self, source_key: str | None, *, max_age_seconds: int) -> bool:
         return self._wrapped.is_stale(source_key, max_age_seconds=max_age_seconds)

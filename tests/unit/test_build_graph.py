@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from untaped_ansible.application.graph import BuildGraph, GraphRequest
-from untaped_ansible.domain.payloads import IndexedDependency
+from untaped_ansible.domain.payloads import CachedRef, IndexedDependency
 
 
 class StubIndex:
@@ -12,10 +12,12 @@ class StubIndex:
         edges: list[IndexedDependency],
         *,
         cached_refs: dict[str, set[str]] | None = None,
+        cached_ref_metadata: dict[str, tuple[CachedRef, ...]] | None = None,
         stale: bool = False,
     ) -> None:
         self.edges = edges
         self.stale = stale
+        self._cached_ref_metadata = cached_ref_metadata or {}
         if cached_refs is None:
             cached_refs = {}
             for edge in edges:
@@ -57,6 +59,11 @@ class StubIndex:
         if source_key is None:
             return set()
         return set(self._cached_refs.get(repo, set()))
+
+    def cached_ref_metadata(self, repo: str, *, source_key: str | None) -> tuple[CachedRef, ...]:
+        if source_key is None:
+            return ()
+        return self._cached_ref_metadata.get(repo, ())
 
 
 def test_build_graph_includes_dependencies_impact_unresolved_and_stale_warning() -> None:
@@ -273,6 +280,93 @@ def test_transitive_dependency_traversal_warns_and_stops_when_ref_is_not_cached(
         "not expanding acme/b@v1 from cached source data: ref is not cached "
         "(available refs: main). Scan the matching ref/tag or use --live for downstream.",
     )
+
+
+def test_cached_ref_warning_uses_branch_and_semver_display_order() -> None:
+    index = StubIndex(
+        [],
+        cached_refs={"acme/site": {"v1.0.0", "trunk", "v2.0.0", "feature/2", "docs"}},
+        cached_ref_metadata={
+            "acme/site": (
+                CachedRef(name="v1.0.0", kind="tags", default_branch="trunk"),
+                CachedRef(name="trunk", kind="heads", default_branch="trunk"),
+                CachedRef(name="v2.0.0", kind="tags", default_branch="trunk"),
+                CachedRef(name="feature/2", kind="heads", default_branch="trunk"),
+                CachedRef(name="docs", default_branch="trunk"),
+            )
+        },
+    )
+
+    graph = BuildGraph(index)(
+        GraphRequest(
+            repo="acme/site",
+            ref="missing",
+            source_key="source:prod",
+            direction="deps",
+            depth=1,
+        )
+    )
+
+    assert graph.warnings == (
+        "not expanding acme/site@missing from cached source data: ref is not cached "
+        "(available refs: trunk, feature/2, v2.0.0, v1.0.0, docs). Scan the matching "
+        "ref/tag or use --live for downstream.",
+    )
+
+
+def test_build_graph_attaches_ref_kind_and_default_branch_to_nodes() -> None:
+    index = StubIndex(
+        [
+            IndexedDependency(
+                source_repo="acme/site",
+                source_ref="trunk",
+                source_ref_kind="heads",
+                dependency_repo="acme/base",
+                dependency_name="base",
+                dependency_version="v2.0.0",
+                source_path="roles/requirements.yml",
+            ),
+            IndexedDependency(
+                source_repo="acme/site",
+                source_ref="v2.0.0",
+                source_ref_kind="tags",
+                dependency_repo="acme/base",
+                dependency_name="base",
+                dependency_version="trunk",
+                source_path="roles/requirements.yml",
+            ),
+        ],
+        cached_ref_metadata={
+            "acme/site": (
+                CachedRef(name="trunk", kind="heads", default_branch="trunk"),
+                CachedRef(name="v2.0.0", kind="tags", default_branch="trunk"),
+            ),
+            "acme/base": (
+                CachedRef(name="trunk", kind="heads", default_branch="main"),
+                CachedRef(name="v2.0.0", kind="tags", default_branch="main"),
+            ),
+        },
+    )
+
+    graph = BuildGraph(index)(
+        GraphRequest(
+            repo="acme/site",
+            ref=None,
+            source_key="source:prod",
+            direction="deps",
+            depth=1,
+        )
+    )
+    nodes = {node.id: node for node in graph.nodes}
+
+    assert nodes["acme/site@trunk"].ref_kind == "heads"
+    assert nodes["acme/site@trunk"].default_branch == "trunk"
+    assert nodes["acme/site@v2.0.0"].ref_kind == "tags"
+    assert nodes["acme/site@v2.0.0"].default_branch == "trunk"
+    assert nodes["acme/base@trunk"].ref_kind == "heads"
+    assert nodes["acme/base@trunk"].default_branch == "main"
+    assert nodes["acme/base@v2.0.0"].ref_kind == "tags"
+    assert nodes["acme/base@v2.0.0"].default_branch == "main"
 
 
 def test_both_direction_warns_when_target_downstream_ref_is_not_cached() -> None:

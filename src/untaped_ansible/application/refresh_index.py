@@ -19,7 +19,12 @@ from untaped_ansible.application.source_refs import (
 )
 from untaped_ansible.domain.identity import IdentityResolver
 from untaped_ansible.domain.parser import parse_dependency_file
-from untaped_ansible.domain.payloads import IndexedDependency, IndexScan
+from untaped_ansible.domain.payloads import (
+    GitRef,
+    IndexedDependency,
+    IndexScan,
+    SourceRepoMetadata,
+)
 from untaped_ansible.settings import SourceDefinition, normalize_team_refs
 
 
@@ -35,6 +40,13 @@ class RefreshResult(BaseModel):
     ignored_collections: tuple[str, ...] = ()
     changed_refs: int = 0
     unchanged_refs: int = 0
+
+
+class _RepoCandidate(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    full_name: str
+    default_branch: str
 
 
 class RefreshSourceIndex:
@@ -61,17 +73,17 @@ class RefreshSourceIndex:
         ignored_collections: set[str] = set()
         ref_count = 0
         for repo in repos:
-            owner, name = repo.split("/", maxsplit=1)
-            for ref_name, sha in self._refs(owner, name, source):
+            owner, name = repo.full_name.split("/", maxsplit=1)
+            for ref in self._refs(owner, name, source, default_branch=repo.default_branch):
                 ref_count += 1
                 paths = source.dependency_paths or self._default_dependency_paths
-                tree_paths = self._tree_paths(owner, name, sha)
+                tree_paths = self._tree_paths(owner, name, ref.sha)
                 for path in paths:
                     if path not in tree_paths:
                         continue
                     report = parse_dependency_file(
                         path,
-                        self._github.get_raw_content(owner, name, path, ref=sha),
+                        self._github.get_raw_content(owner, name, path, ref=ref.sha),
                     )
                     ignored_collections.update(report.ignored_collections)
                     resolver = IdentityResolver(self._aliases)
@@ -79,9 +91,10 @@ class RefreshSourceIndex:
                         resolved = resolver.resolve(declaration)
                         dependencies.append(
                             IndexedDependency(
-                                source_repo=repo,
-                                source_ref=ref_name,
-                                source_sha=sha,
+                                source_repo=repo.full_name,
+                                source_ref=ref.name,
+                                source_ref_kind=ref.kind,
+                                source_sha=ref.sha,
                                 dependency_repo=resolved.repo,
                                 dependency_name=declaration.name,
                                 dependency_version=declaration.version,
@@ -94,6 +107,14 @@ class RefreshSourceIndex:
             scanned_at=datetime.now(UTC),
             repos=len(repos),
             refs=ref_count,
+            repo_metadata=tuple(
+                SourceRepoMetadata(
+                    source_key=source_key,
+                    source_repo=repo.full_name,
+                    default_branch=repo.default_branch,
+                )
+                for repo in repos
+            ),
             dependencies=tuple(dependencies),
         )
         self._index.replace_source_scan(scan)
@@ -107,40 +128,48 @@ class RefreshSourceIndex:
             unchanged_refs=0,
         )
 
-    def _expand_repos(self, source: SourceDefinition) -> list[str]:
+    def _expand_repos(self, source: SourceDefinition) -> list[_RepoCandidate]:
         repos = list(source.repos)
         for org in source.orgs:
             repos.extend(_repo_names(self._github.list_org_repos(org)))
         for team in normalize_team_refs(source.teams, source.orgs):
             org, slug = _split_team(team)
             repos.extend(_repo_names(self._github.list_team_repos(org, slug)))
-        return sorted(dict.fromkeys(repos))
+        candidates: list[_RepoCandidate] = []
+        for repo in sorted(dict.fromkeys(repos)):
+            owner, name = repo.split("/", maxsplit=1)
+            candidates.append(
+                _RepoCandidate(
+                    full_name=repo,
+                    default_branch=_default_branch(self._github.get_repository(owner, name)),
+                )
+            )
+        return candidates
 
-    def _refs(self, owner: str, repo: str, source: SourceDefinition) -> list[tuple[str, str]]:
-        refs: list[tuple[str, str]] = []
-        default_branch = "HEAD"
-        if (
-            not source.ref_kinds
-            and not source.ref_patterns
-            and self._ref_scan_default == "default_branch"
-        ):
-            default_branch = _default_branch(self._github.get_repository(owner, repo))
+    def _refs(
+        self,
+        owner: str,
+        repo: str,
+        source: SourceDefinition,
+        *,
+        default_branch: str,
+    ) -> list[GitRef]:
+        refs: dict[tuple[str, str], GitRef] = {}
         for selection in source_ref_selections(
             source,
             default_branch=default_branch,
             ref_scan_default=self._ref_scan_default,
         ):
             for namespace in selection.namespaces:
-                refs.extend(
-                    self._filtered_refs(
-                        owner,
-                        repo,
-                        kind=selection.kind,
-                        namespace=namespace,
-                        patterns=selection.patterns,
-                    )
-                )
-        return sorted(dict.fromkeys(refs))
+                for ref in self._filtered_refs(
+                    owner,
+                    repo,
+                    kind=selection.kind,
+                    namespace=namespace,
+                    patterns=selection.patterns,
+                ):
+                    refs[(ref.kind, ref.name)] = ref
+        return [refs[key] for key in sorted(refs)]
 
     def _filtered_refs(
         self,
@@ -150,8 +179,8 @@ class RefreshSourceIndex:
         kind: str,
         namespace: str,
         patterns: tuple[str, ...],
-    ) -> list[tuple[str, str]]:
-        refs: list[tuple[str, str]] = []
+    ) -> list[GitRef]:
+        refs: list[GitRef] = []
         for row in self._github.list_matching_refs(owner, repo, namespace):
             full_ref = _str(row.get("ref"))
             sha = _object_sha(row.get("object"))
@@ -161,7 +190,7 @@ class RefreshSourceIndex:
             name = full_ref.removeprefix(prefix)
             if not pattern_matches(name, patterns):
                 continue
-            refs.append((name, sha))
+            refs.append(GitRef(kind=kind, name=name, sha=sha))
         return refs
 
     def _tree_paths(self, owner: str, repo: str, sha: str) -> set[str]:

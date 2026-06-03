@@ -11,9 +11,10 @@ import pytest
 from untaped_ansible.application.refresh_git_index import (
     RefreshGitSourceIndex,
     _RefSelection,
+    _repo_candidate,
     _selected_refs,
 )
-from untaped_ansible.domain.payloads import GitRef
+from untaped_ansible.domain.payloads import CachedRef, GitRef
 from untaped_ansible.infrastructure.git_cache import GitCacheError
 from untaped_ansible.infrastructure.sqlite_index import SqliteDependencyIndex
 from untaped_ansible.settings import SourceDefinition
@@ -334,6 +335,10 @@ def test_git_refresh_defaults_to_all_heads_and_tags(tmp_path: Path) -> None:
     assert [
         edge.source_ref for edge in index.dependents("acme/base", "v3", source_key="source:prod")
     ] == ["master", "v3"]
+    assert set(index.cached_ref_metadata("acme/site", source_key="source:prod")) == {
+        CachedRef(name="master", kind="heads", default_branch="main"),
+        CachedRef(name="v3", kind="tags", default_branch="main"),
+    }
 
 
 def test_git_refresh_processes_repositories_concurrently_and_reports_change_counts(
@@ -479,6 +484,12 @@ def test_selected_refs_lists_each_ref_kind_once() -> None:
         ("heads", "release/1"),
     ]
     assert git.list_ref_calls == [("site", "heads")]
+
+
+def test_repo_candidate_does_not_guess_main_when_default_branch_is_missing() -> None:
+    candidate = _repo_candidate({"full_name": "acme/site"}, fallback=None)
+
+    assert candidate.default_branch == "HEAD"
 
 
 def test_git_refresh_reuses_unchanged_ref_metadata_without_rereading_files(tmp_path: Path) -> None:

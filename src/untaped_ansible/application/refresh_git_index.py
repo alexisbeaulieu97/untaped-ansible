@@ -32,6 +32,7 @@ from untaped_ansible.domain.payloads import (
     RefScan,
     RefScanMetadata,
     RefScanTouch,
+    SourceRepoMetadata,
 )
 from untaped_ansible.settings import SourceDefinition, normalize_team_refs
 
@@ -92,6 +93,7 @@ class _RepoRefreshResult:
     selected: frozenset[tuple[str, str, str]]
     scans: tuple[RefScan, ...]
     touches: tuple[RefScanTouch, ...]
+    repo_metadata: SourceRepoMetadata
     ignored_collections: frozenset[str]
 
 
@@ -142,6 +144,7 @@ class RefreshGitSourceIndex:
         checked_at = datetime.now(UTC)
         pending_scans: list[RefScan] = []
         pending_touches: list[RefScanTouch] = []
+        pending_repo_metadata: list[SourceRepoMetadata] = []
 
         def refresh_one(repo: _RepoCandidate) -> _RepoRefreshResult:
             return self._refresh_repo(
@@ -165,12 +168,14 @@ class RefreshGitSourceIndex:
             ignored_collections.update(result.ignored_collections)
             pending_scans.extend(result.scans)
             pending_touches.extend(result.touches)
+            pending_repo_metadata.append(result.repo_metadata)
 
         self._index.commit_source_ref_refresh(
             source_key,
             scans=tuple(pending_scans),
             touches=tuple(pending_touches),
             keep=selected,
+            repo_metadata=tuple(pending_repo_metadata),
             scanned_at=checked_at,
         )
         status = self._index.status(source_key)
@@ -267,6 +272,11 @@ class RefreshGitSourceIndex:
             selected=frozenset(selected),
             scans=tuple(pending_scans),
             touches=tuple(pending_touches),
+            repo_metadata=SourceRepoMetadata(
+                source_key=source_key,
+                source_repo=repo.full_name,
+                default_branch=repo.default_branch,
+            ),
             ignored_collections=frozenset(ignored_collections),
         )
 
@@ -326,6 +336,7 @@ class RefreshGitSourceIndex:
                     IndexedDependency(
                         source_repo=repo,
                         source_ref=ref.name,
+                        source_ref_kind=ref.kind,
                         source_sha=ref.sha,
                         dependency_repo=resolved.repo,
                         dependency_name=declaration.name,
@@ -390,7 +401,7 @@ def _repo_candidate(row: dict[str, object], *, fallback: str | None) -> _RepoCan
     full_name = _str(row.get("full_name")) or fallback
     if full_name is None:
         raise ValueError("repository metadata missing full_name")
-    default_branch = _str(row.get("default_branch")) or "main"
+    default_branch = _str(row.get("default_branch")) or "HEAD"
     return _RepoCandidate(
         full_name=full_name,
         default_branch=default_branch,

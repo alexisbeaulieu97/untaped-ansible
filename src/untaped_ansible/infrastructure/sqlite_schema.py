@@ -49,12 +49,21 @@ def ensure_schema(db: sqlite3.Connection) -> None:
             primary key (source_key, source_repo, ref_kind, source_ref)
         );
 
+        create table if not exists source_repo_metadata (
+            source_key text not null,
+            source_repo text not null,
+            default_branch text not null,
+            primary key (source_key, source_repo)
+        );
+
         create index if not exists idx_dependency_edges_source
             on dependency_edges(source_key, source_repo, source_ref);
         create index if not exists idx_dependency_edges_dependency
             on dependency_edges(source_key, dependency_repo, dependency_version);
         create index if not exists idx_source_ref_scans_source
             on source_ref_scans(source_key, source_repo, ref_kind, source_ref);
+        create index if not exists idx_source_repo_metadata_source
+            on source_repo_metadata(source_key, source_repo);
         """
     )
     ensure_column(db, "source_runs", "repos", "integer not null default 0")
