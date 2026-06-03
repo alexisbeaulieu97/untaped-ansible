@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from untaped_ansible.application.graph import BuildGraph, GraphRequest
-from untaped_ansible.application.ports import IndexedDependency
+from untaped_ansible.domain.payloads import IndexedDependency
 
 
 class StubIndex:

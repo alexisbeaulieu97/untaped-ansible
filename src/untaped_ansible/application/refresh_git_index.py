@@ -16,12 +16,7 @@ from pydantic import BaseModel, ConfigDict
 
 from untaped_ansible.application.ports import (
     GitHubDependencyReader,
-    GitRef,
     IncrementalDependencyIndexWriter,
-    IndexedDependency,
-    RefScan,
-    RefScanMetadata,
-    RefScanTouch,
 )
 from untaped_ansible.application.refresh_index import RefreshResult
 from untaped_ansible.application.source_refs import (
@@ -31,6 +26,13 @@ from untaped_ansible.application.source_refs import (
 )
 from untaped_ansible.domain.identity import IdentityResolver
 from untaped_ansible.domain.parser import parse_dependency_file
+from untaped_ansible.domain.payloads import (
+    GitRef,
+    IndexedDependency,
+    RefScan,
+    RefScanMetadata,
+    RefScanTouch,
+)
 from untaped_ansible.settings import SourceDefinition, normalize_team_refs
 
 

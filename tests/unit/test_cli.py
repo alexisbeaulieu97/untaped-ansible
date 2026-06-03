@@ -14,9 +14,9 @@ from typer.testing import CliRunner
 from untaped.settings import get_settings
 
 from untaped_ansible import app
-from untaped_ansible.application.ports import IndexedDependency
 from untaped_ansible.application.refresh_index import RefreshResult
 from untaped_ansible.cli import commands
+from untaped_ansible.domain.payloads import IndexedDependency
 from untaped_ansible.infrastructure import IndexScan, SqliteDependencyIndex
 
 

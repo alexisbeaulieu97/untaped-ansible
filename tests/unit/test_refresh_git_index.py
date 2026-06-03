@@ -8,12 +8,12 @@ from pathlib import Path
 
 import pytest
 
-from untaped_ansible.application.ports import GitRef
 from untaped_ansible.application.refresh_git_index import (
     RefreshGitSourceIndex,
     _RefSelection,
     _selected_refs,
 )
+from untaped_ansible.domain.payloads import GitRef
 from untaped_ansible.infrastructure.git_cache import GitCacheError
 from untaped_ansible.infrastructure.sqlite_index import SqliteDependencyIndex
 from untaped_ansible.settings import SourceDefinition

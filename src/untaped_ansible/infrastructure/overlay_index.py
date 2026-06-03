@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
-from untaped_ansible.application.ports import DependencyIndex, IndexedDependency
+from typing import TYPE_CHECKING
+
+from untaped_ansible.domain.payloads import IndexedDependency
+
+if TYPE_CHECKING:
+    from untaped_ansible.application.ports import DependencyIndex
 
 
-class OverlayDependencyIndex(DependencyIndex):
+class OverlayDependencyIndex:
     """Prefer local dependency edges while delegating reverse-impact reads."""
 
     def __init__(

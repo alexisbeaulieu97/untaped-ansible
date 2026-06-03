@@ -10,7 +10,7 @@ import tempfile
 from pathlib import Path
 from urllib.parse import urlparse
 
-from untaped_ansible.application.ports import GitRef
+from untaped_ansible.domain.payloads import GitRef
 
 DEFAULT_TIMEOUT = 60.0
 DEFAULT_SLOW_TIMEOUT = 600.0

@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from untaped_ansible.application.ports import IndexedDependency, RefScan
+from untaped_ansible.domain.payloads import IndexedDependency, RefScan
 from untaped_ansible.infrastructure.sqlite_index import (
     IndexScan,
     SqliteDependencyIndex,

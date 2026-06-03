@@ -6,94 +6,7 @@ from collections.abc import Iterable
 from datetime import datetime
 from typing import Protocol
 
-from pydantic import BaseModel, ConfigDict
-
-
-class IndexedDependency(BaseModel):
-    """One indexed dependency edge from a scanned source repo/ref."""
-
-    model_config = ConfigDict(frozen=True)
-
-    source_repo: str
-    source_ref: str | None
-    dependency_name: str
-    source_path: str
-    source_sha: str | None = None
-    dependency_repo: str | None = None
-    dependency_version: str | None = None
-    unresolved: str | None = None
-
-
-class GitRef(BaseModel):
-    """Resolved Git ref selected for dependency indexing."""
-
-    model_config = ConfigDict(frozen=True)
-
-    kind: str
-    name: str
-    sha: str
-
-
-class RefScanMetadata(BaseModel):
-    """Freshness metadata for one indexed source repo/ref."""
-
-    model_config = ConfigDict(frozen=True)
-
-    source_key: str
-    source_repo: str
-    ref_kind: str
-    source_ref: str
-    source_sha: str
-    backend: str
-    clone_url: str | None = None
-    clone_protocol: str | None = None
-    dependency_paths_fingerprint: str
-    aliases_fingerprint: str = ""
-    checked_at: datetime
-    indexed_at: datetime
-    last_error: str | None = None
-
-
-class RefScan(RefScanMetadata):
-    """Replacement payload for one source repo/ref scan."""
-
-    dependencies: tuple[IndexedDependency, ...] = ()
-
-
-class RefScanTouch(BaseModel):
-    """Freshness touch for one unchanged source repo/ref scan."""
-
-    model_config = ConfigDict(frozen=True)
-
-    source_key: str
-    source_repo: str
-    ref_kind: str
-    source_ref: str
-    checked_at: datetime
-
-
-class SourceIndexStatus(BaseModel):
-    """Summary of one indexed source."""
-
-    model_config = ConfigDict(frozen=True)
-
-    source_key: str
-    scanned_at: datetime
-    repos: int
-    refs: int
-    edges: int
-
-
-class IndexScan(BaseModel):
-    """Complete replacement payload for one source scan."""
-
-    model_config = ConfigDict(frozen=True)
-
-    source_key: str
-    scanned_at: datetime
-    repos: int | None = None
-    refs: int | None = None
-    dependencies: tuple[IndexedDependency, ...] = ()
+from untaped_ansible.domain import payloads
 
 
 class DependencyIndex(Protocol):
@@ -105,7 +18,7 @@ class DependencyIndex(Protocol):
         ref: str | None,
         *,
         source_key: str | None,
-    ) -> list[IndexedDependency]: ...
+    ) -> list[payloads.IndexedDependency]: ...
 
     def dependents(
         self,
@@ -113,7 +26,7 @@ class DependencyIndex(Protocol):
         ref: str | None,
         *,
         source_key: str | None,
-    ) -> list[IndexedDependency]: ...
+    ) -> list[payloads.IndexedDependency]: ...
 
     def cached_refs(self, repo: str, *, source_key: str | None) -> set[str]: ...
 
@@ -123,13 +36,13 @@ class DependencyIndex(Protocol):
 class DependencyIndexWriter(Protocol):
     """Write port for replacing a source scan."""
 
-    def replace_source_scan(self, scan: IndexScan) -> None: ...
+    def replace_source_scan(self, scan: payloads.IndexScan) -> None: ...
 
 
 class IncrementalDependencyIndexWriter(DependencyIndexWriter, Protocol):
     """Write port for replacing and pruning individual source repo/ref scans."""
 
-    def status(self, source_key: str) -> SourceIndexStatus | None: ...
+    def status(self, source_key: str) -> payloads.SourceIndexStatus | None: ...
 
     def ref_scan(
         self,
@@ -137,16 +50,16 @@ class IncrementalDependencyIndexWriter(DependencyIndexWriter, Protocol):
         source_repo: str,
         ref_kind: str,
         source_ref: str,
-    ) -> RefScanMetadata | None: ...
+    ) -> payloads.RefScanMetadata | None: ...
 
     def ref_scans(
         self,
         source_key: str,
         source_repo: str,
         refs: Iterable[tuple[str, str]],
-    ) -> dict[tuple[str, str], RefScanMetadata]: ...
+    ) -> dict[tuple[str, str], payloads.RefScanMetadata]: ...
 
-    def replace_ref_scan(self, scan: RefScan) -> None: ...
+    def replace_ref_scan(self, scan: payloads.RefScan) -> None: ...
 
     def touch_ref_scan(
         self,
@@ -168,8 +81,8 @@ class IncrementalDependencyIndexWriter(DependencyIndexWriter, Protocol):
         self,
         source_key: str,
         *,
-        scans: tuple[RefScan, ...],
-        touches: tuple[RefScanTouch, ...],
+        scans: tuple[payloads.RefScan, ...],
+        touches: tuple[payloads.RefScanTouch, ...],
         keep: set[tuple[str, str, str]],
         scanned_at: datetime,
     ) -> None: ...
