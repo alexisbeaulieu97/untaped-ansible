@@ -202,6 +202,7 @@ def graph_command(
             source_state=graph_source,
             index=sqlite_index,
             direction=direction,
+            cached=cached,
         )
 
         target_path = Path(target).expanduser()
@@ -416,10 +417,11 @@ def _effective_direction(
     source_state: _GraphSource,
     index: SqliteDependencyIndex,
     direction: GraphDirection,
+    cached: bool,
 ) -> tuple[GraphDirection, list[str]]:
-    if direction == "deps":
-        return direction, []
     if not source_state.selections:
+        if direction == "deps":
+            return direction, []
         message = (
             "upstream requires --source NAME or inline selectors like --org, --team, or --repo"
         )
@@ -432,6 +434,10 @@ def _effective_direction(
     missing = tuple(
         selection for selection in source_state.selections if index.status(selection.key) is None
     )
+    if cached and source_state.saved and missing:
+        raise UntapedError(_missing_source_index_message(target, source_state, missing))
+    if direction == "deps":
+        return direction, []
     if not missing:
         return direction, []
     message = _missing_source_index_message(target, source_state, missing)

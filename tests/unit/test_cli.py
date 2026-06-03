@@ -754,6 +754,107 @@ def test_graph_repeated_sources_cached_reports_missing_named_source(
     assert "no cached source data found for source 'platform'" in result.output
 
 
+def test_graph_repeated_sources_downstream_cached_reports_missing_named_source(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    index_path = tmp_path / "index.sqlite3"
+    SqliteDependencyIndex(index_path).replace_source_scan(
+        IndexScan(
+            source_key="source:ops",
+            scanned_at=datetime.now(UTC),
+            dependencies=(
+                IndexedDependency(
+                    source_repo="acme/deploy",
+                    source_ref="main",
+                    dependency_repo="acme/base",
+                    dependency_name="base",
+                    dependency_version=None,
+                    source_path="roles/requirements.yml",
+                ),
+            ),
+        )
+    )
+    cfg = _write_config(
+        tmp_path,
+        index_path=index_path,
+        top_level_ansible={
+            "sources": [
+                {"name": "platform", "repos": ["acme/site"]},
+                {"name": "ops", "repos": ["acme/deploy"]},
+            ]
+        },
+    )
+    monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "graph",
+            "acme/deploy",
+            "--source",
+            "platform",
+            "--source",
+            "ops",
+            "--downstream",
+            "--cached",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "no cached source data found for source 'platform'" in result.output
+
+
+def test_graph_repeated_sources_both_cached_reports_missing_named_source(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    index_path = tmp_path / "index.sqlite3"
+    SqliteDependencyIndex(index_path).replace_source_scan(
+        IndexScan(
+            source_key="source:ops",
+            scanned_at=datetime.now(UTC),
+            dependencies=(
+                IndexedDependency(
+                    source_repo="acme/deploy",
+                    source_ref="main",
+                    dependency_repo="acme/base",
+                    dependency_name="base",
+                    dependency_version=None,
+                    source_path="roles/requirements.yml",
+                ),
+            ),
+        )
+    )
+    cfg = _write_config(
+        tmp_path,
+        index_path=index_path,
+        top_level_ansible={
+            "sources": [
+                {"name": "platform", "repos": ["acme/site"]},
+                {"name": "ops", "repos": ["acme/deploy"]},
+            ]
+        },
+    )
+    monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "graph",
+            "acme/base",
+            "--source",
+            "platform",
+            "--source",
+            "ops",
+            "--cached",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "no cached source data found for source 'platform'" in result.output
+
+
 def test_source_save_clears_cached_data_for_redefined_source(
     tmp_path: Path,
     monkeypatch,
