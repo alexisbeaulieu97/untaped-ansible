@@ -652,7 +652,7 @@ wheels = [
 [[package]]
 name = "untaped"
 version = "0.1.0"
-source = { git = "https://github.com/alexisbeaulieu97/untaped#94a9ada21a4e4c9b62aca21e21914710fd19d895" }
+source = { git = "https://github.com/alexisbeaulieu97/untaped#eae416be2e5db9bc871e006fb7cb3a157536bd75" }
 dependencies = [
     { name = "filelock" },
     { name = "httpx" },

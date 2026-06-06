@@ -25,6 +25,11 @@ Configure GitHub auth through `untaped-github`:
 untaped config set github.token ghp_xxx
 ```
 
+This plugin also contributes the `untaped-ansible` agent skill. After the
+plugin is installed, use the core
+[`untaped` agent skill docs](https://github.com/alexisbeaulieu97/untaped/blob/main/docs/skills.md)
+to install it for Codex or Claude.
+
 ## Commands
 
 ```text
