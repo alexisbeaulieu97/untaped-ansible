@@ -13,7 +13,6 @@ from untaped import (
     FormatOption,
     ProfileOverrideOption,
     UntapedError,
-    format_output,
     get_config_section,
     get_core_settings,
     profile_override,
@@ -23,6 +22,7 @@ from untaped_github import GithubClient, GithubSettings
 
 from untaped_ansible.application.refresh_git_index import RefreshGitSourceIndex
 from untaped_ansible.application.refresh_index import RefreshResult
+from untaped_ansible.cli._rendering import render_rows
 from untaped_ansible.infrastructure import (
     AliasRepository,
     GitRepositoryCache,
@@ -197,7 +197,7 @@ def source_list_command(fmt: FormatOption = "table", columns: ColumnsOption = No
     """List saved sources."""
     with report_errors():
         rows = [_source_row(source) for source in SourceRepository().entries()]
-        typer.echo(format_output(rows, fmt=fmt, columns=columns))
+        typer.echo(render_rows(rows, fmt=fmt, columns=columns))
 
 
 @app.command("show", no_args_is_help=True)
@@ -211,7 +211,7 @@ def source_show_command(
         source = SourceRepository().get(name)
         if source is None:
             raise UntapedError(f"unknown source: {name!r}")
-        typer.echo(format_output([_source_row(source)], fmt=fmt, columns=columns))
+        typer.echo(render_rows([_source_row(source)], fmt=fmt, columns=columns))
 
 
 @app.command("remove", no_args_is_help=True)
@@ -251,7 +251,7 @@ def source_status_command(
             )
             for source_name in names
         ]
-        typer.echo(format_output(rows, fmt=fmt, columns=columns))
+        typer.echo(render_rows(rows, fmt=fmt, columns=columns))
 
 
 @app.command("refresh", no_args_is_help=True)
