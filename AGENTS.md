@@ -20,7 +20,8 @@ resolution, output helpers, HTTP/TLS primitives, and shared errors.
    `uv add --group dev` when resolution permits; hand-edit tool config only.
 3. **Expose the plugin through the `untaped.plugins` entry point.**
    `ansible = "untaped_ansible.plugin:plugin"` is the public integration
-   point.
+   point. The plugin object must expose `id = "ansible"`, literal
+   `untaped_api_version = 1`, and `register(registry)`.
 4. **Use the 4-layer DDD layout.** `cli -> application -> domain`, with
    `infrastructure -> domain`; `application` and `infrastructure` must not
    import each other at runtime.
@@ -51,6 +52,11 @@ src/untaped_ansible/
 ├── domain/               # pure models, parser, graph, renderers
 └── infrastructure/       # SQLite cache, local filesystem/git adapters
 ```
+
+The plugin object registers profile settings, top-level state, the
+`ansible` Typer command, and the packaged `untaped-ansible` agent skill.
+Keep that static skill asset current with major graph/source workflow
+changes.
 
 `cli/commands.py` is the Ansible Typer composition root only. Keep graph
 execution in `cli/graph_commands.py`, source management and refresh wiring in
