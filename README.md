@@ -12,9 +12,9 @@ plugin requires `untaped-github>=0.2.0`, which provides the public
 GitHub client API used by source refreshes.
 
 ```bash
-uv tool install "git+https://github.com/alexisbeaulieu97/untaped.git" \
-  --with "untaped-github @ git+https://github.com/alexisbeaulieu97/untaped-github.git" \
-  --with "untaped-ansible @ git+https://github.com/alexisbeaulieu97/untaped-ansible.git" \
+uv tool install "git+https://github.com/alexisbeaulieu97/untaped.git@v0.1.0" \
+  --with "untaped-github @ git+https://github.com/alexisbeaulieu97/untaped-github.git@v0.2.0" \
+  --with "untaped-ansible @ git+https://github.com/alexisbeaulieu97/untaped-ansible.git@v0.1.0" \
   --no-sources \
   --force
 ```
