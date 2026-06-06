@@ -62,6 +62,24 @@ changes.
 execution in `cli/graph_commands.py`, source management and refresh wiring in
 `cli/source_commands.py`, and alias management in `cli/alias_commands.py`.
 
+## CLI Output Contracts
+
+Alias and source commands that emit row-style collections render through
+`cli/_rendering.py`. For `--format table`, row collections honor the global
+`ui:` settings and registered theme plugins. For `--format json`, `yaml`, and
+`raw`, row collections bypass configured themes with a plain `UiContext()` so
+missing or invalid global themes cannot break structured or pipe-oriented
+output.
+
+The first key in each raw row remains load-bearing: `alias list --format raw`
+must emit aliases first, and source row commands must emit source names first
+unless the user explicitly passes `--columns`. Keep those contracts stable for
+shell pipelines.
+
+`graph` output is not a UI collection. Tree, Mermaid, and JSON graph output
+are domain renderers over the graph model and must not be routed through the
+row-style renderer.
+
 ## Domain Contracts
 
 - V1 graph nodes are Ansible playbook/project roots and roles only. Collections

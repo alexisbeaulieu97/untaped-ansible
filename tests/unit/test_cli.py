@@ -26,6 +26,7 @@ def _write_config(
     index_path: Path | None = None,
     extra_profile: dict[str, object] | None = None,
     top_level_ansible: dict[str, object] | None = None,
+    top_level_ui: dict[str, object] | None = None,
 ) -> Path:
     cfg = tmp_path / "config.yml"
     profile = {
@@ -39,6 +40,8 @@ def _write_config(
     data: dict[str, object] = {"profiles": {"default": profile}}
     if top_level_ansible is not None:
         data["ansible"] = top_level_ansible
+    if top_level_ui is not None:
+        data["ui"] = top_level_ui
     cfg.write_text(yaml.safe_dump(data, sort_keys=False))
     return cfg
 
@@ -165,6 +168,46 @@ def test_alias_add_list_remove_updates_config(
     assert yaml.safe_load(cfg.read_text()).get("ansible", {}).get("aliases") is None
 
 
+def test_alias_list_table_honours_global_collection_view_list(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    cfg = _write_config(
+        tmp_path,
+        top_level_ansible={"aliases": {"common": "acme/common"}},
+        top_level_ui={"collection_view": "list"},
+    )
+    monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
+    get_settings.cache_clear()
+
+    result = CliRunner().invoke(app, ["alias", "list", "--format", "table"])
+
+    assert result.exit_code == 0, result.output
+    assert "alias: common" in result.stdout
+    assert "repo: acme/common" in result.stdout
+    assert "╭" not in result.stdout
+    assert "┌" not in result.stdout
+
+
+def test_alias_list_raw_ignores_invalid_global_theme(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    cfg = _write_config(
+        tmp_path,
+        top_level_ansible={"aliases": {"common": "acme/common"}},
+        top_level_ui={"theme": "missing"},
+    )
+    monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
+    get_settings.cache_clear()
+
+    result = CliRunner().invoke(app, ["alias", "list", "--format", "raw"])
+
+    assert result.exit_code == 0, result.output
+    assert "\x1b[" not in result.output
+    assert result.stdout.splitlines() == ["common"]
+
+
 def test_source_save_show_remove_updates_config(tmp_path: Path, monkeypatch) -> None:
     cfg = _write_config(tmp_path)
     monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
@@ -209,6 +252,46 @@ def test_source_save_show_remove_updates_config(tmp_path: Path, monkeypatch) -> 
     result = runner.invoke(app, ["source", "remove", "prod"])
     assert result.exit_code == 0, result.output
     assert yaml.safe_load(cfg.read_text()).get("ansible", {}).get("sources") is None
+
+
+def test_source_list_table_honours_global_collection_view_list(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    cfg = _write_config(
+        tmp_path,
+        top_level_ansible={"sources": [{"name": "prod", "repos": ["acme/site"]}]},
+        top_level_ui={"collection_view": "list"},
+    )
+    monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
+    get_settings.cache_clear()
+
+    result = CliRunner().invoke(app, ["source", "list", "--format", "table"])
+
+    assert result.exit_code == 0, result.output
+    assert "name: prod" in result.stdout
+    assert "repos: acme/site" in result.stdout
+    assert "╭" not in result.stdout
+    assert "┌" not in result.stdout
+
+
+def test_source_list_raw_ignores_invalid_global_theme(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    cfg = _write_config(
+        tmp_path,
+        top_level_ansible={"sources": [{"name": "prod", "repos": ["acme/site"]}]},
+        top_level_ui={"theme": "missing"},
+    )
+    monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
+    get_settings.cache_clear()
+
+    result = CliRunner().invoke(app, ["source", "list", "--format", "raw"])
+
+    assert result.exit_code == 0, result.output
+    assert "\x1b[" not in result.output
+    assert result.stdout.splitlines() == ["prod"]
 
 
 def test_source_edit_add_remove_and_clear_updates_config(
@@ -470,6 +553,55 @@ def test_graph_downstream_reads_remote_dependencies_without_source(
     assert "|   +-- acme/site@main" in result.stdout
     assert "|       +-- acme/base" in result.stdout
     assert "upstream omitted" not in result.stdout
+
+
+def test_graph_tree_ignores_global_collection_view_list(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    index_path = tmp_path / "index.sqlite3"
+    _seed_index(
+        SqliteDependencyIndex(index_path),
+        "source:platform",
+        (
+            IndexedDependency(
+                source_repo="acme/site",
+                source_ref="main",
+                dependency_repo="acme/base",
+                dependency_name="base",
+                dependency_version=None,
+                source_path="roles/requirements.yml",
+            ),
+        ),
+    )
+    cfg = _write_config(
+        tmp_path,
+        index_path=index_path,
+        top_level_ansible={"sources": [{"name": "platform", "repos": ["acme/site"]}]},
+        top_level_ui={"collection_view": "list"},
+    )
+    monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
+    get_settings.cache_clear()
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "graph",
+            "acme/site",
+            "--source",
+            "platform",
+            "--downstream",
+            "--cached",
+            "--format",
+            "tree",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "+-- downstream" in result.stdout
+    assert "|   +-- acme/site@main" in result.stdout
+    assert "|       +-- acme/base" in result.stdout
+    assert "source_repo:" not in result.stdout
 
 
 def test_graph_inline_upstream_refreshes_and_renders_impact(

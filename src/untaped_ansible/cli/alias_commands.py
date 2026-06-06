@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import typer
-from untaped import ColumnsOption, FormatOption, UntapedError, format_output, report_errors
+from untaped import ColumnsOption, FormatOption, UntapedError, report_errors
 
+from untaped_ansible.cli._rendering import render_rows
 from untaped_ansible.infrastructure import AliasRepository
 
 app = typer.Typer(name="alias", help="Manage dependency aliases.", no_args_is_help=True)
@@ -26,7 +27,7 @@ def alias_list_command(fmt: FormatOption = "table", columns: ColumnsOption = Non
             {"alias": alias, "repo": repo}
             for alias, repo in sorted(AliasRepository().entries().items())
         ]
-        typer.echo(format_output(rows, fmt=fmt, columns=columns))
+        typer.echo(render_rows(rows, fmt=fmt, columns=columns))
 
 
 @app.command("remove", no_args_is_help=True)
