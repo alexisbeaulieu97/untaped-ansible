@@ -11,7 +11,7 @@ dependencies = [
     "pydantic>=2.13.3",
     "pyyaml>=6.0.3",
     "typer>=0.25.1",
-    "untaped",
+    "untaped>=0.1.0",
     "untaped-github>=0.2.0",
 ]
 
