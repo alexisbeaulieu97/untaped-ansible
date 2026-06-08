@@ -3,17 +3,13 @@ from untaped_ansible.infrastructure.git_cache import GitCacheError, GitRepositor
 from untaped_ansible.infrastructure.github_index import GithubDependencyIndex
 from untaped_ansible.infrastructure.multi_source_index import MultiSourceDependencyIndex
 from untaped_ansible.infrastructure.overlay_index import OverlayDependencyIndex
-from untaped_ansible.infrastructure.sqlite_index import (
-    IndexStatus,
-    SqliteDependencyIndex,
-)
+from untaped_ansible.infrastructure.sqlite_index import SqliteDependencyIndex
 
 __all__ = [
     "AliasRepository",
     "GitCacheError",
     "GitRepositoryCache",
     "GithubDependencyIndex",
-    "IndexStatus",
     "MultiSourceDependencyIndex",
     "OverlayDependencyIndex",
     "SourceRepository",

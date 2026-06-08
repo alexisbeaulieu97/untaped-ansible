@@ -294,6 +294,7 @@ def test_json_renderer_emits_structured_graph() -> None:
 
     assert data["target_id"] == "target"
     assert data["nodes"][0]["repo"] == "acme/base"
+    assert "kind" not in data["nodes"][0]
     assert "ref_kind" not in data["nodes"][0]
     assert "default_branch" not in data["nodes"][0]
     assert data["edges"][0]["relation"] == "requires"

@@ -27,10 +27,6 @@ from untaped_ansible.infrastructure.sqlite_rows import (
 from untaped_ansible.infrastructure.sqlite_schema import ensure_schema
 
 
-class IndexStatus(SourceIndexStatus):
-    """Summary of one indexed source."""
-
-
 class SqliteDependencyIndex:
     """SQLite adapter satisfying the graph read port."""
 
@@ -62,9 +58,9 @@ class SqliteDependencyIndex:
                         values {placeholders}
                     )
                     select scans.source_key, scans.source_repo, scans.ref_kind, scans.source_ref,
-                           scans.source_sha, scans.backend, scans.clone_url, scans.clone_protocol,
+                           scans.source_sha, scans.clone_url, scans.clone_protocol,
                            scans.dependency_paths_fingerprint, scans.aliases_fingerprint,
-                           scans.checked_at, scans.indexed_at, scans.last_error
+                           scans.checked_at, scans.indexed_at
                     from source_ref_scans as scans
                     join requested
                       on requested.ref_kind = scans.ref_kind
@@ -177,7 +173,7 @@ class SqliteDependencyIndex:
             )
         return tuple(refs.values())
 
-    def status(self, source_key: str) -> IndexStatus | None:
+    def status(self, source_key: str) -> SourceIndexStatus | None:
         with self._db() as db:
             row = db.execute(
                 "select scanned_at, repos, refs, edges from source_runs where source_key = ?",
@@ -185,7 +181,7 @@ class SqliteDependencyIndex:
             ).fetchone()
             if row is None:
                 return None
-        return IndexStatus(
+        return SourceIndexStatus(
             source_key=source_key,
             scanned_at=load_dt(row["scanned_at"]),
             repos=int(row["repos"]),
@@ -274,10 +270,10 @@ def _replace_ref_scan(db: sqlite3.Connection, scan: RefScan) -> None:
     db.execute(
         """
         insert into source_ref_scans(
-            source_key, source_repo, ref_kind, source_ref, source_sha, backend,
+            source_key, source_repo, ref_kind, source_ref, source_sha,
             clone_url, clone_protocol, dependency_paths_fingerprint,
-            aliases_fingerprint, checked_at, indexed_at, last_error, snapshot_id
-        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            aliases_fingerprint, checked_at, indexed_at, snapshot_id
+        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             scan.source_key,
@@ -285,14 +281,12 @@ def _replace_ref_scan(db: sqlite3.Connection, scan: RefScan) -> None:
             scan.ref_kind,
             scan.source_ref,
             scan.source_sha,
-            scan.backend,
             scan.clone_url,
             scan.clone_protocol,
             scan.dependency_paths_fingerprint,
             scan.aliases_fingerprint,
             dump_dt(scan.checked_at),
             dump_dt(scan.indexed_at),
-            scan.last_error,
             snapshot_id,
         ),
     )
@@ -418,13 +412,6 @@ def _prune_source_refs(
     source_key: str,
     keep: set[tuple[str, str, str]],
 ) -> None:
-    db.execute(
-        """
-        delete from source_ref_scans
-        where source_key = ? and ref_kind = ''
-        """,
-        (source_key,),
-    )
     rows = db.execute(
         """
         select source_repo, ref_kind, source_ref
