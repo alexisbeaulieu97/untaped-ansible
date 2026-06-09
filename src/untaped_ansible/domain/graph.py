@@ -20,7 +20,6 @@ class GraphNode(BaseModel):
     ref: str | None = None
     ref_kind: str | None = Field(default=None, exclude=True)
     default_branch: str | None = Field(default=None, exclude=True)
-    kind: str = "role"
     unresolved: str | None = None
 
 

@@ -27,4 +27,4 @@ Use this skill when the user wants an agent to operate `untaped ansible` for Ans
 - Prefer JSON for machine reasoning, tree output for human impact reports, and Mermaid only when the user wants a diagram.
 - Do not collapse refs. A dependency at `repo@v1` is distinct from `repo@main`.
 - Upstream impact requires refreshed source data; if unavailable, prompt the user to refresh or configure sources.
-- Cache schema compatibility is not preserved yet. If schema-breaking errors occur, users may need to delete `ansible.index_path` and refresh sources.
+- Cache schema compatibility is not preserved yet. The legacy source-cache cleanup is cache-schema-breaking; users must delete `ansible.index_path` and refresh saved sources after schema-breaking errors.

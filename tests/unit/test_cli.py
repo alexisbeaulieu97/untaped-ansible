@@ -128,7 +128,6 @@ def _seed_index(
                 (edge.source_sha for edge in edges if edge.source_sha is not None),
                 f"sha-{source_ref}",
             ),
-            backend="git",
             clone_url=f"https://github.com/{source_repo}.git",
             clone_protocol="https",
             dependency_paths_fingerprint="paths-a",
@@ -1130,7 +1129,6 @@ def test_graph_cached_missing_ref_lists_available_refs_in_display_order(
             ref_kind=ref_kind,
             source_ref=source_ref,
             source_sha=f"sha-{source_ref}",
-            backend="git",
             clone_url="https://github.com/acme/site.git",
             clone_protocol="https",
             dependency_paths_fingerprint="paths-a",
@@ -1667,6 +1665,7 @@ def test_graph_help_teaches_clean_source_first_workflow() -> None:
     assert "--source" in output
     assert "--refresh" in output
     assert "--cached" in output
+    assert "--kind" not in output
     assert "--cache-backend" not in output
     assert "--concurrency" in output
     assert "--live" in output

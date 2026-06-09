@@ -128,11 +128,14 @@ untaped ansible source refresh platform
 untaped ansible graph acme/base --source platform --upstream
 ```
 
-Use `--cache-backend api` or `ansible.cache_backend: api` to keep the legacy
-REST tree/content refresh path. Use `ansible.git_clone_protocol: ssh` when
-normal SSH keys are preferred over HTTPS token auth. HTTPS mode passes the
-configured GitHub token to Git as a transient auth header and does not store it
-in cached remotes.
+Use `ansible.git_clone_protocol: ssh` when normal SSH keys are preferred over
+HTTPS token auth. HTTPS mode passes the configured GitHub token to Git as a
+transient auth header and does not store it in cached remotes.
+
+The current source-cache cleanup is cache-schema-breaking. If an existing
+SQLite source index was created by an older plugin version, delete the file
+configured by `ansible.index_path`, then refresh saved sources again with
+`untaped ansible source refresh NAME`.
 
 `source status NAME` reports whether a configured source has never been
 refreshed, is stale, or is fresh. Unknown source names return an error so

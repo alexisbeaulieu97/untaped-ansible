@@ -47,7 +47,6 @@ def _scan(
     ref_kind: str = "heads",
     source_ref: str = "main",
     source_sha: str = "sha-main",
-    backend: str = "git",
     clone_url: str | None = "https://github.com/acme/site.git",
     clone_protocol: str | None = "https",
     dependency_paths_fingerprint: str = "paths-a",
@@ -73,7 +72,6 @@ def _scan(
         ref_kind=ref_kind,
         source_ref=source_ref,
         source_sha=source_sha,
-        backend=backend,
         clone_url=clone_url,
         clone_protocol=clone_protocol,
         dependency_paths_fingerprint=dependency_paths_fingerprint,
@@ -253,7 +251,6 @@ def test_source_ref_refresh_replaces_one_ref_and_keeps_existing_refs(tmp_path) -
     metadata = index.ref_scans("source:prod", "acme/site", [("heads", "main")])
 
     assert metadata[("heads", "main")].source_sha == "sha-main-2"
-    assert metadata[("heads", "main")].backend == "git"
     assert metadata[("heads", "main")].checked_at == checked_at
     assert metadata[("heads", "main")].aliases_fingerprint == ""
     assert (
@@ -445,9 +442,14 @@ def test_schema_creates_graph_read_indexes(tmp_path) -> None:
             name: tuple(row[2] for row in db.execute(f"pragma index_info({name})").fetchall())
             for name in indexes
         }
+        source_ref_scan_columns = {
+            row[1] for row in db.execute("pragma table_info(source_ref_scans)").fetchall()
+        }
     finally:
         db.close()
 
+    assert "backend" not in source_ref_scan_columns
+    assert "last_error" not in source_ref_scan_columns
     assert indexes["idx_snapshot_edges_dependency_ref"] == "snapshot_edges"
     assert indexed_columns["idx_snapshot_edges_dependency_ref"] == (
         "dependency_repo",

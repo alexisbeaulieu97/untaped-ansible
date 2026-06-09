@@ -212,7 +212,6 @@ class SlowRefScanIndex:
 class CountingRefScanIndex:
     def __init__(self, wrapped: SqliteDependencyIndex) -> None:
         self._wrapped = wrapped
-        self.ref_scan_calls = 0
         self.ref_scans_calls: list[tuple[str, str, tuple[tuple[str, str], ...]]] = []
 
     def status(self, source_key: str):
@@ -394,7 +393,6 @@ def test_git_refresh_reads_ref_metadata_in_one_batch_per_repo(tmp_path: Path) ->
         source_key="source:prod",
     )
 
-    assert index.ref_scan_calls == 0
     assert index.ref_scans_calls == [
         (
             "source:prod",

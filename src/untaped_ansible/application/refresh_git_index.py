@@ -234,7 +234,6 @@ class RefreshGitSourceIndex:
             if (
                 metadata is not None
                 and metadata.source_sha == ref.sha
-                and metadata.backend == "git"
                 and metadata.dependency_paths_fingerprint == paths_fingerprint
                 and metadata.aliases_fingerprint == aliases_fingerprint
                 and metadata.clone_protocol == self._clone_protocol
@@ -301,7 +300,6 @@ class RefreshGitSourceIndex:
                     ref_kind=ref.kind,
                     source_ref=ref.name,
                     source_sha=ref.sha,
-                    backend="git",
                     clone_url=clone_url,
                     clone_protocol=self._clone_protocol,
                     dependency_paths_fingerprint=paths_fingerprint,

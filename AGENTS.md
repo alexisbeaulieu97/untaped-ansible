@@ -116,9 +116,10 @@ repo/ref identity table for graph reads and display metadata.
 Keep SQLite adapter methods in `infrastructure/sqlite_index.py` focused on
 transaction boundaries and query flow. Schema creation helpers live in
 `infrastructure/sqlite_schema.py`, and row/datetime mapping lives in
-`infrastructure/sqlite_rows.py`. Cache schema compatibility is intentionally
-not preserved yet; schema-breaking changes should document that users must
-delete `ansible.index_path` and refresh saved sources.
+`infrastructure/sqlite_rows.py`. The legacy source-cache cleanup is
+cache-schema-breaking. Cache schema compatibility is intentionally not
+preserved yet; users must delete the file configured by `ansible.index_path`
+and refresh saved sources after schema-breaking changes.
 
 Source-index payload DTOs such as `IndexedDependency`, `GitRef`, `RefScan`,
 `RefScanTouch`, and `SourceRepoMetadata` live in `domain/payloads.py` because

@@ -43,14 +43,12 @@ def ensure_schema(db: sqlite3.Connection) -> None:
             ref_kind text not null,
             source_ref text not null,
             source_sha text not null,
-            backend text not null,
             clone_url text,
             clone_protocol text,
             dependency_paths_fingerprint text not null,
             aliases_fingerprint text not null default '',
             checked_at text not null,
             indexed_at text not null,
-            last_error text,
             snapshot_id integer not null references dependency_snapshots(id),
             unique(source_key, source_repo, ref_kind, source_ref)
         );

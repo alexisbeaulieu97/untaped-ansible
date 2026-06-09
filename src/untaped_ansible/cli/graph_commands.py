@@ -97,11 +97,6 @@ def graph_command(
         help="Use live GitHub reads for downstream graphing even when source data is configured.",
     ),
     depth: str = typer.Option("3", "--depth", help="Traversal depth or 'unlimited'."),
-    kind: Literal["auto", "playbook", "role"] = typer.Option(
-        "auto",
-        "--kind",
-        help="Target kind hint.",
-    ),
     target_repo: str | None = typer.Option(
         None,
         "--target-repo",
@@ -134,7 +129,6 @@ def graph_command(
     profile: ProfileOverrideOption = None,
 ) -> None:
     """Graph Ansible dependency relationships for a role, repo, or playbook."""
-    del kind
     with report_errors(), profile_override(profile):
         settings = get_config_section("ansible", AnsibleSettings)
         aliases = AliasRepository().entries()

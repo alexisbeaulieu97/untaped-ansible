@@ -31,14 +31,12 @@ def ref_scan_from_row(row: sqlite3.Row) -> RefScanMetadata:
         ref_kind=row["ref_kind"],
         source_ref=row["source_ref"],
         source_sha=row["source_sha"],
-        backend=row["backend"],
         clone_url=row["clone_url"],
         clone_protocol=row["clone_protocol"],
         dependency_paths_fingerprint=row["dependency_paths_fingerprint"],
         aliases_fingerprint=row["aliases_fingerprint"],
         checked_at=load_dt(row["checked_at"]),
         indexed_at=load_dt(row["indexed_at"]),
-        last_error=row["last_error"],
     )
 
 
