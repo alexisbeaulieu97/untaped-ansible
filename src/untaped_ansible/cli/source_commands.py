@@ -6,13 +6,16 @@ import hashlib
 import json
 import time
 from base64 import b64encode
+from typing import Annotated
 
-import typer
+from cyclopts import Parameter, validators
 from untaped import (
     ColumnsOption,
     FormatOption,
     ProfileOverrideOption,
     UntapedError,
+    create_app,
+    echo,
     get_config_section,
     get_core_settings,
     profile_override,
@@ -33,34 +36,61 @@ from untaped_ansible.settings import AnsibleSettings, SourceDefinition, normaliz
 
 _FINGERPRINT_HEX_CHARS = 16
 
-app = typer.Typer(
+ConcurrencyOption = Annotated[
+    int | None,
+    Parameter(
+        name="--concurrency",
+        validator=validators.Number(gte=1, lte=32),
+        help="Git-backed source refresh concurrency; defaults to ansible.git_fetch_concurrency.",
+    ),
+]
+
+app = create_app(
     name="source",
     help="Manage reusable GitHub sources.",
-    no_args_is_help=True,
 )
 
 
-@app.command("save", no_args_is_help=True)
+@app.command(name="save")
 def source_save_command(
-    name: str,
-    orgs: list[str] | None = typer.Option(None, "--org", help="GitHub org to scan."),
-    teams: list[str] | None = typer.Option(
-        None,
-        "--team",
-        help="GitHub team slug with one --org, or ORG/SLUG.",
-    ),
-    repos: list[str] | None = typer.Option(None, "--repo", help="GitHub repo as owner/name."),
-    paths: list[str] | None = typer.Option(None, "--path", help="Dependency file path."),
-    ref_kinds: list[str] | None = typer.Option(
-        None,
-        "--ref-kind",
-        help="Ref namespace to scan: heads or tags; omit to use ansible.ref_scan_default.",
-    ),
-    ref_patterns: list[str] | None = typer.Option(
-        None,
-        "--ref-pattern",
-        help="fnmatch pattern for branch/tag names; omit to use ansible.ref_scan_default.",
-    ),
+    name: Annotated[str, Parameter(help="Source name.")],
+    *,
+    orgs: Annotated[
+        list[str] | None,
+        Parameter(name="--org", help="GitHub org to scan.", consume_multiple=False),
+    ] = None,
+    teams: Annotated[
+        list[str] | None,
+        Parameter(
+            name="--team",
+            help="GitHub team slug with one --org, or ORG/SLUG.",
+            consume_multiple=False,
+        ),
+    ] = None,
+    repos: Annotated[
+        list[str] | None,
+        Parameter(name="--repo", help="GitHub repo as owner/name.", consume_multiple=False),
+    ] = None,
+    paths: Annotated[
+        list[str] | None,
+        Parameter(name="--path", help="Dependency file path.", consume_multiple=False),
+    ] = None,
+    ref_kinds: Annotated[
+        list[str] | None,
+        Parameter(
+            name="--ref-kind",
+            help="Ref namespace to scan: heads or tags; omit to use ansible.ref_scan_default.",
+            consume_multiple=False,
+        ),
+    ] = None,
+    ref_patterns: Annotated[
+        list[str] | None,
+        Parameter(
+            name="--ref-pattern",
+            help="fnmatch pattern for branch/tag names; omit to use ansible.ref_scan_default.",
+            consume_multiple=False,
+        ),
+    ] = None,
 ) -> None:
     """Save a reusable GitHub source."""
     with report_errors():
@@ -79,82 +109,67 @@ def source_save_command(
         settings = get_config_section("ansible", AnsibleSettings)
         if previous != source:
             SqliteDependencyIndex(settings.index_path).clear(_saved_source_key(name))
-        typer.echo(f"saved source {name!r}", err=True)
+        echo(f"saved source {name!r}", err=True)
 
 
-@app.command("edit", no_args_is_help=True)
+@app.command(name="edit")
 def source_edit_command(
-    name: str,
-    add_orgs: list[str] | None = typer.Option(None, "--add-org", help="Add a GitHub org."),
-    remove_orgs: list[str] | None = typer.Option(
-        None,
-        "--remove-org",
-        help="Remove a GitHub org.",
-    ),
-    clear_orgs: bool = typer.Option(False, "--clear-org", help="Remove all GitHub orgs."),
-    add_teams: list[str] | None = typer.Option(
-        None,
-        "--add-team",
-        help="Add a GitHub team slug with one org, or ORG/SLUG.",
-    ),
-    remove_teams: list[str] | None = typer.Option(
-        None,
-        "--remove-team",
-        help="Remove a GitHub team slug with one org, or ORG/SLUG.",
-    ),
-    clear_teams: bool = typer.Option(False, "--clear-team", help="Remove all GitHub teams."),
-    add_repos: list[str] | None = typer.Option(
-        None,
-        "--add-repo",
-        help="Add a GitHub repo as owner/name.",
-    ),
-    remove_repos: list[str] | None = typer.Option(
-        None,
-        "--remove-repo",
-        help="Remove a GitHub repo as owner/name.",
-    ),
-    clear_repos: bool = typer.Option(False, "--clear-repo", help="Remove all GitHub repos."),
-    add_paths: list[str] | None = typer.Option(
-        None,
-        "--add-path",
-        help="Add a dependency file path.",
-    ),
-    remove_paths: list[str] | None = typer.Option(
-        None,
-        "--remove-path",
-        help="Remove a dependency file path.",
-    ),
-    clear_paths: bool = typer.Option(False, "--clear-path", help="Remove all dependency paths."),
-    add_ref_kinds: list[str] | None = typer.Option(
-        None,
-        "--add-ref-kind",
-        help="Add a ref namespace to scan: heads or tags.",
-    ),
-    remove_ref_kinds: list[str] | None = typer.Option(
-        None,
-        "--remove-ref-kind",
-        help="Remove a ref namespace: heads or tags.",
-    ),
-    clear_ref_kinds: bool = typer.Option(
-        False,
-        "--clear-ref-kind",
-        help="Remove all ref namespace filters.",
-    ),
-    add_ref_patterns: list[str] | None = typer.Option(
-        None,
-        "--add-ref-pattern",
-        help="Add a branch/tag fnmatch pattern.",
-    ),
-    remove_ref_patterns: list[str] | None = typer.Option(
-        None,
-        "--remove-ref-pattern",
-        help="Remove a branch/tag fnmatch pattern.",
-    ),
-    clear_ref_patterns: bool = typer.Option(
-        False,
-        "--clear-ref-pattern",
-        help="Remove all branch/tag patterns.",
-    ),
+    name: Annotated[str, Parameter(help="Source name.")],
+    *,
+    add_orgs: Annotated[
+        list[str] | None,
+        Parameter(name="--add-org", consume_multiple=False),
+    ] = None,
+    remove_orgs: Annotated[
+        list[str] | None,
+        Parameter(name="--remove-org", consume_multiple=False),
+    ] = None,
+    clear_orgs: Annotated[bool, Parameter(name="--clear-org")] = False,
+    add_teams: Annotated[
+        list[str] | None,
+        Parameter(name="--add-team", consume_multiple=False),
+    ] = None,
+    remove_teams: Annotated[
+        list[str] | None,
+        Parameter(name="--remove-team", consume_multiple=False),
+    ] = None,
+    clear_teams: Annotated[bool, Parameter(name="--clear-team")] = False,
+    add_repos: Annotated[
+        list[str] | None,
+        Parameter(name="--add-repo", consume_multiple=False),
+    ] = None,
+    remove_repos: Annotated[
+        list[str] | None,
+        Parameter(name="--remove-repo", consume_multiple=False),
+    ] = None,
+    clear_repos: Annotated[bool, Parameter(name="--clear-repo")] = False,
+    add_paths: Annotated[
+        list[str] | None,
+        Parameter(name="--add-path", consume_multiple=False),
+    ] = None,
+    remove_paths: Annotated[
+        list[str] | None,
+        Parameter(name="--remove-path", consume_multiple=False),
+    ] = None,
+    clear_paths: Annotated[bool, Parameter(name="--clear-path")] = False,
+    add_ref_kinds: Annotated[
+        list[str] | None,
+        Parameter(name="--add-ref-kind", consume_multiple=False),
+    ] = None,
+    remove_ref_kinds: Annotated[
+        list[str] | None,
+        Parameter(name="--remove-ref-kind", consume_multiple=False),
+    ] = None,
+    clear_ref_kinds: Annotated[bool, Parameter(name="--clear-ref-kind")] = False,
+    add_ref_patterns: Annotated[
+        list[str] | None,
+        Parameter(name="--add-ref-pattern", consume_multiple=False),
+    ] = None,
+    remove_ref_patterns: Annotated[
+        list[str] | None,
+        Parameter(name="--remove-ref-pattern", consume_multiple=False),
+    ] = None,
+    clear_ref_patterns: Annotated[bool, Parameter(name="--clear-ref-pattern")] = False,
 ) -> None:
     """Patch a saved GitHub source definition."""
     with report_errors():
@@ -184,25 +199,26 @@ def source_edit_command(
             clear_ref_patterns=clear_ref_patterns,
         )
         if previous == edited:
-            typer.echo(f"source {name!r} unchanged", err=True)
+            echo(f"source {name!r} unchanged", err=True)
             return
         source_repo.upsert(edited)
         settings = get_config_section("ansible", AnsibleSettings)
         SqliteDependencyIndex(settings.index_path).clear(_saved_source_key(name))
-        typer.echo(f"updated source {name!r}: {', '.join(changes)}", err=True)
+        echo(f"updated source {name!r}: {', '.join(changes)}", err=True)
 
 
-@app.command("list")
-def source_list_command(fmt: FormatOption = "table", columns: ColumnsOption = None) -> None:
+@app.command(name="list")
+def source_list_command(*, fmt: FormatOption = "table", columns: ColumnsOption = None) -> None:
     """List saved sources."""
     with report_errors():
         rows = [_source_row(source) for source in SourceRepository().entries()]
-        typer.echo(render_rows(rows, fmt=fmt, columns=columns))
+        echo(render_rows(rows, fmt=fmt, columns=columns))
 
 
-@app.command("show", no_args_is_help=True)
+@app.command(name="show")
 def source_show_command(
-    name: str,
+    name: Annotated[str, Parameter(help="Source name.")],
+    *,
     fmt: FormatOption = "table",
     columns: ColumnsOption = None,
 ) -> None:
@@ -211,11 +227,11 @@ def source_show_command(
         source = SourceRepository().get(name)
         if source is None:
             raise UntapedError(f"unknown source: {name!r}")
-        typer.echo(render_rows([_source_row(source)], fmt=fmt, columns=columns))
+        echo(render_rows([_source_row(source)], fmt=fmt, columns=columns))
 
 
-@app.command("remove", no_args_is_help=True)
-def source_remove_command(name: str) -> None:
+@app.command(name="remove")
+def source_remove_command(name: Annotated[str, Parameter(help="Source name.")]) -> None:
     """Remove a saved source."""
     with report_errors():
         removed = SourceRepository().remove(name)
@@ -223,12 +239,13 @@ def source_remove_command(name: str) -> None:
             raise UntapedError(f"unknown source: {name!r}")
         settings = get_config_section("ansible", AnsibleSettings)
         SqliteDependencyIndex(settings.index_path).clear(_saved_source_key(name))
-        typer.echo(f"removed source {name!r}", err=True)
+        echo(f"removed source {name!r}", err=True)
 
 
-@app.command("status")
+@app.command(name="status")
 def source_status_command(
-    name: str | None = typer.Argument(None, help="Source to inspect."),
+    name: Annotated[str | None, Parameter(help="Source to inspect.")] = None,
+    *,
     fmt: FormatOption = "table",
     columns: ColumnsOption = None,
     profile: ProfileOverrideOption = None,
@@ -251,19 +268,14 @@ def source_status_command(
             )
             for source_name in names
         ]
-        typer.echo(render_rows(rows, fmt=fmt, columns=columns))
+        echo(render_rows(rows, fmt=fmt, columns=columns))
 
 
-@app.command("refresh", no_args_is_help=True)
+@app.command(name="refresh")
 def source_refresh_command(
-    name: str,
-    concurrency: int | None = typer.Option(
-        None,
-        "--concurrency",
-        min=1,
-        max=32,
-        help="Git-backed source refresh concurrency; defaults to ansible.git_fetch_concurrency.",
-    ),
+    name: Annotated[str, Parameter(help="Source name.")],
+    *,
+    concurrency: ConcurrencyOption = None,
     profile: ProfileOverrideOption = None,
 ) -> None:
     """Refresh a saved source from GitHub."""
@@ -283,7 +295,7 @@ def source_refresh_command(
             settings=settings,
             concurrency=git_concurrency,
         )
-        typer.echo(
+        echo(
             _refresh_summary(
                 "refreshed",
                 f"source {name!r}",

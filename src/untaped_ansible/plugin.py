@@ -13,7 +13,7 @@ from untaped_ansible.settings import AnsibleSettings, AnsibleState
 
 class AnsiblePlugin:
     id = "ansible"
-    untaped_api_version = 1
+    untaped_api_version = 2
 
     def register(self, registry: PluginRegistry) -> None:
         registry.add_profile_settings("ansible", AnsibleSettings)

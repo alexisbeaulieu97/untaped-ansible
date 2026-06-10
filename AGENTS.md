@@ -21,7 +21,7 @@ resolution, output helpers, HTTP/TLS primitives, and shared errors.
 3. **Expose the plugin through the `untaped.plugins` entry point.**
    `ansible = "untaped_ansible.plugin:plugin"` is the public integration
    point. The plugin object must expose `id = "ansible"`, literal
-   `untaped_api_version = 1`, and `register(registry)`.
+   `untaped_api_version = 2`, and `register(registry)`.
 4. **Use the 4-layer DDD layout.** `cli -> application -> domain`, with
    `infrastructure -> domain`; `application` and `infrastructure` must not
    import each other at runtime.
@@ -30,10 +30,11 @@ resolution, output helpers, HTTP/TLS primitives, and shared errors.
 6. **Use absolute imports.** `from untaped_ansible...`, never relative imports.
 7. **Every source module has a module docstring.** Re-export `__init__.py`
    files are exempt.
-8. **Every Typer app and every command with required args sets
-   `no_args_is_help=True`.**
+8. **Cyclopts command signatures are explicit.** Use
+   `Annotated[..., Parameter(...)]`, name documented commands/options
+   explicitly, and add manual bare-command help only when required.
 9. **stdout is data only.** Prompts, progress, and status messages go to
-   stderr via `typer.echo(..., err=True)`.
+   stderr via `echo(..., err=True)`.
 10. **GitHub behavior belongs in `untaped-github`.** If this plugin needs a
     missing GitHub operation, add an intentional public API there and test it.
     Do not reach into private internals or duplicate GitHub clients here.
@@ -47,18 +48,18 @@ src/untaped_ansible/
 ├── __init__.py           # re-exports app
 ├── plugin.py             # entry-point plugin object
 ├── settings.py           # plugin-owned config/state model
-├── cli/                  # Typer composition root plus concern-specific commands
+├── cli/                  # Cyclopts composition root plus concern-specific commands
 ├── application/          # use cases and ports
 ├── domain/               # pure models, parser, graph, renderers
 └── infrastructure/       # SQLite cache, local filesystem/git adapters
 ```
 
 The plugin object registers profile settings, top-level state, the
-`ansible` Typer command, and the packaged `untaped-ansible` agent skill.
+`ansible` Cyclopts command, and the packaged `untaped-ansible` agent skill.
 Keep that static skill asset current with major graph/source workflow
 changes.
 
-`cli/commands.py` is the Ansible Typer composition root only. Keep graph
+`cli/commands.py` is the Ansible Cyclopts composition root only. Keep graph
 execution in `cli/graph_commands.py`, source management and refresh wiring in
 `cli/source_commands.py`, and alias management in `cli/alias_commands.py`.
 

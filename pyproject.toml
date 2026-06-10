@@ -8,10 +8,10 @@ authors = [
 ]
 requires-python = ">=3.14"
 dependencies = [
+    "cyclopts>=4.16.0,<5",
     "pydantic>=2.13.3",
     "pyyaml>=6.0.3",
-    "typer>=0.25.1",
-    "untaped>=0.1.0",
+    "untaped>=0.2.0",
     "untaped-github>=0.2.0",
 ]
 
@@ -23,8 +23,8 @@ requires = ["uv_build>=0.11.16,<0.12.0"]
 build-backend = "uv_build"
 
 [tool.uv.sources]
-untaped = { git = "https://github.com/alexisbeaulieu97/untaped" }
-untaped-github = { git = "https://github.com/alexisbeaulieu97/untaped-github" }
+untaped = { git = "https://github.com/alexisbeaulieu97/untaped", branch = "cyclopts-migration" }
+untaped-github = { git = "https://github.com/alexisbeaulieu97/untaped-github", branch = "cyclopts-migration" }
 
 [dependency-groups]
 dev = [
