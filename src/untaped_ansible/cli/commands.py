@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from untaped import create_app
+from untaped.api import create_app
 
 from untaped_ansible.cli.alias_commands import app as alias_app
 from untaped_ansible.cli.graph_commands import register_graph_command
