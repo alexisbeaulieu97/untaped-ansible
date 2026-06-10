@@ -10,8 +10,8 @@ from pathlib import Path
 import httpx
 import respx
 import yaml
-from typer.testing import CliRunner
 from untaped.settings import get_settings
+from untaped.testing import CliInvoker
 
 from untaped_ansible import app
 from untaped_ansible.application.refresh_index import RefreshResult
@@ -153,7 +153,7 @@ def test_alias_add_list_remove_updates_config(
 ) -> None:
     cfg = _write_config(tmp_path)
     monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
-    runner = CliRunner()
+    runner = CliInvoker()
 
     result = runner.invoke(app, ["alias", "add", "common", "acme/common"])
     assert result.exit_code == 0, result.output
@@ -179,7 +179,7 @@ def test_alias_list_table_honours_global_collection_view_list(
     monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
     get_settings.cache_clear()
 
-    result = CliRunner().invoke(app, ["alias", "list", "--format", "table"])
+    result = CliInvoker().invoke(app, ["alias", "list", "--format", "table"])
 
     assert result.exit_code == 0, result.output
     assert "alias: common" in result.stdout
@@ -200,7 +200,7 @@ def test_alias_list_raw_ignores_invalid_global_theme(
     monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
     get_settings.cache_clear()
 
-    result = CliRunner().invoke(app, ["alias", "list", "--format", "raw"])
+    result = CliInvoker().invoke(app, ["alias", "list", "--format", "raw"])
 
     assert result.exit_code == 0, result.output
     assert "\x1b[" not in result.output
@@ -210,7 +210,7 @@ def test_alias_list_raw_ignores_invalid_global_theme(
 def test_source_save_show_remove_updates_config(tmp_path: Path, monkeypatch) -> None:
     cfg = _write_config(tmp_path)
     monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
-    runner = CliRunner()
+    runner = CliInvoker()
 
     result = runner.invoke(
         app,
@@ -265,7 +265,7 @@ def test_source_list_table_honours_global_collection_view_list(
     monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
     get_settings.cache_clear()
 
-    result = CliRunner().invoke(app, ["source", "list", "--format", "table"])
+    result = CliInvoker().invoke(app, ["source", "list", "--format", "table"])
 
     assert result.exit_code == 0, result.output
     assert "name: prod" in result.stdout
@@ -286,7 +286,7 @@ def test_source_list_raw_ignores_invalid_global_theme(
     monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
     get_settings.cache_clear()
 
-    result = CliRunner().invoke(app, ["source", "list", "--format", "raw"])
+    result = CliInvoker().invoke(app, ["source", "list", "--format", "raw"])
 
     assert result.exit_code == 0, result.output
     assert "\x1b[" not in result.output
@@ -315,7 +315,7 @@ def test_source_edit_add_remove_and_clear_updates_config(
     )
     monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
 
-    result = CliRunner().invoke(
+    result = CliInvoker().invoke(
         app,
         [
             "source",
@@ -371,7 +371,7 @@ def test_source_edit_clear_boundary_requires_replacement(
     )
     monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
 
-    result = CliRunner().invoke(app, ["source", "edit", "prod", "--clear-team"])
+    result = CliInvoker().invoke(app, ["source", "edit", "prod", "--clear-team"])
 
     assert result.exit_code == 1
     assert "source requires --org, --team, or --repo" in result.output
@@ -398,7 +398,7 @@ def test_source_edit_bare_team_removal_uses_original_source_org(
     )
     monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
 
-    result = CliRunner().invoke(
+    result = CliInvoker().invoke(
         app,
         [
             "source",
@@ -436,7 +436,7 @@ def test_source_edit_errors_for_unknown_source_missing_mutation_and_missing_valu
         top_level_ansible={"sources": [{"name": "prod", "repos": ["acme/site"]}]},
     )
     monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
-    runner = CliRunner()
+    runner = CliInvoker()
 
     cases = [
         (["source", "edit", "missing", "--add-repo", "acme/api"], "unknown source: 'missing'"),
@@ -479,12 +479,12 @@ def test_source_edit_noop_preserves_cached_data(
     )
     monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
 
-    result = CliRunner().invoke(app, ["source", "edit", "platform", "--add-repo", "acme/site"])
+    result = CliInvoker().invoke(app, ["source", "edit", "platform", "--add-repo", "acme/site"])
     assert result.exit_code == 0, result.output
     assert result.stdout == ""
     assert "source 'platform' unchanged" in result.stderr
 
-    result = CliRunner().invoke(
+    result = CliInvoker().invoke(
         app,
         ["graph", "acme/base", "--source", "platform", "--upstream", "--cached"],
     )
@@ -518,10 +518,10 @@ def test_source_edit_real_change_clears_cached_data(
     )
     monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
 
-    result = CliRunner().invoke(app, ["source", "edit", "platform", "--add-repo", "acme/api"])
+    result = CliInvoker().invoke(app, ["source", "edit", "platform", "--add-repo", "acme/api"])
     assert result.exit_code == 0, result.output
 
-    result = CliRunner().invoke(
+    result = CliInvoker().invoke(
         app,
         ["graph", "acme/base", "--source", "platform", "--upstream", "--cached"],
     )
@@ -542,7 +542,7 @@ def test_graph_downstream_reads_remote_dependencies_without_source(
 
     with respx.mock(base_url="https://api.github.com") as mock:
         _mock_dependency_file(mock, "acme/site")
-        result = CliRunner().invoke(
+        result = CliInvoker().invoke(
             app,
             ["graph", "acme/site", "--downstream", "--depth", "1"],
         )
@@ -582,7 +582,7 @@ def test_graph_tree_ignores_global_collection_view_list(
     monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
     get_settings.cache_clear()
 
-    result = CliRunner().invoke(
+    result = CliInvoker().invoke(
         app,
         [
             "graph",
@@ -639,7 +639,7 @@ def test_graph_inline_upstream_refreshes_and_renders_impact(
 
     monkeypatch.setattr(source_commands, "_refresh_source", fake_refresh)
 
-    result = CliRunner().invoke(
+    result = CliInvoker().invoke(
         app,
         [
             "graph",
@@ -669,7 +669,7 @@ def test_graph_inline_source_reuses_fingerprint_cache_without_refresh(
     index_path = tmp_path / "index.sqlite3"
     cfg = _write_config(tmp_path, index_path=index_path)
     monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
-    runner = CliRunner()
+    runner = CliInvoker()
     refresh_calls = 0
 
     def fake_refresh(
@@ -748,7 +748,7 @@ def test_graph_source_upstream_requires_refresh_when_index_missing(
     )
     monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
 
-    result = CliRunner().invoke(
+    result = CliInvoker().invoke(
         app,
         ["graph", "acme/base", "--source", "platform", "--upstream", "--cached"],
     )
@@ -808,7 +808,7 @@ def test_graph_repeated_sources_union_cached_upstream(
     )
     monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
 
-    result = CliRunner().invoke(
+    result = CliInvoker().invoke(
         app,
         [
             "graph",
@@ -883,7 +883,7 @@ def test_graph_repeated_sources_refresh_each_saved_source(
 
     monkeypatch.setattr(source_commands, "_refresh_source", fake_refresh)
 
-    result = CliRunner().invoke(
+    result = CliInvoker().invoke(
         app,
         ["graph", "acme/base", "--source", "platform", "--source", "ops", "--upstream"],
     )
@@ -925,7 +925,7 @@ def test_graph_repeated_sources_cached_reports_missing_named_source(
     )
     monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
 
-    result = CliRunner().invoke(
+    result = CliInvoker().invoke(
         app,
         [
             "graph",
@@ -974,7 +974,7 @@ def test_graph_repeated_sources_downstream_cached_reports_missing_named_source(
     )
     monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
 
-    result = CliRunner().invoke(
+    result = CliInvoker().invoke(
         app,
         [
             "graph",
@@ -1023,7 +1023,7 @@ def test_graph_repeated_sources_both_cached_reports_missing_named_source(
     )
     monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
 
-    result = CliRunner().invoke(
+    result = CliInvoker().invoke(
         app,
         [
             "graph",
@@ -1065,7 +1065,7 @@ def test_source_save_clears_cached_data_for_redefined_source(
         top_level_ansible={"sources": [{"name": "platform", "repos": ["acme/old-site"]}]},
     )
     monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
-    runner = CliRunner()
+    runner = CliInvoker()
 
     result = runner.invoke(app, ["source", "save", "platform", "--repo", "acme/new-site"])
     assert result.exit_code == 0, result.output
@@ -1103,7 +1103,7 @@ def test_source_save_preserves_cached_data_for_identical_source(
         top_level_ansible={"sources": [{"name": "platform", "repos": ["acme/site"]}]},
     )
     monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
-    runner = CliRunner()
+    runner = CliInvoker()
 
     result = runner.invoke(app, ["source", "save", "platform", "--repo", "acme/site"])
     assert result.exit_code == 0, result.output
@@ -1165,7 +1165,7 @@ def test_graph_cached_missing_ref_lists_available_refs_in_display_order(
     )
     monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
 
-    result = CliRunner().invoke(
+    result = CliInvoker().invoke(
         app,
         [
             "graph",
@@ -1196,7 +1196,7 @@ def test_graph_both_renders_downstream_and_warns_when_upstream_unavailable(
 
     with respx.mock(base_url="https://api.github.com") as mock:
         _mock_dependency_file(mock, "acme/site")
-        result = CliRunner().invoke(app, ["graph", "acme/site", "--both", "--depth", "1"])
+        result = CliInvoker().invoke(app, ["graph", "acme/site", "--both", "--depth", "1"])
 
     assert result.exit_code == 0, result.output
     assert "|   +-- acme/site@main" in result.stdout
@@ -1238,7 +1238,7 @@ def test_graph_downstream_with_source_uses_cached_data_without_live_reads(
     monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
 
     with respx.mock(base_url="https://api.github.com", assert_all_called=False) as mock:
-        result = CliRunner().invoke(
+        result = CliInvoker().invoke(
             app,
             [
                 "graph",
@@ -1291,7 +1291,7 @@ def test_graph_downstream_with_source_live_flag_reads_remote_dependencies(
             "acme/site",
             content="- src: https://github.com/acme/live\n",
         )
-        result = CliRunner().invoke(
+        result = CliInvoker().invoke(
             app,
             [
                 "graph",
@@ -1315,7 +1315,7 @@ def test_graph_direction_flags_are_mutually_exclusive(tmp_path: Path, monkeypatc
     cfg = _write_config(tmp_path)
     monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
 
-    result = CliRunner().invoke(app, ["graph", "acme/site", "--upstream", "--downstream"])
+    result = CliInvoker().invoke(app, ["graph", "acme/site", "--upstream", "--downstream"])
 
     assert result.exit_code == 2
     assert "choose only one of --upstream, --downstream, or --both" in result.output
@@ -1328,7 +1328,7 @@ def test_graph_source_conflicts_with_inline_selectors(tmp_path: Path, monkeypatc
     )
     monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
 
-    result = CliRunner().invoke(
+    result = CliInvoker().invoke(
         app,
         ["graph", "acme/site", "--source", "platform", "--org", "acme"],
     )
@@ -1344,7 +1344,7 @@ def test_source_save_validates_search_boundary_repo_and_ref_kind(
 ) -> None:
     cfg = _write_config(tmp_path)
     monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
-    runner = CliRunner()
+    runner = CliInvoker()
 
     cases = [
         (
@@ -1371,7 +1371,7 @@ def test_config_loaded_source_uses_same_validation(tmp_path: Path, monkeypatch) 
     )
     monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
 
-    result = CliRunner().invoke(app, ["source", "refresh", "bad"])
+    result = CliInvoker().invoke(app, ["source", "refresh", "bad"])
 
     assert result.exit_code == 1
     assert "repo must be owner/name" in result.output
@@ -1381,7 +1381,7 @@ def test_inline_source_cache_key_is_order_insensitive(tmp_path: Path, monkeypatc
     index_path = tmp_path / "index.sqlite3"
     cfg = _write_config(tmp_path, index_path=index_path)
     monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
-    runner = CliRunner()
+    runner = CliInvoker()
     refresh_calls = 0
 
     def fake_refresh(
@@ -1475,7 +1475,7 @@ def test_graph_repo_is_source_selector_and_target_repo_overrides_local_identity(
     cfg = _write_config(tmp_path, index_path=tmp_path / "index.sqlite3")
     monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
 
-    result = CliRunner().invoke(
+    result = CliInvoker().invoke(
         app,
         ["graph", str(target), "--target-repo", "acme/base", "--downstream"],
     )
@@ -1502,7 +1502,7 @@ def test_graph_local_target_infers_repo_from_gitdir_file(
     cfg = _write_config(tmp_path, index_path=tmp_path / "index.sqlite3")
     monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
 
-    result = CliRunner().invoke(app, ["graph", str(target), "--downstream"])
+    result = CliInvoker().invoke(app, ["graph", str(target), "--downstream"])
 
     assert result.exit_code == 0, result.output
     assert result.stdout.startswith("acme/worktree-role\n")
@@ -1527,7 +1527,7 @@ def test_graph_local_target_prefers_origin_remote_for_identity(
     cfg = _write_config(tmp_path, index_path=tmp_path / "index.sqlite3")
     monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
 
-    result = CliRunner().invoke(app, ["graph", str(target), "--downstream"])
+    result = CliInvoker().invoke(app, ["graph", str(target), "--downstream"])
 
     assert result.exit_code == 0, result.output
     assert result.stdout.startswith("acme/origin-role\n")
@@ -1542,7 +1542,7 @@ def test_graph_empty_local_dependency_result_explains_checked_paths(
     cfg = _write_config(tmp_path, index_path=tmp_path / "index.sqlite3")
     monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
 
-    result = CliRunner().invoke(
+    result = CliInvoker().invoke(
         app,
         ["graph", str(target), "--target-repo", "acme/empty", "--downstream"],
     )
@@ -1576,7 +1576,7 @@ def test_graph_empty_local_dependency_result_does_not_fall_back_to_cache(
     cfg = _write_config(tmp_path, index_path=index_path)
     monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
 
-    result = CliRunner().invoke(
+    result = CliInvoker().invoke(
         app,
         ["graph", str(target), "--target-repo", "acme/empty", "--downstream"],
     )
@@ -1600,7 +1600,7 @@ def test_graph_output_writes_data_to_file_and_keeps_stdout_clean(
 
     with respx.mock(base_url="https://api.github.com") as mock:
         _mock_dependency_file(mock, "acme/site")
-        result = CliRunner().invoke(
+        result = CliInvoker().invoke(
             app,
             [
                 "graph",
@@ -1646,7 +1646,7 @@ def test_graph_alias_resolves_upstream_target(tmp_path: Path, monkeypatch) -> No
     )
     monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
 
-    result = CliRunner().invoke(
+    result = CliInvoker().invoke(
         app,
         ["graph", "base", "--source", "platform", "--upstream", "--cached"],
     )
@@ -1656,7 +1656,7 @@ def test_graph_alias_resolves_upstream_target(tmp_path: Path, monkeypatch) -> No
 
 
 def test_graph_help_teaches_clean_source_first_workflow() -> None:
-    result = CliRunner().invoke(app, ["graph", "--help"])
+    result = CliInvoker().invoke(app, ["graph", "--help"])
     output = " ".join(result.output.replace("│", " ").split())
 
     assert result.exit_code == 0, result.output
@@ -1678,6 +1678,25 @@ def test_graph_help_teaches_clean_source_first_workflow() -> None:
     )
     assert "--scope" not in output
     assert "--direction" not in output
+
+
+def test_graph_bare_invocation_requires_target() -> None:
+    result = CliInvoker().invoke(app, ["graph"])
+
+    assert result.exit_code == 2, result.output
+    assert result.stdout == ""
+    assert "requires an argument" in result.stderr
+    assert "TARGET" in result.stderr
+
+
+def test_source_edit_help_does_not_expose_negative_clear_aliases() -> None:
+    result = CliInvoker().invoke(app, ["source", "edit", "--help"])
+
+    assert result.exit_code == 0, result.output
+    assert "--clear-org" in result.output
+    assert "--no-clear-org" not in result.output
+    assert "--no-clear-team" not in result.output
+    assert "--no-clear-repo" not in result.output
 
 
 def test_source_status_classifies_missing_unindexed_and_stale_sources(
@@ -1702,7 +1721,7 @@ def test_source_status_classifies_missing_unindexed_and_stale_sources(
         },
     )
     monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
-    runner = CliRunner()
+    runner = CliInvoker()
 
     result = runner.invoke(app, ["source", "status", "--format", "json"])
     assert result.exit_code == 0, result.output
@@ -1768,7 +1787,7 @@ def test_source_refresh_scans_source_with_git_backend(tmp_path: Path, monkeypatc
 
     monkeypatch.setattr(source_commands, "RefreshGitSourceIndex", FakeGitRefresh)
 
-    result = CliRunner().invoke(app, ["source", "refresh", "prod"])
+    result = CliInvoker().invoke(app, ["source", "refresh", "prod"])
 
     assert result.exit_code == 0, result.output
     assert "refreshed source 'prod': 1 repos, 1 refs, 1 edges" in result.stderr
@@ -1803,7 +1822,7 @@ def test_source_refresh_uses_basic_auth_for_git_backend(tmp_path: Path, monkeypa
 
     monkeypatch.setattr(source_commands, "RefreshGitSourceIndex", FakeGitRefresh)
 
-    result = CliRunner().invoke(app, ["source", "refresh", "prod"])
+    result = CliInvoker().invoke(app, ["source", "refresh", "prod"])
 
     assert result.exit_code == 0, result.output
     credential = b64encode(b"x-access-token:ghp_test").decode()
@@ -1836,7 +1855,7 @@ def test_source_refresh_allows_git_concurrency_override(tmp_path: Path, monkeypa
 
     monkeypatch.setattr(source_commands, "RefreshGitSourceIndex", FakeGitRefresh)
 
-    result = CliRunner().invoke(app, ["source", "refresh", "prod", "--concurrency", "5"])
+    result = CliInvoker().invoke(app, ["source", "refresh", "prod", "--concurrency", "5"])
 
     assert result.exit_code == 0, result.output
     assert captured["concurrency"] == 5
@@ -1893,7 +1912,7 @@ def test_graph_with_source_refreshes_by_default_with_git_backend(
 
     monkeypatch.setattr(source_commands, "_refresh_source", fake_refresh)
 
-    result = CliRunner().invoke(
+    result = CliInvoker().invoke(
         app,
         ["graph", "acme/base", "--source", "platform", "--upstream", "--concurrency", "4"],
     )
@@ -1952,7 +1971,7 @@ def test_graph_inline_upstream_with_ref_renders_all_matching_source_refs(
 
     monkeypatch.setattr(source_commands, "_refresh_source", fake_refresh)
 
-    result = CliRunner().invoke(
+    result = CliInvoker().invoke(
         app,
         [
             "graph",
@@ -2003,7 +2022,7 @@ def test_graph_inline_source_preserves_repeated_selectors(
 
     monkeypatch.setattr(source_commands, "_refresh_source", fake_refresh)
 
-    result = CliRunner().invoke(
+    result = CliInvoker().invoke(
         app,
         [
             "graph",
@@ -2075,7 +2094,7 @@ def test_graph_cached_skips_source_refresh(tmp_path: Path, monkeypatch) -> None:
 
     monkeypatch.setattr(source_commands, "_refresh_source", fail_refresh)
 
-    result = CliRunner().invoke(
+    result = CliInvoker().invoke(
         app,
         ["graph", "acme/base", "--source", "platform", "--upstream", "--cached"],
     )
@@ -2088,7 +2107,7 @@ def test_source_save_expands_bare_team_slug_with_single_org(tmp_path: Path, monk
     cfg = _write_config(tmp_path)
     monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
 
-    result = CliRunner().invoke(
+    result = CliInvoker().invoke(
         app,
         ["source", "save", "prod", "--org", "acme", "--team", "platform"],
     )

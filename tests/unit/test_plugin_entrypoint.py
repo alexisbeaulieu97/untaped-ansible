@@ -8,7 +8,7 @@ from untaped_ansible.plugin import plugin
 
 
 def test_plugin_declares_untaped_api_version() -> None:
-    assert plugin.untaped_api_version == 1
+    assert plugin.untaped_api_version == 2
 
 
 def test_plugin_registers_cli_and_settings_sections() -> None:

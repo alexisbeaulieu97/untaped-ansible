@@ -8,13 +8,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Literal
 
-import typer
+from cyclopts import App, Parameter, validators
 from untaped import (
     ProfileOverrideOption,
     UntapedError,
+    echo,
     get_config_section,
     get_core_settings,
     profile_override,
+    raise_usage,
     report_errors,
 )
 from untaped_github import GithubClient, GithubSettings
@@ -41,94 +43,149 @@ from untaped_ansible.settings import AnsibleSettings, SourceDefinition
 GraphDirection = Literal["deps", "impact", "both"]
 GraphFormatOption = Annotated[
     GraphFormat,
-    typer.Option("--format", "-f", help="Graph output format."),
+    Parameter(name=["--format", "-f"], help="Graph output format."),
 ]
 
 
-def register_graph_command(app: typer.Typer) -> None:
+def register_graph_command(app: App) -> None:
     """Register graph commands on the Ansible root app."""
-    app.command(
-        "graph",
-        no_args_is_help=True,
-        epilog=(
-            "Examples:\n"
-            "  untaped ansible graph acme/site --downstream\n"
-            "  untaped ansible graph acme/base --org acme --team platform --upstream --refresh\n"
-            "  untaped ansible source save platform --org acme --team platform\n"
-            "  untaped ansible graph acme/base --source platform --upstream\n"
-            "  untaped ansible graph acme/site --source platform --downstream --live\n"
-            "  untaped ansible graph acme/base --source platform --both --format mermaid "
-            "--output deps.mmd"
-        ),
-    )(graph_command)
+    app.command(graph_command, name="graph", help=_GRAPH_HELP)
+
+
+_GRAPH_HELP = (
+    "Graph Ansible dependency relationships for a role, repo, or playbook. "
+    "Examples: untaped ansible graph acme/base --org acme --team platform "
+    "--upstream --refresh; untaped ansible graph acme/app --source prod "
+    "--both --cached; untaped ansible graph ./roles/web --target-repo acme/web "
+    "--downstream."
+)
 
 
 def graph_command(
-    target: str = typer.Argument(..., help="Target repo, GitHub URL, alias, or local path."),
-    ref: str | None = typer.Option(
-        None,
-        "--ref",
-        help="Target branch, tag, or SHA for live dependency reads and cached upstream lookup.",
-    ),
-    source: list[str] | None = typer.Option(
-        None,
-        "--source",
-        help="Saved source to use for cached graph data and upstream impact; repeat to union.",
-    ),
-    upstream: bool = typer.Option(False, "--upstream", help="Show who depends on TARGET."),
-    downstream: bool = typer.Option(False, "--downstream", help="Show what TARGET depends on."),
-    both: bool = typer.Option(False, "--both", help="Show upstream and downstream (default)."),
-    refresh: bool = typer.Option(False, "--refresh", help="Refresh source data before graphing."),
-    cached: bool = typer.Option(
-        False,
-        "--cached",
-        help="Use cached source data without checking remote refs.",
-    ),
-    concurrency: int | None = typer.Option(
-        None,
-        "--concurrency",
-        min=1,
-        max=32,
-        help="Git-backed source refresh concurrency; defaults to ansible.git_fetch_concurrency.",
-    ),
-    live: bool = typer.Option(
-        False,
-        "--live",
-        help="Use live GitHub reads for downstream graphing even when source data is configured.",
-    ),
-    depth: str = typer.Option("3", "--depth", help="Traversal depth or 'unlimited'."),
-    target_repo: str | None = typer.Option(
-        None,
-        "--target-repo",
-        help="Canonical owner/repo override for local targets.",
-    ),
-    orgs: list[str] | None = typer.Option(None, "--org", help="Inline source GitHub org."),
-    teams: list[str] | None = typer.Option(
-        None,
-        "--team",
-        help="Inline source GitHub team slug with one --org, or ORG/SLUG.",
-    ),
-    source_repos: list[str] | None = typer.Option(
-        None,
-        "--repo",
-        help="Inline source GitHub repo as owner/name.",
-    ),
-    paths: list[str] | None = typer.Option(None, "--path", help="Inline source dependency path."),
-    ref_kinds: list[str] | None = typer.Option(
-        None,
-        "--ref-kind",
-        help="Inline source ref namespace to scan: heads or tags; omit for configured default.",
-    ),
-    ref_patterns: list[str] | None = typer.Option(
-        None,
-        "--ref-pattern",
-        help="Inline source fnmatch pattern for branch/tag names; omit for configured default.",
-    ),
+    target: Annotated[
+        str,
+        Parameter(help="Target repo, GitHub URL, alias, or local path."),
+    ],
+    /,
+    *,
+    ref: Annotated[
+        str | None,
+        Parameter(
+            name="--ref",
+            help="Target branch, tag, or SHA for live dependency reads and cached upstream lookup.",
+        ),
+    ] = None,
+    source: Annotated[
+        list[str] | None,
+        Parameter(
+            name="--source",
+            help="Saved source to use for cached graph data and upstream impact; repeat to union.",
+            consume_multiple=False,
+        ),
+    ] = None,
+    upstream: Annotated[
+        bool,
+        Parameter(name="--upstream", negative="", help="Show who depends on TARGET."),
+    ] = False,
+    downstream: Annotated[
+        bool,
+        Parameter(name="--downstream", negative="", help="Show what TARGET depends on."),
+    ] = False,
+    both: Annotated[
+        bool,
+        Parameter(name="--both", negative="", help="Show upstream and downstream (default)."),
+    ] = False,
+    refresh: Annotated[
+        bool,
+        Parameter(name="--refresh", negative="", help="Refresh source data before graphing."),
+    ] = False,
+    cached: Annotated[
+        bool,
+        Parameter(
+            name="--cached",
+            negative="",
+            help="Use cached source data without checking remote refs.",
+        ),
+    ] = False,
+    concurrency: Annotated[
+        int | None,
+        Parameter(
+            name="--concurrency",
+            validator=validators.Number(gte=1, lte=32),
+            help=(
+                "Git-backed source refresh concurrency; defaults to ansible.git_fetch_concurrency."
+            ),
+        ),
+    ] = None,
+    live: Annotated[
+        bool,
+        Parameter(
+            name="--live",
+            negative="",
+            help=(
+                "Use live GitHub reads for downstream graphing even when source data is configured."
+            ),
+        ),
+    ] = False,
+    depth: Annotated[str, Parameter(name="--depth", help="Traversal depth or 'unlimited'.")] = "3",
+    target_repo: Annotated[
+        str | None,
+        Parameter(name="--target-repo", help="Canonical owner/repo override for local targets."),
+    ] = None,
+    orgs: Annotated[
+        list[str] | None,
+        Parameter(name="--org", help="Inline source GitHub org.", consume_multiple=False),
+    ] = None,
+    teams: Annotated[
+        list[str] | None,
+        Parameter(
+            name="--team",
+            help="Inline source GitHub team slug with one --org, or ORG/SLUG.",
+            consume_multiple=False,
+        ),
+    ] = None,
+    source_repos: Annotated[
+        list[str] | None,
+        Parameter(
+            name="--repo",
+            help="Inline source GitHub repo as owner/name.",
+            consume_multiple=False,
+        ),
+    ] = None,
+    paths: Annotated[
+        list[str] | None,
+        Parameter(name="--path", help="Inline source dependency path.", consume_multiple=False),
+    ] = None,
+    ref_kinds: Annotated[
+        list[str] | None,
+        Parameter(
+            name="--ref-kind",
+            help="Inline source ref namespace to scan: heads or tags; omit for configured default.",
+            consume_multiple=False,
+        ),
+    ] = None,
+    ref_patterns: Annotated[
+        list[str] | None,
+        Parameter(
+            name="--ref-pattern",
+            help="Inline source fnmatch pattern for branch/tag names; omit for configured default.",
+            consume_multiple=False,
+        ),
+    ] = None,
     fmt: GraphFormatOption = "tree",
-    output: Path | None = typer.Option(None, "--output", help="Write graph data to a file."),
+    output: Annotated[
+        Path | None,
+        Parameter(name="--output", help="Write graph data to a file."),
+    ] = None,
     profile: ProfileOverrideOption = None,
 ) -> None:
-    """Graph Ansible dependency relationships for a role, repo, or playbook."""
+    """Graph Ansible dependency relationships for a role, repo, or playbook.
+
+    Examples:
+      untaped ansible graph acme/base --org acme --team platform --upstream --refresh
+      untaped ansible graph acme/app --source prod --both --cached
+      untaped ansible graph ./roles/web --target-repo acme/web --downstream
+    """
     with report_errors(), profile_override(profile):
         settings = get_config_section("ansible", AnsibleSettings)
         aliases = AliasRepository().entries()
@@ -138,7 +195,7 @@ def graph_command(
 
         direction = _graph_direction(upstream=upstream, downstream=downstream, both=both)
         if cached and refresh:
-            raise typer.BadParameter("--cached cannot be combined with --refresh")
+            raise_usage("--cached cannot be combined with --refresh")
         git_concurrency = concurrency or settings.git_fetch_concurrency
         graph_source = _graph_source(
             source_names=source,
@@ -160,7 +217,7 @@ def graph_command(
         )
         if should_refresh_source:
             if not graph_source.selections:
-                raise typer.BadParameter("--refresh requires --source or inline source selectors")
+                raise_usage("--refresh requires --source or inline source selectors")
             for selection in graph_source.selections:
                 started_at = time.perf_counter()
                 result = source_commands._refresh_source(
@@ -171,7 +228,7 @@ def graph_command(
                     settings=settings,
                     concurrency=git_concurrency,
                 )
-                typer.echo(
+                echo(
                     source_commands._refresh_summary(
                         "refreshed" if refresh else "checked",
                         selection.label,
@@ -281,7 +338,7 @@ class _GraphSource:
 def _graph_direction(*, upstream: bool, downstream: bool, both: bool) -> GraphDirection:
     selected = [upstream, downstream, both].count(True)
     if selected > 1:
-        raise typer.BadParameter("choose only one of --upstream, --downstream, or --both")
+        raise_usage("choose only one of --upstream, --downstream, or --both")
     if upstream:
         return "impact"
     if downstream:
@@ -302,7 +359,7 @@ def _graph_source(
     has_inline = any((orgs, teams, repos, paths, ref_kinds, ref_patterns))
     selected_source_names = _dedupe_preserve_order(source_names or [])
     if selected_source_names and has_inline:
-        raise typer.BadParameter(
+        raise_usage(
             "--source cannot be combined with --org, --team, --repo, --path, "
             "--ref-kind, or --ref-pattern"
         )
@@ -607,7 +664,7 @@ def _should_use_live_dependencies(
 def _emit_graph(graph: DependencyGraph, *, fmt: GraphFormat, output: Path | None) -> None:
     rendered = render_graph(graph, fmt)
     if output is None:
-        typer.echo(rendered)
+        echo(rendered)
         return
     output.expanduser().parent.mkdir(parents=True, exist_ok=True)
     output.expanduser().write_text(rendered)
@@ -618,8 +675,8 @@ def _parse_depth(value: str) -> int | None:
         return None
     try:
         depth = int(value)
-    except ValueError as exc:
-        raise typer.BadParameter("--depth must be an integer or 'unlimited'") from exc
+    except ValueError:
+        raise_usage("--depth must be an integer or 'unlimited'")
     if depth < 0:
-        raise typer.BadParameter("--depth must be >= 0")
+        raise_usage("--depth must be >= 0")
     return depth

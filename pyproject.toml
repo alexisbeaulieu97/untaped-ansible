@@ -8,10 +8,10 @@ authors = [
 ]
 requires-python = ">=3.14"
 dependencies = [
+    "cyclopts>=4.16.0,<5",
     "pydantic>=2.13.3",
     "pyyaml>=6.0.3",
-    "typer>=0.25.1",
-    "untaped>=0.1.0",
+    "untaped>=0.3.0",
     "untaped-github>=0.2.0",
 ]
 
