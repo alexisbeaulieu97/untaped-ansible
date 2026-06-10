@@ -1680,12 +1680,13 @@ def test_graph_help_teaches_clean_source_first_workflow() -> None:
     assert "--direction" not in output
 
 
-def test_graph_bare_invocation_shows_help() -> None:
+def test_graph_bare_invocation_requires_target() -> None:
     result = CliInvoker().invoke(app, ["graph"])
 
-    assert result.exit_code == 0, result.output
-    assert "Usage:" in result.output
-    assert "Target repo" in result.output
+    assert result.exit_code == 2, result.output
+    assert result.stdout == ""
+    assert "requires an argument" in result.stderr
+    assert "TARGET" in result.stderr
 
 
 def test_source_edit_help_does_not_expose_negative_clear_aliases() -> None:

@@ -19,13 +19,13 @@ from untaped import (
     get_config_section,
     get_core_settings,
     profile_override,
+    render_rows,
     report_errors,
 )
 from untaped_github import GithubClient, GithubSettings
 
 from untaped_ansible.application.refresh_git_index import RefreshGitSourceIndex
 from untaped_ansible.application.refresh_index import RefreshResult
-from untaped_ansible.cli._rendering import render_rows
 from untaped_ansible.infrastructure import (
     AliasRepository,
     GitRepositoryCache,

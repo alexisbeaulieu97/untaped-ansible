@@ -5,9 +5,16 @@ from __future__ import annotations
 from typing import Annotated
 
 from cyclopts import Parameter
-from untaped import ColumnsOption, FormatOption, UntapedError, create_app, echo, report_errors
+from untaped import (
+    ColumnsOption,
+    FormatOption,
+    UntapedError,
+    create_app,
+    echo,
+    render_rows,
+    report_errors,
+)
 
-from untaped_ansible.cli._rendering import render_rows
 from untaped_ansible.infrastructure import AliasRepository
 
 app = create_app(name="alias", help="Manage dependency aliases.")

@@ -676,8 +676,8 @@ wheels = [
 
 [[package]]
 name = "untaped"
-version = "0.2.0"
-source = { git = "https://github.com/alexisbeaulieu97/untaped?branch=cyclopts-migration#0d2e61287be09c38c9cf327ecce27315ddf3dbaf" }
+version = "0.3.0"
+source = { git = "https://github.com/alexisbeaulieu97/untaped#9c3ceab9616aa1dddc23e1a14401351170dc9388" }
 dependencies = [
     { name = "cyclopts" },
     { name = "filelock" },
@@ -718,8 +718,8 @@ requires-dist = [
     { name = "cyclopts", specifier = ">=4.16.0,<5" },
     { name = "pydantic", specifier = ">=2.13.3" },
     { name = "pyyaml", specifier = ">=6.0.3" },
-    { name = "untaped", git = "https://github.com/alexisbeaulieu97/untaped?branch=cyclopts-migration" },
-    { name = "untaped-github", git = "https://github.com/alexisbeaulieu97/untaped-github?branch=cyclopts-migration" },
+    { name = "untaped", git = "https://github.com/alexisbeaulieu97/untaped" },
+    { name = "untaped-github", git = "https://github.com/alexisbeaulieu97/untaped-github" },
 ]
 
 [package.metadata.requires-dev]
@@ -736,7 +736,7 @@ dev = [
 [[package]]
 name = "untaped-github"
 version = "0.2.0"
-source = { git = "https://github.com/alexisbeaulieu97/untaped-github?branch=cyclopts-migration#7c46cf6190038da4d0dc7b67e0216f9ee463f12d" }
+source = { git = "https://github.com/alexisbeaulieu97/untaped-github#a8c185213cf10c5920eb4b967566f696d07821b8" }
 dependencies = [
     { name = "cyclopts" },
     { name = "pydantic" },
