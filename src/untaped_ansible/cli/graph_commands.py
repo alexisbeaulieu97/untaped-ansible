@@ -6,7 +6,7 @@ import time
 from configparser import ConfigParser
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated, Literal, NoReturn
 
 from cyclopts import App, Parameter, validators
 from untaped import (
@@ -45,10 +45,13 @@ GraphFormatOption = Annotated[
     GraphFormat,
     Parameter(name=["--format", "-f"], help="Graph output format."),
 ]
+_graph_parent_app: App | None = None
 
 
 def register_graph_command(app: App) -> None:
     """Register graph commands on the Ansible root app."""
+    global _graph_parent_app
+    _graph_parent_app = app
     app.command(graph_command, name="graph", help=_GRAPH_HELP)
 
 
@@ -62,7 +65,10 @@ _GRAPH_HELP = (
 
 
 def graph_command(
-    target: Annotated[str, Parameter(help="Target repo, GitHub URL, alias, or local path.")],
+    target: Annotated[
+        str | None,
+        Parameter(name="", help="Target repo, GitHub URL, alias, or local path."),
+    ] = None,
     *,
     ref: Annotated[
         str | None,
@@ -182,6 +188,8 @@ def graph_command(
       untaped ansible graph acme/app --source prod --both --cached
       untaped ansible graph ./roles/web --target-repo acme/web --downstream
     """
+    if target is None:
+        _show_graph_help()
     with report_errors(), profile_override(profile):
         settings = get_config_section("ansible", AnsibleSettings)
         aliases = AliasRepository().entries()
@@ -664,6 +672,12 @@ def _emit_graph(graph: DependencyGraph, *, fmt: GraphFormat, output: Path | None
         return
     output.expanduser().parent.mkdir(parents=True, exist_ok=True)
     output.expanduser().write_text(rendered)
+
+
+def _show_graph_help() -> NoReturn:
+    if _graph_parent_app is not None:
+        _graph_parent_app.help_print(["graph"])
+    raise SystemExit()
 
 
 def _parse_depth(value: str) -> int | None:

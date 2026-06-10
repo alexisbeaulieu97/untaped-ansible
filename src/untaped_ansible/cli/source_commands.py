@@ -124,7 +124,7 @@ def source_edit_command(
         list[str] | None,
         Parameter(name="--remove-org", consume_multiple=False),
     ] = None,
-    clear_orgs: Annotated[bool, Parameter(name="--clear-org")] = False,
+    clear_orgs: Annotated[bool, Parameter(name="--clear-org", negative="")] = False,
     add_teams: Annotated[
         list[str] | None,
         Parameter(name="--add-team", consume_multiple=False),
@@ -133,7 +133,7 @@ def source_edit_command(
         list[str] | None,
         Parameter(name="--remove-team", consume_multiple=False),
     ] = None,
-    clear_teams: Annotated[bool, Parameter(name="--clear-team")] = False,
+    clear_teams: Annotated[bool, Parameter(name="--clear-team", negative="")] = False,
     add_repos: Annotated[
         list[str] | None,
         Parameter(name="--add-repo", consume_multiple=False),
@@ -142,7 +142,7 @@ def source_edit_command(
         list[str] | None,
         Parameter(name="--remove-repo", consume_multiple=False),
     ] = None,
-    clear_repos: Annotated[bool, Parameter(name="--clear-repo")] = False,
+    clear_repos: Annotated[bool, Parameter(name="--clear-repo", negative="")] = False,
     add_paths: Annotated[
         list[str] | None,
         Parameter(name="--add-path", consume_multiple=False),

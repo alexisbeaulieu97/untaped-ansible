@@ -1680,6 +1680,24 @@ def test_graph_help_teaches_clean_source_first_workflow() -> None:
     assert "--direction" not in output
 
 
+def test_graph_bare_invocation_shows_help() -> None:
+    result = CliInvoker().invoke(app, ["graph"])
+
+    assert result.exit_code == 0, result.output
+    assert "Usage:" in result.output
+    assert "Target repo" in result.output
+
+
+def test_source_edit_help_does_not_expose_negative_clear_aliases() -> None:
+    result = CliInvoker().invoke(app, ["source", "edit", "--help"])
+
+    assert result.exit_code == 0, result.output
+    assert "--clear-org" in result.output
+    assert "--no-clear-org" not in result.output
+    assert "--no-clear-team" not in result.output
+    assert "--no-clear-repo" not in result.output
+
+
 def test_source_status_classifies_missing_unindexed_and_stale_sources(
     tmp_path: Path,
     monkeypatch,
