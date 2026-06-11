@@ -2235,8 +2235,41 @@ def test_source_refresh_partial_failure_exits_nonzero_and_saves_successes(
     assert result.stdout == ""
     assert "refreshed source 'prod':" in result.stderr
     assert "failed acme/gone: " in result.stderr
-    assert "refresh completed with 1 repo failure(s); successes were saved" in result.output
+    assert "refresh completed with 1 repo failure; successes were saved" in result.output
     # the succeeded repo's cached scan survived the partial failure
+    assert SqliteDependencyIndex(index_path).ref_scans(
+        "source:prod", "acme/ok", [("heads", "main")]
+    )
+
+
+def test_source_refresh_all_failures_exits_nonzero_and_leaves_index_unchanged(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    index_path = tmp_path / "index.sqlite3"
+    _seed_unchanged_scan(SqliteDependencyIndex(index_path), "source:prod", "acme/ok", sha="sha-ok")
+    before = SqliteDependencyIndex(index_path).status("source:prod")
+    assert before is not None
+    cfg = _write_config(
+        tmp_path,
+        index_path=index_path,
+        extra_profile={"github": {"token": "ghp_test"}},
+        top_level_ansible={"sources": [{"name": "prod", "repos": ["acme/gone", "acme/ok"]}]},
+    )
+    monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
+
+    with respx.mock(base_url="https://api.github.com") as mock:
+        _mock_refresh_repos(mock, {}, missing=("acme/gone", "acme/ok"))
+        result = CliInvoker().invoke(app, ["source", "refresh", "prod"])
+
+    assert result.exit_code == 1
+    assert "failed acme/gone: " in result.stderr
+    assert "failed acme/ok: " in result.stderr
+    assert "refresh failed for all 2 repos; index left unchanged" in result.output
+    # the index commit was skipped: cached data and freshness are untouched
+    after = SqliteDependencyIndex(index_path).status("source:prod")
+    assert after is not None
+    assert after.scanned_at == before.scanned_at
     assert SqliteDependencyIndex(index_path).ref_scans(
         "source:prod", "acme/ok", [("heads", "main")]
     )
@@ -2345,7 +2378,7 @@ def test_graph_refresh_with_partial_failures_warns_and_proceeds(
 
     assert result.exit_code == 0, result.output
     assert (
-        "warning: source refresh had 1 failures; data for those repos may be stale" in result.stdout
+        "warning: source refresh had 1 failure; data for those repos may be stale" in result.stdout
     )
     assert "    +-- acme/site@main" in result.stdout
 

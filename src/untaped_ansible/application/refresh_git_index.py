@@ -191,15 +191,20 @@ class RefreshGitSourceIndex:
             pending_touches.extend(outcome.touches)
             pending_repo_metadata.append(outcome.repo_metadata)
 
-        self._index.commit_source_ref_refresh(
-            source_key,
-            scans=tuple(pending_scans),
-            touches=tuple(pending_touches),
-            keep=selected,
-            repo_metadata=tuple(pending_repo_metadata),
-            scanned_at=checked_at,
-            failed_repos=frozenset(failures),
-        )
+        # When every repo failed there is nothing trustworthy to commit:
+        # leave cached data and freshness (scanned_at) untouched so the run
+        # does not look fresh. An empty source (zero repos expanded) is a
+        # successful refresh and still commits.
+        if not repos or len(failures) < len(repos):
+            self._index.commit_source_ref_refresh(
+                source_key,
+                scans=tuple(pending_scans),
+                touches=tuple(pending_touches),
+                keep=selected,
+                repo_metadata=tuple(pending_repo_metadata),
+                scanned_at=checked_at,
+                failed_repos=frozenset(failures),
+            )
         status = self._index.status(source_key)
         return RefreshResult(
             source_key=source_key,

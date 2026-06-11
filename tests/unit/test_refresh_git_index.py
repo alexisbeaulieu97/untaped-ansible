@@ -379,6 +379,71 @@ def test_fetch_failure_keeps_other_repos_and_previously_cached_refs(tmp_path: Pa
     } == {"acme/b"}
 
 
+def test_all_repos_failed_skips_commit_and_keeps_index_untouched(tmp_path: Path) -> None:
+    """When every repo fails (probe or fetch), the run must not look fresh."""
+    github = FakeGitHub()
+    git = FakeGitCache()
+    probe = FakeRefProbe()
+    probe.refs["acme/a"] = [GitRef(kind="heads", name="main", sha="sha-a")]
+    probe.refs["acme/b"] = [GitRef(kind="heads", name="main", sha="sha-b")]
+    git.files[("a", "sha-a", "roles/requirements.yml")] = (
+        "- src: https://github.com/acme/base\n  version: v1\n"
+    )
+    git.files[("b", "sha-b", "roles/requirements.yml")] = (
+        "- src: https://github.com/acme/base\n  version: v1\n"
+    )
+    index = SqliteDependencyIndex(tmp_path / "index.sqlite3")
+    refresh = _make_refresh(github=github, git=git, probe=probe, index=index, tmp_path=tmp_path)
+    source = SourceDefinition(name="prod", repos=["acme/a", "acme/b"])
+
+    refresh(source, source_key="source:prod")
+    before = index.status("source:prod")
+    assert before is not None
+    probe.failures["acme/a"] = "probe boom"
+    probe.refs["acme/b"] = [GitRef(kind="heads", name="main", sha="sha-b2")]
+    git.fail_fetches.add("b")
+
+    result = refresh(source, source_key="source:prod")
+
+    assert [(failure.repo, failure.reason) for failure in result.failures] == [
+        ("acme/a", "probe boom"),
+        ("acme/b", "git fetch failed for b"),
+    ]
+    after = index.status("source:prod")
+    assert after is not None
+    assert after.scanned_at == before.scanned_at
+    # all previously cached data survives untouched
+    assert index.ref_scans("source:prod", "acme/a", [("heads", "main")])
+    assert index.ref_scans("source:prod", "acme/b", [("heads", "main")])
+    assert {
+        edge.source_repo for edge in index.dependents("acme/base", "v1", source_key="source:prod")
+    } == {"acme/a", "acme/b"}
+
+
+def test_empty_source_refresh_still_commits(tmp_path: Path) -> None:
+    """Zero repos expanded is a successful (empty) refresh, not a failure."""
+    github = FakeGitHub()
+    git = FakeGitCache()
+    probe = FakeRefProbe()
+    probe.refs["acme/site"] = [GitRef(kind="heads", name="main", sha="sha-main")]
+    git.files[("site", "sha-main", "roles/requirements.yml")] = (
+        "- src: https://github.com/acme/base\n"
+    )
+    index = SqliteDependencyIndex(tmp_path / "index.sqlite3")
+    refresh = _make_refresh(github=github, git=git, probe=probe, index=index, tmp_path=tmp_path)
+    source = SourceDefinition(name="prod", orgs=["acme"])
+
+    refresh(source, source_key="source:prod")
+    github.org_repos["acme"] = []
+    result = refresh(source, source_key="source:prod")
+
+    assert result.repos == 0
+    assert result.failures == ()
+    # the commit ran: the now-unselected repo was pruned
+    assert index.ref_scans("source:prod", "acme/site", [("heads", "main")]) == {}
+    assert not index.dependents("acme/base", None, source_key="source:prod")
+
+
 def test_git_refresh_fetches_selected_refs_and_indexes_dependency_files(tmp_path: Path) -> None:
     github = FakeGitHub()
     git = FakeGitCache()

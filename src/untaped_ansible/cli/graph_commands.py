@@ -249,9 +249,10 @@ def graph_command(
                 )
                 source_commands._warn_low_rate_limit(result)
                 if result.failures:
+                    count = len(result.failures)
+                    noun = "failure" if count == 1 else "failures"
                     refresh_warnings.append(
-                        f"source refresh had {len(result.failures)} failures; "
-                        "data for those repos may be stale"
+                        f"source refresh had {count} {noun}; data for those repos may be stale"
                     )
 
         direction, graph_warnings = _effective_direction(

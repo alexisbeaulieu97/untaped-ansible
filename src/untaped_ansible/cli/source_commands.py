@@ -322,10 +322,16 @@ def source_refresh_command(
         if result.failures:
             for failure in result.failures:
                 echo(f"failed {failure.repo}: {failure.reason}", err=True)
-            raise UntapedError(
-                f"refresh completed with {len(result.failures)} repo failure(s); "
-                "successes were saved"
-            )
+            raise UntapedError(_refresh_failure_message(result))
+
+
+def _refresh_failure_message(result: RefreshResult) -> str:
+    count = len(result.failures)
+    if count == result.repos:
+        noun = "repo" if count == 1 else "repos"
+        return f"refresh failed for all {count} {noun}; index left unchanged"
+    noun = "failure" if count == 1 else "failures"
+    return f"refresh completed with {count} repo {noun}; successes were saved"
 
 
 def _source_definition(
