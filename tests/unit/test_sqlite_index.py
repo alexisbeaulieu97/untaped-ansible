@@ -4,6 +4,10 @@ from __future__ import annotations
 
 import sqlite3
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
+
+import pytest
+from untaped.api import UntapedError
 
 from untaped_ansible.domain.payloads import (
     CachedRef,
@@ -13,6 +17,7 @@ from untaped_ansible.domain.payloads import (
     SourceRepoMetadata,
 )
 from untaped_ansible.infrastructure.sqlite_index import SqliteDependencyIndex
+from untaped_ansible.infrastructure.sqlite_schema import SCHEMA_VERSION
 
 
 def _edge(
@@ -422,6 +427,75 @@ def test_pruning_keeps_same_ref_name_separate_by_ref_kind(tmp_path) -> None:
     assert index.ref_scans("source:prod", "acme/site", [("tags", "v1")])
     assert not index.dependents("acme/branch-base", None, source_key="source:prod")
     assert index.dependents("acme/tag-base", None, source_key="source:prod")
+
+
+def test_fresh_index_stamps_current_schema_version(tmp_path) -> None:
+    db_path = tmp_path / "index.sqlite3"
+    index = SqliteDependencyIndex(db_path)
+
+    assert index.status("source:prod") is None
+
+    db = sqlite3.connect(db_path)
+    try:
+        assert db.execute("pragma user_version").fetchone()[0] == SCHEMA_VERSION
+    finally:
+        db.close()
+
+
+def _assert_outdated_schema_error(db_path: Path) -> None:
+    index = SqliteDependencyIndex(db_path)
+    with pytest.raises(UntapedError) as excinfo:
+        index.status("source:prod")
+    message = str(excinfo.value)
+    assert str(db_path) in message
+    assert "untaped ansible source refresh" in message
+
+
+def test_outdated_schema_version_raises_actionable_error(tmp_path) -> None:
+    db_path = tmp_path / "index.sqlite3"
+    db = sqlite3.connect(db_path)
+    try:
+        db.execute("pragma user_version = 1")
+        db.execute("create table source_runs (source_key text primary key)")
+        db.commit()
+    finally:
+        db.close()
+
+    _assert_outdated_schema_error(db_path)
+
+
+def test_versionless_db_with_tables_raises_actionable_error(tmp_path) -> None:
+    db_path = tmp_path / "index.sqlite3"
+    db = sqlite3.connect(db_path)
+    try:
+        db.execute("create table source_runs (source_key text primary key)")
+        db.commit()
+    finally:
+        db.close()
+
+    _assert_outdated_schema_error(db_path)
+
+
+def test_recommitting_unchanged_scan_reuses_snapshot_and_edges(tmp_path) -> None:
+    db_path = tmp_path / "index.sqlite3"
+    index = SqliteDependencyIndex(db_path)
+    now = datetime(2026, 6, 1, tzinfo=UTC)
+    scan = _scan()
+
+    _commit(index, scans=(scan,), scanned_at=now)
+    _commit(index, scans=(scan,), scanned_at=now)
+
+    db = sqlite3.connect(db_path)
+    try:
+        snapshot_count = db.execute("select count(*) from dependency_snapshots").fetchone()[0]
+        edge_count = db.execute("select count(*) from snapshot_edges").fetchone()[0]
+    finally:
+        db.close()
+    assert snapshot_count == 1
+    assert edge_count == 1
+    assert index.dependencies("acme/site", "main", source_key="source:prod") == list(
+        scan.dependencies
+    )
 
 
 def test_schema_creates_graph_read_indexes(tmp_path) -> None:

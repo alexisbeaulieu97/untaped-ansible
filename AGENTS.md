@@ -137,12 +137,22 @@ share one parsed edge set. `source_ref_scans` remains the authoritative
 repo/ref identity table for graph reads and display metadata.
 
 Keep SQLite adapter methods in `infrastructure/sqlite_index.py` focused on
-transaction boundaries and query flow. Schema creation helpers live in
+transaction boundaries and query flow. Refresh commits stay one transaction
+and write in batches: existing snapshot ids are pre-looked-up in chunks, new
+snapshots use `insert ... on conflict ... returning id` (edges are inserted
+only for newly created snapshots), and ref-scan replaces/touches run as single
+`executemany` statements. Schema creation helpers live in
 `infrastructure/sqlite_schema.py`, and row/datetime mapping lives in
-`infrastructure/sqlite_rows.py`. The legacy source-cache cleanup is
-cache-schema-breaking. Cache schema compatibility is intentionally not
-preserved yet; users must delete the file configured by `ansible.index_path`
-and refresh saved sources after schema-breaking changes.
+`infrastructure/sqlite_rows.py`.
+
+Cache schema compatibility is intentionally not preserved; there is no
+migration code. `sqlite_schema.SCHEMA_VERSION` is enforced through SQLite's
+`PRAGMA user_version`: a fresh empty database gets the tables and the current
+version stamp, while any database whose `user_version` differs (including
+pre-versioning databases with tables but `user_version = 0`) makes
+`ensure_schema` raise an `UntapedError` telling the user to delete the file
+configured by `ansible.index_path` and re-run `untaped ansible source
+refresh`. Bump `SCHEMA_VERSION` in the same commit as any schema change.
 
 Source-index payload DTOs such as `IndexedDependency`, `GitRef`, `RefScan`,
 `RefScanTouch`, and `SourceRepoMetadata` live in `domain/payloads.py` because
