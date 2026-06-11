@@ -84,6 +84,9 @@ class SqliteDependencyIndex:
         repo_metadata: tuple[SourceRepoMetadata, ...] = (),
         scanned_at: datetime,
     ) -> None:
+        """Commit a refresh; ``scans`` must be unique per (source_key, source_repo,
+        ref_kind, source_ref) -- duplicates raise IntegrityError inside the
+        transaction instead of last-wins."""
         self._path.parent.mkdir(parents=True, exist_ok=True)
         with self._db() as db:
             _replace_ref_scans(db, scans)
@@ -316,7 +319,9 @@ def _existing_snapshot_ids(
 ) -> dict[_SnapshotIdentity, int]:
     identities = sorted({_snapshot_identity(scan) for scan in scans})
     ids: dict[_SnapshotIdentity, int] = {}
-    for chunk in _chunks(identities, 400):
+    # 200 identities x 4 columns = 800 bound params, under the pre-3.32 limit of
+    # 999, even though this module already assumes SQLite >= 3.35 (RETURNING).
+    for chunk in _chunks(identities, 200):
         placeholders = ",".join("(?, ?, ?, ?)" for _ in chunk)
         params = [value for identity in chunk for value in identity]
         rows = db.execute(
@@ -357,6 +362,8 @@ def _insert_snapshot(db: sqlite3.Connection, scan: RefScan) -> int:
             source_repo, source_sha, dependency_paths_fingerprint, aliases_fingerprint
         ) values (?, ?, ?, ?)
         on conflict(source_repo, source_sha, dependency_paths_fingerprint, aliases_fingerprint)
+        -- no-op update: only needed so RETURNING yields a row when another
+        -- process inserted the same identity first (DO NOTHING returns nothing)
         do update set source_repo = excluded.source_repo
         returning id
         """,

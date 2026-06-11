@@ -58,7 +58,11 @@ class IncrementalDependencyIndexWriter(Protocol):
         keep: set[tuple[str, str, str]],
         repo_metadata: tuple[payloads.SourceRepoMetadata, ...] = (),
         scanned_at: datetime,
-    ) -> None: ...
+    ) -> None:
+        """Commit a refresh; ``scans`` must be unique per (source_key, source_repo,
+        ref_kind, source_ref) -- duplicates raise IntegrityError inside the
+        transaction instead of last-wins."""
+        ...
 
 
 class GitHubDependencyReader(Protocol):

@@ -98,8 +98,12 @@ def ensure_schema(db: sqlite3.Connection, path: Path) -> None:
             f"index schema is outdated; delete {path} and re-run "
             "'untaped ansible source refresh <name>'"
         )
-    db.executescript(_SCHEMA_SQL)
-    db.execute(f"pragma user_version = {SCHEMA_VERSION}")
+    # Table creation and the version stamp must be one atomic unit: a crash
+    # between them would leave a version-0 database that already has tables,
+    # which the check above rejects as outdated. ``user_version`` is
+    # transactional in SQLite, so wrapping the script in begin/commit makes
+    # the whole bootstrap all-or-nothing.
+    db.executescript(f"begin;\n{_SCHEMA_SQL}\npragma user_version = {SCHEMA_VERSION};\ncommit;")
 
 
 def _has_tables(db: sqlite3.Connection) -> bool:

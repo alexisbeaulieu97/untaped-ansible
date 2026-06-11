@@ -498,6 +498,47 @@ def test_recommitting_unchanged_scan_reuses_snapshot_and_edges(tmp_path) -> None
     )
 
 
+def test_commit_resolves_snapshot_ids_across_multiple_lookup_chunks(tmp_path) -> None:
+    db_path = tmp_path / "index.sqlite3"
+    index = SqliteDependencyIndex(db_path)
+    now = datetime(2026, 6, 1, tzinfo=UTC)
+    # 401 distinct snapshot identities exceed the 200-identity lookup chunk
+    # size, so the pre-lookup in the second commit spans three chunks.
+    scans = tuple(
+        _scan(
+            source_ref=f"ref-{n:03d}",
+            source_sha=f"sha-{n:03d}",
+            dependencies=(_edge(source_ref=f"ref-{n:03d}", source_sha=f"sha-{n:03d}"),),
+        )
+        for n in range(401)
+    )
+
+    _commit(index, scans=scans, scanned_at=now)
+    # Recommit the same scans: every snapshot id must resolve via the chunked
+    # pre-lookup instead of inserting duplicates.
+    _commit(index, scans=scans, scanned_at=now)
+
+    db = sqlite3.connect(db_path)
+    try:
+        snapshot_count = db.execute("select count(*) from dependency_snapshots").fetchone()[0]
+        edge_count = db.execute("select count(*) from snapshot_edges").fetchone()[0]
+        orphan_scans = db.execute(
+            """
+            select count(*) from source_ref_scans
+            where snapshot_id not in (select id from dependency_snapshots)
+            """
+        ).fetchone()[0]
+    finally:
+        db.close()
+    assert snapshot_count == 401
+    assert edge_count == 401
+    assert orphan_scans == 0
+    status = index.status("source:prod")
+    assert status is not None
+    assert status.refs == 401
+    assert status.edges == 401
+
+
 def test_schema_creates_graph_read_indexes(tmp_path) -> None:
     db_path = tmp_path / "index.sqlite3"
     index = SqliteDependencyIndex(db_path)
