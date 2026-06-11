@@ -9,13 +9,11 @@ from pathlib import Path
 from typing import Annotated, Literal
 
 from cyclopts import App, Parameter, validators
-from untaped import (
+from untaped.api import (
     ProfileOverrideOption,
     UntapedError,
     echo,
-    get_config_section,
-    get_core_settings,
-    profile_override,
+    plugin_context,
     raise_usage,
     report_errors,
 )
@@ -186,8 +184,9 @@ def graph_command(
       untaped ansible graph acme/app --source prod --both --cached
       untaped ansible graph ./roles/web --target-repo acme/web --downstream
     """
-    with report_errors(), profile_override(profile):
-        settings = get_config_section("ansible", AnsibleSettings)
+    with report_errors():
+        ctx = plugin_context(profile)
+        settings = ctx.section("ansible", AnsibleSettings)
         aliases = AliasRepository().entries()
         target_repo_name = target_repo or _resolve_target_repo(target, aliases)
         if target_repo_name is None:
@@ -218,6 +217,7 @@ def graph_command(
         if should_refresh_source:
             if not graph_source.selections:
                 raise_usage("--refresh requires --source or inline source selectors")
+            github_settings = ctx.section("github", GithubSettings)
             for selection in graph_source.selections:
                 started_at = time.perf_counter()
                 result = source_commands._refresh_source(
@@ -226,6 +226,8 @@ def graph_command(
                     index=sqlite_index,
                     aliases=aliases,
                     settings=settings,
+                    github_settings=github_settings,
+                    http=ctx.http,
                     concurrency=git_concurrency,
                 )
                 echo(
@@ -271,14 +273,13 @@ def graph_command(
                 stale_after=settings.stale_after,
             )
         else:
-            github_settings = get_config_section("github", GithubSettings)
             if _should_use_live_dependencies(
                 direction=direction,
                 source_key=graph_source.key,
                 live=live,
             ):
-                core = get_core_settings()
-                with GithubClient(github_settings, http=core.http) as github:
+                github_settings = ctx.section("github", GithubSettings)
+                with GithubClient(github_settings, http=ctx.http) as github:
                     index = GithubDependencyIndex(
                         github=github,
                         wrapped=index,

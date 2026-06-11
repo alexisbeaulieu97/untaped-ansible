@@ -618,6 +618,8 @@ def test_graph_inline_upstream_refreshes_and_renders_impact(
         index: SqliteDependencyIndex,
         aliases: dict[str, str],
         settings,
+        github_settings,
+        http,
         concurrency: int,
     ) -> RefreshResult:
         del source, aliases, settings, concurrency
@@ -679,6 +681,8 @@ def test_graph_inline_source_reuses_fingerprint_cache_without_refresh(
         index: SqliteDependencyIndex,
         aliases: dict[str, str],
         settings,
+        github_settings,
+        http,
         concurrency: int,
     ) -> RefreshResult:
         nonlocal refresh_calls
@@ -852,6 +856,8 @@ def test_graph_repeated_sources_refresh_each_saved_source(
         index: SqliteDependencyIndex,
         aliases: dict[str, str],
         settings,
+        github_settings,
+        http,
         concurrency: int,
     ) -> RefreshResult:
         del aliases, settings, concurrency
@@ -1391,6 +1397,8 @@ def test_inline_source_cache_key_is_order_insensitive(tmp_path: Path, monkeypatc
         index: SqliteDependencyIndex,
         aliases: dict[str, str],
         settings,
+        github_settings,
+        http,
         concurrency: int,
     ) -> RefreshResult:
         nonlocal refresh_calls
@@ -1883,6 +1891,8 @@ def test_graph_with_source_refreshes_by_default_with_git_backend(
         index: SqliteDependencyIndex,
         aliases: dict[str, str],
         settings,
+        github_settings,
+        http,
         concurrency: int,
     ) -> RefreshResult:
         del source, aliases, settings
@@ -1940,6 +1950,8 @@ def test_graph_inline_upstream_with_ref_renders_all_matching_source_refs(
         index: SqliteDependencyIndex,
         aliases: dict[str, str],
         settings,
+        github_settings,
+        http,
         concurrency: int,
     ) -> RefreshResult:
         del aliases, settings, concurrency
@@ -2008,6 +2020,8 @@ def test_graph_inline_source_preserves_repeated_selectors(
         index: SqliteDependencyIndex,
         aliases: dict[str, str],
         settings,
+        github_settings,
+        http,
         concurrency: int,
     ) -> RefreshResult:
         del aliases, settings, concurrency

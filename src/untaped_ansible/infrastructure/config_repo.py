@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from pydantic import ValidationError
+from untaped.api import ConfigError, first_validation_error
 from untaped.config_file import (
     get_at_path,
     mutate_config,
@@ -12,7 +13,6 @@ from untaped.config_file import (
     set_at_path,
     unset_at_path,
 )
-from untaped.errors import ConfigError, first_validation_error
 
 from untaped_ansible.settings import SourceDefinition
 

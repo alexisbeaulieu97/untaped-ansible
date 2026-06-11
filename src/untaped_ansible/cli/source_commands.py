@@ -9,16 +9,15 @@ from base64 import b64encode
 from typing import Annotated
 
 from cyclopts import Parameter, validators
-from untaped import (
+from untaped.api import (
     ColumnsOption,
     FormatOption,
+    HttpSettings,
     ProfileOverrideOption,
     UntapedError,
     create_app,
     echo,
-    get_config_section,
-    get_core_settings,
-    profile_override,
+    plugin_context,
     render_rows,
     report_errors,
 )
@@ -106,7 +105,7 @@ def source_save_command(
         source_repo = SourceRepository()
         previous = source_repo.get(name)
         source_repo.upsert(source)
-        settings = get_config_section("ansible", AnsibleSettings)
+        settings = plugin_context().section("ansible", AnsibleSettings)
         if previous != source:
             SqliteDependencyIndex(settings.index_path).clear(_saved_source_key(name))
         echo(f"saved source {name!r}", err=True)
@@ -202,7 +201,7 @@ def source_edit_command(
             echo(f"source {name!r} unchanged", err=True)
             return
         source_repo.upsert(edited)
-        settings = get_config_section("ansible", AnsibleSettings)
+        settings = plugin_context().section("ansible", AnsibleSettings)
         SqliteDependencyIndex(settings.index_path).clear(_saved_source_key(name))
         echo(f"updated source {name!r}: {', '.join(changes)}", err=True)
 
@@ -237,7 +236,7 @@ def source_remove_command(name: Annotated[str, Parameter(help="Source name.")]) 
         removed = SourceRepository().remove(name)
         if not removed:
             raise UntapedError(f"unknown source: {name!r}")
-        settings = get_config_section("ansible", AnsibleSettings)
+        settings = plugin_context().section("ansible", AnsibleSettings)
         SqliteDependencyIndex(settings.index_path).clear(_saved_source_key(name))
         echo(f"removed source {name!r}", err=True)
 
@@ -251,8 +250,9 @@ def source_status_command(
     profile: ProfileOverrideOption = None,
 ) -> None:
     """Show cached source data status."""
-    with report_errors(), profile_override(profile):
-        settings = get_config_section("ansible", AnsibleSettings)
+    with report_errors():
+        ctx = plugin_context(profile)
+        settings = ctx.section("ansible", AnsibleSettings)
         index = SqliteDependencyIndex(settings.index_path)
         source_repo = SourceRepository()
         configured = {source.name: source for source in source_repo.entries()}
@@ -279,11 +279,12 @@ def source_refresh_command(
     profile: ProfileOverrideOption = None,
 ) -> None:
     """Refresh a saved source from GitHub."""
-    with report_errors(), profile_override(profile):
+    with report_errors():
+        ctx = plugin_context(profile)
         source = SourceRepository().get(name)
         if source is None:
             raise UntapedError(f"unknown source: {name!r}")
-        settings = get_config_section("ansible", AnsibleSettings)
+        settings = ctx.section("ansible", AnsibleSettings)
         aliases = AliasRepository().entries()
         git_concurrency = concurrency or settings.git_fetch_concurrency
         started_at = time.perf_counter()
@@ -293,6 +294,8 @@ def source_refresh_command(
             index=SqliteDependencyIndex(settings.index_path),
             aliases=aliases,
             settings=settings,
+            github_settings=ctx.section("github", GithubSettings),
+            http=ctx.http,
             concurrency=git_concurrency,
         )
         echo(
@@ -513,11 +516,11 @@ def _refresh_source(
     index: SqliteDependencyIndex,
     aliases: dict[str, str],
     settings: AnsibleSettings,
+    github_settings: GithubSettings,
+    http: HttpSettings,
     concurrency: int,
 ) -> RefreshResult:
-    github_settings = get_config_section("github", GithubSettings)
-    core = get_core_settings()
-    with GithubClient(github_settings, http=core.http) as github:
+    with GithubClient(github_settings, http=http) as github:
         token = (
             github_settings.token.get_secret_value().strip()
             if github_settings.token is not None

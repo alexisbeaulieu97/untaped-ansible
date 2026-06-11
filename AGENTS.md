@@ -21,35 +21,49 @@ resolution, output helpers, HTTP/TLS primitives, and shared errors.
 3. **Expose the plugin through the `untaped.plugins` entry point.**
    `ansible = "untaped_ansible.plugin:plugin"` is the public integration
    point. The plugin object must expose `id = "ansible"`, literal
-   `untaped_api_version = 2`, and `register(registry)`.
-4. **Use the 4-layer DDD layout.** `cli -> application -> domain`, with
+   `untaped_api_version = 3`, and `manifest()` returning a `PluginManifest`.
+   `plugin.py` must not import the CLI tree: the manifest's
+   `CliSpec(import_path="untaped_ansible.cli:app")` defers that import until
+   the `ansible` command is dispatched, and `untaped_ansible/__init__.py`
+   re-exports `app` lazily through a PEP 562 module `__getattr__` for the
+   same reason.
+4. **Import the plugin SDK from `untaped.api`.** Core helpers (`create_app`,
+   `report_errors`, `render_rows`, `plugin_context`, errors, options, …)
+   come from `untaped.api`, never from core internals. The only exception is
+   `untaped.config_file`, which the config repositories use for plugin-owned
+   state reads/writes; `untaped.testing` stays test-only. Command bodies
+   resolve settings once at the composition root via `plugin_context(profile)`
+   and read sections with `ctx.section("ansible", AnsibleSettings)`; helpers
+   like `_refresh_source` receive resolved GitHub/HTTP settings as arguments
+   instead of reading ambient config.
+5. **Use the 4-layer DDD layout.** `cli -> application -> domain`, with
    `infrastructure -> domain`; `application` and `infrastructure` must not
    import each other at runtime.
-5. **Declare ports in `application/ports.py`.** Use cases depend on the
+6. **Declare ports in `application/ports.py`.** Use cases depend on the
    narrowest `Protocol`; concrete adapters satisfy ports structurally.
-6. **Use absolute imports.** `from untaped_ansible...`, never relative imports.
-7. **Every source module has a module docstring.** Re-export `__init__.py`
+7. **Use absolute imports.** `from untaped_ansible...`, never relative imports.
+8. **Every source module has a module docstring.** Re-export `__init__.py`
    files are exempt.
-8. **Cyclopts command signatures are explicit.** Use
+9. **Cyclopts command signatures are explicit.** Use
    `Annotated[..., Parameter(...)]` and name documented commands/options
    explicitly. Required inputs are required positional-only params
    (`Parameter(help=...)` before `/`); a missing value renders
    `error: ... requires an argument` (exit 2) automatically — never an
    optional default plus a manual help dance.
-9. **stdout is data only.** Prompts, progress, and status messages go to
-   stderr via `echo(..., err=True)`.
-10. **GitHub behavior belongs in `untaped-github`.** If this plugin needs a
+10. **stdout is data only.** Prompts, progress, and status messages go to
+    stderr via `echo(..., err=True)`.
+11. **GitHub behavior belongs in `untaped-github`.** If this plugin needs a
     missing GitHub operation, add an intentional public API there and test it.
     Do not reach into private internals or duplicate GitHub clients here.
-11. **Finish with verification.** Run `uv run ruff check --fix`,
+12. **Finish with verification.** Run `uv run ruff check --fix`,
     `uv run ruff format`, `uv run mypy`, and `uv run pytest`.
 
 ## Architecture
 
 ```text
 src/untaped_ansible/
-├── __init__.py           # re-exports app
-├── plugin.py             # entry-point plugin object
+├── __init__.py           # lazy PEP 562 re-export of app
+├── plugin.py             # entry-point plugin object (manifest only, no CLI imports)
 ├── settings.py           # plugin-owned config/state model
 ├── cli/                  # Cyclopts composition root plus concern-specific commands
 ├── application/          # use cases and ports
@@ -57,10 +71,15 @@ src/untaped_ansible/
 └── infrastructure/       # SQLite cache, local filesystem/git adapters
 ```
 
-The plugin object registers profile settings, top-level state, the
-`ansible` Cyclopts command, and the packaged `untaped-ansible` agent skill.
-Keep that static skill asset current with major graph/source workflow
-changes.
+The plugin manifest declares profile settings, top-level state, the lazily
+imported `ansible` Cyclopts command, and the packaged `untaped-ansible`
+agent skill. Keep that static skill asset current with major graph/source
+workflow changes.
+
+Tests that invoke the Cyclopts app directly must run after the production
+plugin registration; `tests/conftest.py` discovers and registers installed
+plugins once so `plugin_context().section(...)` resolves registered config
+sections, and clears the settings cache around every test.
 
 `cli/commands.py` is the Ansible Cyclopts composition root only. Keep graph
 execution in `cli/graph_commands.py`, source management and refresh wiring in
