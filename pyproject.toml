@@ -12,7 +12,7 @@ dependencies = [
     "pydantic>=2.13.3",
     "pyyaml>=6.0.3",
     "untaped>=0.3.0",
-    "untaped-github>=0.2.0",
+    "untaped-github>=0.3.0",
 ]
 
 [project.entry-points."untaped.plugins"]
@@ -24,7 +24,7 @@ build-backend = "uv_build"
 
 [tool.uv.sources]
 untaped = { git = "https://github.com/alexisbeaulieu97/untaped" }
-untaped-github = { git = "https://github.com/alexisbeaulieu97/untaped-github" }
+untaped-github = { git = "file:///Users/alexisbeaulieu/Projects/untaped-dev/untaped-github", rev = "c64967abd15277022a592f8d6cc3c7c1b9be15ca" }
 
 [dependency-groups]
 dev = [
