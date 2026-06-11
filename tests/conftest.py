@@ -14,6 +14,8 @@ from untaped.api import PluginRegistry
 from untaped.plugins import discover_plugins, register_plugins
 from untaped.settings import get_settings
 
+# Discovery (not single-plugin registration): the ansible CLI also reads the
+# `github` section contributed by the untaped-github plugin in this venv.
 _registry = PluginRegistry()
 register_plugins(_registry, discover_plugins(_registry))
 if _registry.load_errors:
