@@ -22,6 +22,7 @@ from untaped_github import GithubClient, GithubSettings
 import untaped_ansible.cli.source_commands as source_commands
 from untaped_ansible.application import BuildGraph, GraphRequest
 from untaped_ansible.application.ports import DependencyIndex
+from untaped_ansible.cli._progress import StderrProgress
 from untaped_ansible.domain.graph import DependencyGraph
 from untaped_ansible.domain.identity import IdentityResolver
 from untaped_ansible.domain.models import DependencyDeclaration
@@ -214,22 +215,28 @@ def graph_command(
             live=live,
             refresh=refresh,
         )
+        refresh_warnings: list[str] = []
         if should_refresh_source:
             if not graph_source.selections:
                 raise_usage("--refresh requires --source or inline source selectors")
             github_settings = ctx.section("github", GithubSettings)
             for selection in graph_source.selections:
                 started_at = time.perf_counter()
-                result = source_commands._refresh_source(
-                    selection.definition,
-                    source_key=selection.key,
-                    index=sqlite_index,
-                    aliases=aliases,
-                    settings=settings,
-                    github_settings=github_settings,
-                    http=ctx.http,
-                    concurrency=git_concurrency,
-                )
+                progress = StderrProgress()
+                try:
+                    result = source_commands._refresh_source(
+                        selection.definition,
+                        source_key=selection.key,
+                        index=sqlite_index,
+                        aliases=aliases,
+                        settings=settings,
+                        github_settings=github_settings,
+                        http=ctx.http,
+                        concurrency=git_concurrency,
+                        on_progress=source_commands._progress_reporter(progress),
+                    )
+                finally:
+                    progress.finish()
                 echo(
                     source_commands._refresh_summary(
                         "refreshed" if refresh else "checked",
@@ -240,6 +247,12 @@ def graph_command(
                     ),
                     err=True,
                 )
+                source_commands._warn_low_rate_limit(result)
+                if result.failures:
+                    refresh_warnings.append(
+                        f"source refresh had {len(result.failures)} failures; "
+                        "data for those repos may be stale"
+                    )
 
         direction, graph_warnings = _effective_direction(
             target=target,
@@ -309,6 +322,7 @@ def graph_command(
         graph = _with_graph_warnings(
             graph,
             [
+                *refresh_warnings,
                 *graph_warnings,
                 *_empty_graph_warnings(
                     graph,

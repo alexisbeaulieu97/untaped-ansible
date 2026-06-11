@@ -14,10 +14,20 @@ from untaped.settings import get_settings
 from untaped.testing import CliInvoker
 
 from untaped_ansible import app
+from untaped_ansible.application.refresh_git_index import (
+    _aliases_fingerprint,
+    _dependency_paths_fingerprint,
+)
 from untaped_ansible.application.refresh_index import RefreshResult
 from untaped_ansible.cli import source_commands
-from untaped_ansible.domain.payloads import IndexedDependency, RefScan, SourceRepoMetadata
+from untaped_ansible.domain.payloads import (
+    IndexedDependency,
+    RefScan,
+    RepoFailure,
+    SourceRepoMetadata,
+)
 from untaped_ansible.infrastructure import SqliteDependencyIndex
+from untaped_ansible.settings import DEFAULT_DEPENDENCY_PATHS
 
 
 def _write_config(
@@ -70,34 +80,100 @@ def _mock_dependency_file(
     )
 
 
-def _mock_refresh_repo(
+def _graphql_repo_node(repo: str, *, sha: str, default_branch: str = "main") -> dict[str, object]:
+    empty_page = {"hasNextPage": False, "endCursor": None}
+    return {
+        "nameWithOwner": repo,
+        "defaultBranchRef": {"name": default_branch},
+        "heads": {
+            "pageInfo": empty_page,
+            "nodes": [{"name": default_branch, "target": {"oid": sha}}],
+        },
+        "tags": {"pageInfo": empty_page, "nodes": []},
+    }
+
+
+def _mock_refresh_repos(
     mock: respx.MockRouter,
+    repos: dict[str, str],
+    *,
+    missing: tuple[str, ...] = (),
+    rate_limit_remaining: int = 4900,
+) -> None:
+    """Mock source-refresh expansion (REST) and the GraphQL ref probe.
+
+    ``repos`` maps ``owner/name`` to the sha of its single ``heads/main``
+    ref; ``missing`` repos expand fine but probe as NOT_FOUND.
+    """
+    names = sorted([*repos, *missing])
+    data: dict[str, object] = {
+        "rateLimit": {
+            "cost": 1,
+            "remaining": rate_limit_remaining,
+            "resetAt": "2026-01-01T00:00:00Z",
+        }
+    }
+    errors: list[dict[str, object]] = []
+    for index, full_name in enumerate(names):
+        alias = f"r{index}"
+        owner, name = full_name.split("/", maxsplit=1)
+        mock.get(f"/repos/{owner}/{name}").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "full_name": full_name,
+                    "default_branch": "main",
+                    "clone_url": f"https://github.com/{full_name}.git",
+                },
+            )
+        )
+        if full_name in missing:
+            data[alias] = None
+            errors.append(
+                {
+                    "type": "NOT_FOUND",
+                    "path": [alias],
+                    "message": f"Could not resolve to a Repository named {full_name!r}.",
+                }
+            )
+            continue
+        data[alias] = _graphql_repo_node(full_name, sha=repos[full_name])
+    payload: dict[str, object] = {"data": data}
+    if errors:
+        payload["errors"] = errors
+    mock.post("/graphql").mock(return_value=httpx.Response(200, json=payload))
+
+
+def _seed_unchanged_scan(
+    index: SqliteDependencyIndex,
+    source_key: str,
     repo: str,
     *,
     sha: str,
-    content: str,
-    refs_path: str = "heads/main",
-    default_branch: str | None = "main",
+    dependencies: tuple[IndexedDependency, ...] = (),
 ) -> None:
-    owner, name = repo.split("/", maxsplit=1)
-    if default_branch is not None:
-        mock.get(f"/repos/{owner}/{name}").mock(
-            return_value=httpx.Response(200, json={"default_branch": default_branch})
-        )
-    mock.get(f"/repos/{owner}/{name}/git/matching-refs/{refs_path}").mock(
-        return_value=httpx.Response(
-            200,
-            json=[{"ref": "refs/heads/main", "object": {"sha": sha}}],
-        )
+    """Seed a scan the probe will consider unchanged (no git work needed)."""
+    now = datetime.now(UTC)
+    scan = RefScan(
+        source_key=source_key,
+        source_repo=repo,
+        ref_kind="heads",
+        source_ref="main",
+        source_sha=sha,
+        clone_url=f"https://github.com/{repo}.git",
+        clone_protocol="https",
+        dependency_paths_fingerprint=_dependency_paths_fingerprint(list(DEFAULT_DEPENDENCY_PATHS)),
+        aliases_fingerprint=_aliases_fingerprint({}),
+        checked_at=now,
+        indexed_at=now,
+        dependencies=dependencies,
     )
-    mock.get(f"/repos/{owner}/{name}/git/trees/{sha}").mock(
-        return_value=httpx.Response(
-            200,
-            json={"tree": [{"path": "roles/requirements.yml", "type": "blob"}]},
-        )
-    )
-    mock.get(f"/repos/{owner}/{name}/contents/roles/requirements.yml").mock(
-        return_value=httpx.Response(200, text=content)
+    index.commit_source_ref_refresh(
+        source_key,
+        scans=(scan,),
+        touches=(),
+        keep={(repo, "heads", "main")},
+        scanned_at=now,
     )
 
 
@@ -621,6 +697,7 @@ def test_graph_inline_upstream_refreshes_and_renders_impact(
         github_settings,
         http,
         concurrency: int,
+        on_progress=None,
     ) -> RefreshResult:
         del source, aliases, settings, concurrency
         _seed_index(
@@ -684,6 +761,7 @@ def test_graph_inline_source_reuses_fingerprint_cache_without_refresh(
         github_settings,
         http,
         concurrency: int,
+        on_progress=None,
     ) -> RefreshResult:
         nonlocal refresh_calls
         del source, aliases, settings, concurrency
@@ -859,6 +937,7 @@ def test_graph_repeated_sources_refresh_each_saved_source(
         github_settings,
         http,
         concurrency: int,
+        on_progress=None,
     ) -> RefreshResult:
         del aliases, settings, concurrency
         calls.append((source.name, source_key))
@@ -1400,6 +1479,7 @@ def test_inline_source_cache_key_is_order_insensitive(tmp_path: Path, monkeypatc
         github_settings,
         http,
         concurrency: int,
+        on_progress=None,
     ) -> RefreshResult:
         nonlocal refresh_calls
         del aliases, settings, concurrency
@@ -1894,6 +1974,7 @@ def test_graph_with_source_refreshes_by_default_with_git_backend(
         github_settings,
         http,
         concurrency: int,
+        on_progress=None,
     ) -> RefreshResult:
         del source, aliases, settings
         calls.append(concurrency)
@@ -1953,6 +2034,7 @@ def test_graph_inline_upstream_with_ref_renders_all_matching_source_refs(
         github_settings,
         http,
         concurrency: int,
+        on_progress=None,
     ) -> RefreshResult:
         del aliases, settings, concurrency
         captured["ref_kinds"] = source.ref_kinds
@@ -2023,6 +2105,7 @@ def test_graph_inline_source_preserves_repeated_selectors(
         github_settings,
         http,
         concurrency: int,
+        on_progress=None,
     ) -> RefreshResult:
         del aliases, settings, concurrency
         captured["orgs"] = source.orgs
@@ -2128,6 +2211,143 @@ def test_source_save_expands_bare_team_slug_with_single_org(tmp_path: Path, monk
 
     assert result.exit_code == 0, result.output
     assert yaml.safe_load(cfg.read_text())["ansible"]["sources"][0]["teams"] == ["acme/platform"]
+
+
+def test_source_refresh_partial_failure_exits_nonzero_and_saves_successes(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    index_path = tmp_path / "index.sqlite3"
+    _seed_unchanged_scan(SqliteDependencyIndex(index_path), "source:prod", "acme/ok", sha="sha-ok")
+    cfg = _write_config(
+        tmp_path,
+        index_path=index_path,
+        extra_profile={"github": {"token": "ghp_test"}},
+        top_level_ansible={"sources": [{"name": "prod", "repos": ["acme/gone", "acme/ok"]}]},
+    )
+    monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
+
+    with respx.mock(base_url="https://api.github.com") as mock:
+        _mock_refresh_repos(mock, {"acme/ok": "sha-ok"}, missing=("acme/gone",))
+        result = CliInvoker().invoke(app, ["source", "refresh", "prod"])
+
+    assert result.exit_code == 1
+    assert result.stdout == ""
+    assert "refreshed source 'prod':" in result.stderr
+    assert "failed acme/gone: " in result.stderr
+    assert "refresh completed with 1 repo failure(s); successes were saved" in result.output
+    # the succeeded repo's cached scan survived the partial failure
+    assert SqliteDependencyIndex(index_path).ref_scans(
+        "source:prod", "acme/ok", [("heads", "main")]
+    )
+
+
+def test_source_refresh_emits_progress_lines_on_stderr_in_non_tty_mode(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    index_path = tmp_path / "index.sqlite3"
+    _seed_unchanged_scan(SqliteDependencyIndex(index_path), "source:prod", "acme/ok", sha="sha-ok")
+    cfg = _write_config(
+        tmp_path,
+        index_path=index_path,
+        extra_profile={"github": {"token": "ghp_test"}},
+        top_level_ansible={"sources": [{"name": "prod", "repos": ["acme/ok"]}]},
+    )
+    monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
+
+    with respx.mock(base_url="https://api.github.com") as mock:
+        _mock_refresh_repos(mock, {"acme/ok": "sha-ok"})
+        result = CliInvoker().invoke(app, ["source", "refresh", "prod"])
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout == ""
+    assert "probing refs: 1/1 repos" in result.stderr
+    assert "fetching changes: 1/1 repos, 0 changed" in result.stderr
+
+
+def test_source_refresh_warns_when_graphql_rate_limit_is_low(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    index_path = tmp_path / "index.sqlite3"
+    _seed_unchanged_scan(SqliteDependencyIndex(index_path), "source:prod", "acme/ok", sha="sha-ok")
+    cfg = _write_config(
+        tmp_path,
+        index_path=index_path,
+        extra_profile={"github": {"token": "ghp_test"}},
+        top_level_ansible={"sources": [{"name": "prod", "repos": ["acme/ok"]}]},
+    )
+    monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
+
+    with respx.mock(base_url="https://api.github.com") as mock:
+        _mock_refresh_repos(mock, {"acme/ok": "sha-ok"}, rate_limit_remaining=200)
+        result = CliInvoker().invoke(app, ["source", "refresh", "prod"])
+
+    assert result.exit_code == 0, result.output
+    assert "warning: GitHub GraphQL rate limit is low: 200 points remaining" in result.stderr
+
+
+def test_graph_refresh_with_partial_failures_warns_and_proceeds(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    index_path = tmp_path / "index.sqlite3"
+    cfg = _write_config(
+        tmp_path,
+        index_path=index_path,
+        top_level_ansible={"sources": [{"name": "platform", "repos": ["acme/site"]}]},
+    )
+    monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
+
+    def fake_refresh(
+        source,
+        *,
+        source_key: str,
+        index: SqliteDependencyIndex,
+        aliases: dict[str, str],
+        settings,
+        github_settings,
+        http,
+        concurrency: int,
+        on_progress=None,
+    ) -> RefreshResult:
+        del source, aliases, settings, concurrency
+        _seed_index(
+            index,
+            source_key,
+            (
+                IndexedDependency(
+                    source_repo="acme/site",
+                    source_ref="main",
+                    dependency_repo="acme/base",
+                    dependency_name="base",
+                    dependency_version=None,
+                    source_path="roles/requirements.yml",
+                ),
+            ),
+        )
+        return RefreshResult(
+            source_key=source_key,
+            repos=2,
+            refs=1,
+            edges=1,
+            changed_refs=1,
+            failures=(RepoFailure(repo="acme/gone", reason="boom"),),
+        )
+
+    monkeypatch.setattr(source_commands, "_refresh_source", fake_refresh)
+
+    result = CliInvoker().invoke(
+        app,
+        ["graph", "acme/base", "--source", "platform", "--upstream", "--refresh"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert (
+        "warning: source refresh had 1 failures; data for those repos may be stale" in result.stdout
+    )
+    assert "    +-- acme/site@main" in result.stdout
 
 
 def teardown_module() -> None:

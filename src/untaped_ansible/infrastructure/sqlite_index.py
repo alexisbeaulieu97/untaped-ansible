@@ -83,16 +83,21 @@ class SqliteDependencyIndex:
         keep: set[tuple[str, str, str]],
         repo_metadata: tuple[SourceRepoMetadata, ...] = (),
         scanned_at: datetime,
+        failed_repos: frozenset[str] = frozenset(),
     ) -> None:
         """Commit a refresh; ``scans`` must be unique per (source_key, source_repo,
         ref_kind, source_ref) -- duplicates raise IntegrityError inside the
-        transaction instead of last-wins."""
+        transaction instead of last-wins. Cached refs and repo metadata for
+        ``failed_repos`` are preserved even though they are absent from
+        ``keep``."""
         self._path.parent.mkdir(parents=True, exist_ok=True)
         with self._db() as db:
             _replace_ref_scans(db, scans)
             _touch_ref_scans(db, touches)
-            _prune_source_refs(db, source_key, keep)
-            _replace_source_repo_metadata(db, source_key, repo_metadata)
+            _prune_source_refs(db, source_key, keep, preserve_repos=failed_repos)
+            _replace_source_repo_metadata(
+                db, source_key, repo_metadata, preserve_repos=failed_repos
+            )
             _refresh_source_run_from_ref_scans(db, source_key, scanned_at=scanned_at)
             _delete_orphan_snapshots(db)
 
@@ -419,19 +424,24 @@ def _replace_source_repo_metadata(
     db: sqlite3.Connection,
     source_key: str,
     metadata: tuple[SourceRepoMetadata, ...],
+    *,
+    preserve_repos: frozenset[str] = frozenset(),
 ) -> None:
     by_repo = {row.source_repo: row for row in metadata if row.source_key == source_key}
-    if not by_repo:
+    retained = sorted(set(by_repo) | preserve_repos)
+    if not retained:
         db.execute("delete from source_repo_metadata where source_key = ?", (source_key,))
         return
-    placeholders = ",".join("?" for _ in by_repo)
+    placeholders = ",".join("?" for _ in retained)
     db.execute(
         f"""
         delete from source_repo_metadata
         where source_key = ? and source_repo not in ({placeholders})
         """,
-        (source_key, *by_repo),
+        (source_key, *retained),
     )
+    if not by_repo:
+        return
     db.executemany(
         """
         insert into source_repo_metadata(source_key, source_repo, default_branch)
@@ -450,6 +460,8 @@ def _prune_source_refs(
     db: sqlite3.Connection,
     source_key: str,
     keep: set[tuple[str, str, str]],
+    *,
+    preserve_repos: frozenset[str] = frozenset(),
 ) -> None:
     rows = db.execute(
         """
@@ -462,7 +474,7 @@ def _prune_source_refs(
     stale: list[tuple[str, str, str]] = []
     for row in rows:
         key = (str(row["source_repo"]), str(row["ref_kind"]), str(row["source_ref"]))
-        if key not in keep:
+        if key not in keep and key[0] not in preserve_repos:
             stale.append(key)
     if stale:
         db.executemany(

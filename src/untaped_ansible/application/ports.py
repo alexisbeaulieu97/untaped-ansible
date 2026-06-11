@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable, Sequence
 from datetime import datetime
 from typing import Protocol
 
@@ -58,11 +58,26 @@ class IncrementalDependencyIndexWriter(Protocol):
         keep: set[tuple[str, str, str]],
         repo_metadata: tuple[payloads.SourceRepoMetadata, ...] = (),
         scanned_at: datetime,
+        failed_repos: frozenset[str] = frozenset(),
     ) -> None:
         """Commit a refresh; ``scans`` must be unique per (source_key, source_repo,
         ref_kind, source_ref) -- duplicates raise IntegrityError inside the
-        transaction instead of last-wins."""
+        transaction instead of last-wins. Refs and repo metadata cached for
+        ``failed_repos`` survive the prune even though they contribute nothing
+        to ``keep``."""
         ...
+
+
+class RefProbe(Protocol):
+    """Batched remote ref freshness probe for many repositories."""
+
+    def probe(
+        self,
+        repos: Sequence[str],
+        *,
+        kinds: Sequence[str],
+        on_progress: Callable[[int, int], None] | None = None,
+    ) -> payloads.ProbeReport: ...
 
 
 class GitHubDependencyReader(Protocol):

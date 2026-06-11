@@ -4,18 +4,20 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Iterable
-from concurrent.futures import ThreadPoolExecutor
+from collections.abc import Callable, Iterable
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Protocol
+from typing import Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict
+from untaped.api import HttpError, UntapedError
 
 from untaped_ansible.application.ports import (
     GitHubDependencyReader,
     IncrementalDependencyIndexWriter,
+    RefProbe,
 )
 from untaped_ansible.application.refresh_index import RefreshResult
 from untaped_ansible.application.source_refs import (
@@ -23,18 +25,26 @@ from untaped_ansible.application.source_refs import (
     pattern_matches,
     source_ref_selections,
 )
+from untaped_ansible.domain.errors import GitCacheError
 from untaped_ansible.domain.identity import IdentityResolver
 from untaped_ansible.domain.models import ParseReport
 from untaped_ansible.domain.parser import parse_dependency_file
 from untaped_ansible.domain.payloads import (
     GitRef,
     IndexedDependency,
+    ProbedRepo,
+    RefreshProgressEvent,
     RefScan,
     RefScanMetadata,
     RefScanTouch,
+    RepoFailure,
     SourceRepoMetadata,
 )
 from untaped_ansible.settings import SourceDefinition, normalize_team_refs
+
+ProgressCallback = Callable[[RefreshProgressEvent], None]
+
+_REPO_FAILURE_ERRORS = (GitCacheError, HttpError, UntapedError)
 
 
 class GitCache(Protocol):
@@ -58,16 +68,6 @@ class GitCache(Protocol):
         auth_header: str | None,
     ) -> None: ...
 
-    def list_remote_refs(
-        self,
-        url: str,
-        *,
-        namespaces: list[str],
-        auth_header: str | None,
-    ) -> list[GitRef]: ...
-
-    def list_refs(self, bare_path: Path, kind: str) -> list[GitRef]: ...
-
     def read_file(
         self,
         bare_path: Path,
@@ -88,15 +88,6 @@ class _RepoCandidate(BaseModel):
     html_url: str | None = None
 
 
-class _RefSelection(BaseModel):
-    model_config = ConfigDict(frozen=True)
-
-    kind: str
-    patterns: tuple[str, ...]
-    refspecs: tuple[str, ...]
-    namespaces: tuple[str, ...] = ()
-
-
 @dataclass(frozen=True)
 class _RepoRefreshResult:
     selected: frozenset[tuple[str, str, str]]
@@ -104,6 +95,13 @@ class _RepoRefreshResult:
     touches: tuple[RefScanTouch, ...]
     repo_metadata: SourceRepoMetadata
     ignored_collections: frozenset[str]
+
+
+@dataclass(frozen=True)
+class _RepoRefreshTask:
+    repo: _RepoCandidate
+    default_branch: str
+    refs: tuple[GitRef, ...]
 
 
 @dataclass(frozen=True)
@@ -120,6 +118,7 @@ class RefreshGitSourceIndex:
         *,
         github: GitHubDependencyReader,
         git: GitCache,
+        probe: RefProbe,
         index: IncrementalDependencyIndexWriter,
         aliases: dict[str, str],
         default_dependency_paths: list[str],
@@ -130,13 +129,18 @@ class RefreshGitSourceIndex:
         auth_header: str | None,
         ref_scan_default: RefScanDefault = "all",
         concurrency: int = 8,
+        probe_concurrency: int = 8,
+        on_progress: ProgressCallback | None = None,
     ) -> None:
         if clone_protocol not in {"https", "ssh"}:
             raise ValueError("clone_protocol must be 'https' or 'ssh'")
         if concurrency < 1 or concurrency > 32:
             raise ValueError("concurrency must be between 1 and 32")
+        if probe_concurrency < 1 or probe_concurrency > 32:
+            raise ValueError("probe_concurrency must be between 1 and 32")
         self._github = github
         self._git = git
+        self._probe = probe
         self._index = index
         self._aliases = aliases
         self._default_dependency_paths = default_dependency_paths
@@ -147,42 +151,45 @@ class RefreshGitSourceIndex:
         self._auth_header = auth_header if clone_protocol == "https" else None
         self._ref_scan_default = ref_scan_default
         self._concurrency = concurrency
+        self._probe_concurrency = probe_concurrency
+        self._on_progress = on_progress
 
     def __call__(self, source: SourceDefinition, *, source_key: str) -> RefreshResult:
         repos = self._expand_repos(source)
+        probe_report = self._probe.probe(
+            [repo.full_name for repo in repos],
+            kinds=self._probe_kinds(source),
+            on_progress=self._probe_progress,
+        )
+        failures: dict[str, str] = dict(probe_report.failures)
+        tasks = [
+            self._repo_refresh_task(source, repo, probe_report.repos[repo.full_name])
+            for repo in repos
+            if repo.full_name in probe_report.repos
+        ]
+
         selected: set[tuple[str, str, str]] = set()
         ignored_collections: set[str] = set()
         paths = source.dependency_paths or self._default_dependency_paths
-        paths_fingerprint = _dependency_paths_fingerprint(paths)
-        aliases_fingerprint = _aliases_fingerprint(self._aliases)
         checked_at = datetime.now(UTC)
         pending_scans: list[RefScan] = []
         pending_touches: list[RefScanTouch] = []
         pending_repo_metadata: list[SourceRepoMetadata] = []
 
-        def refresh_one(repo: _RepoCandidate) -> _RepoRefreshResult:
-            return self._refresh_repo(
-                repo,
-                source=source,
-                source_key=source_key,
-                paths=paths,
-                paths_fingerprint=paths_fingerprint,
-                aliases_fingerprint=aliases_fingerprint,
-                checked_at=checked_at,
-            )
-
-        if len(repos) <= 1 or self._concurrency == 1:
-            results = [refresh_one(repo) for repo in repos]
-        else:
-            with ThreadPoolExecutor(max_workers=min(self._concurrency, len(repos))) as executor:
-                results = list(executor.map(refresh_one, repos))
-
-        for result in results:
-            selected.update(result.selected)
-            ignored_collections.update(result.ignored_collections)
-            pending_scans.extend(result.scans)
-            pending_touches.extend(result.touches)
-            pending_repo_metadata.append(result.repo_metadata)
+        for full_name, outcome in self._refresh_repos(
+            tasks,
+            source_key=source_key,
+            paths=paths,
+            checked_at=checked_at,
+        ):
+            if isinstance(outcome, str):
+                failures[full_name] = outcome
+                continue
+            selected.update(outcome.selected)
+            ignored_collections.update(outcome.ignored_collections)
+            pending_scans.extend(outcome.scans)
+            pending_touches.extend(outcome.touches)
+            pending_repo_metadata.append(outcome.repo_metadata)
 
         self._index.commit_source_ref_refresh(
             source_key,
@@ -191,6 +198,7 @@ class RefreshGitSourceIndex:
             keep=selected,
             repo_metadata=tuple(pending_repo_metadata),
             scanned_at=checked_at,
+            failed_repos=frozenset(failures),
         )
         status = self._index.status(source_key)
         return RefreshResult(
@@ -201,34 +209,120 @@ class RefreshGitSourceIndex:
             ignored_collections=tuple(sorted(ignored_collections)),
             changed_refs=len(pending_scans),
             unchanged_refs=len(pending_touches),
+            failures=tuple(
+                RepoFailure(repo=repo, reason=failures[repo]) for repo in sorted(failures)
+            ),
+            rate_limit_remaining=probe_report.rate_limit_remaining,
+        )
+
+    def _refresh_repos(
+        self,
+        tasks: list[_RepoRefreshTask],
+        *,
+        source_key: str,
+        paths: list[str],
+        checked_at: datetime,
+    ) -> Iterable[tuple[str, _RepoRefreshResult | str]]:
+        """Run per-repo fetch/parse workers; yield results or failure reasons."""
+        paths_fingerprint = _dependency_paths_fingerprint(paths)
+        aliases_fingerprint = _aliases_fingerprint(self._aliases)
+        total = len(tasks)
+        done = 0
+        changed = 0
+
+        def refresh_one(task: _RepoRefreshTask) -> _RepoRefreshResult:
+            return self._refresh_repo(
+                task,
+                source_key=source_key,
+                paths=paths,
+                paths_fingerprint=paths_fingerprint,
+                aliases_fingerprint=aliases_fingerprint,
+                checked_at=checked_at,
+            )
+
+        def outcome_of(task: _RepoRefreshTask) -> tuple[str, _RepoRefreshResult | str]:
+            try:
+                return task.repo.full_name, refresh_one(task)
+            except _REPO_FAILURE_ERRORS as exc:
+                return task.repo.full_name, str(exc) or type(exc).__name__
+
+        if len(tasks) <= 1 or self._concurrency == 1:
+            for task in tasks:
+                full_name, outcome = outcome_of(task)
+                done += 1
+                changed += len(outcome.scans) if isinstance(outcome, _RepoRefreshResult) else 0
+                self._emit_progress("fetching", done=done, total=total, changed=changed)
+                yield full_name, outcome
+            return
+
+        with ThreadPoolExecutor(max_workers=min(self._concurrency, len(tasks))) as executor:
+            futures = [executor.submit(outcome_of, task) for task in tasks]
+            for future in as_completed(futures):
+                full_name, outcome = future.result()
+                done += 1
+                changed += len(outcome.scans) if isinstance(outcome, _RepoRefreshResult) else 0
+                self._emit_progress("fetching", done=done, total=total, changed=changed)
+                yield full_name, outcome
+
+    def _probe_kinds(self, source: SourceDefinition) -> tuple[str, ...]:
+        """Union of ref kinds needed across all repos.
+
+        Kind selection in :func:`source_ref_selections` depends only on
+        ``ref_kinds``/``ref_patterns``/``ref_scan_default``; the default
+        branch only narrows patterns, so any placeholder works here.
+        """
+        selections = source_ref_selections(
+            source,
+            default_branch="HEAD",
+            ref_scan_default=self._ref_scan_default,
+        )
+        return tuple(dict.fromkeys(selection.kind for selection in selections))
+
+    def _repo_refresh_task(
+        self,
+        source: SourceDefinition,
+        repo: _RepoCandidate,
+        probed: ProbedRepo,
+    ) -> _RepoRefreshTask:
+        default_branch = probed.default_branch or repo.default_branch
+        selections = source_ref_selections(
+            source,
+            default_branch=default_branch,
+            ref_scan_default=self._ref_scan_default,
+        )
+        selected: dict[tuple[str, str], GitRef] = {}
+        for selection in selections:
+            for ref in probed.refs:
+                if ref.kind != selection.kind:
+                    continue
+                if not pattern_matches(ref.name, selection.patterns):
+                    continue
+                selected[(ref.kind, ref.name)] = ref
+        return _RepoRefreshTask(
+            repo=repo,
+            default_branch=default_branch,
+            refs=tuple(selected[key] for key in sorted(selected)),
         )
 
     def _refresh_repo(
         self,
-        repo: _RepoCandidate,
+        task: _RepoRefreshTask,
         *,
-        source: SourceDefinition,
         source_key: str,
         paths: list[str],
         paths_fingerprint: str,
         aliases_fingerprint: str,
         checked_at: datetime,
     ) -> _RepoRefreshResult:
+        repo = task.repo
         selected: set[tuple[str, str, str]] = set()
         ignored_collections: set[str] = set()
         pending_scans: list[RefScan] = []
         pending_touches: list[RefScanTouch] = []
         clone_url = _clone_url(repo, self._clone_protocol)
-        selections = _ref_selections(source, repo.default_branch, self._ref_scan_default)
-        refs = _selected_remote_refs(
-            self._git,
-            clone_url,
-            selections,
-            auth_header=self._auth_header,
-        )
-        metadata_by_ref = self._ref_scan_metadata(source_key, repo.full_name, refs)
+        metadata_by_ref = self._ref_scan_metadata(source_key, repo.full_name, task.refs)
         changed_refs: list[GitRef] = []
-        for ref in refs:
+        for ref in task.refs:
             selected.add((repo.full_name, ref.kind, ref.name))
             metadata = metadata_by_ref.get((ref.kind, ref.name))
             if (
@@ -250,16 +344,17 @@ class RefreshGitSourceIndex:
                 )
                 continue
             changed_refs.append(ref)
+        repo_metadata = SourceRepoMetadata(
+            source_key=source_key,
+            source_repo=repo.full_name,
+            default_branch=task.default_branch,
+        )
         if not changed_refs:
             return _RepoRefreshResult(
                 selected=frozenset(selected),
                 scans=(),
                 touches=tuple(pending_touches),
-                repo_metadata=SourceRepoMetadata(
-                    source_key=source_key,
-                    source_repo=repo.full_name,
-                    default_branch=repo.default_branch,
-                ),
+                repo_metadata=repo_metadata,
                 ignored_collections=frozenset(),
             )
 
@@ -314,34 +409,92 @@ class RefreshGitSourceIndex:
             selected=frozenset(selected),
             scans=tuple(pending_scans),
             touches=tuple(pending_touches),
-            repo_metadata=SourceRepoMetadata(
-                source_key=source_key,
-                source_repo=repo.full_name,
-                default_branch=repo.default_branch,
-            ),
+            repo_metadata=repo_metadata,
             ignored_collections=frozenset(ignored_collections),
         )
 
     def _expand_repos(self, source: SourceDefinition) -> list[_RepoCandidate]:
-        repos: dict[str, _RepoCandidate] = {}
-        for repo in source.repos:
+        """Expand explicit repos, orgs, and teams into candidates, in parallel.
+
+        Expansion failures propagate: an unknown org/team/repo is a source
+        misconfiguration, not a per-repo refresh failure.
+        """
+        expansions: list[Callable[[], list[_RepoCandidate]]] = []
+
+        def expand_repo(repo: str) -> Callable[[], list[_RepoCandidate]]:
             owner, name = repo.split("/", maxsplit=1)
-            candidate = _repo_candidate(self._github.get_repository(owner, name), fallback=repo)
-            repos[candidate.full_name] = candidate
-        for org in source.orgs:
-            for candidate in _repo_candidates(self._github.list_org_repos(org)):
-                repos.setdefault(candidate.full_name, candidate)
-        for team in normalize_team_refs(source.teams, source.orgs):
+            return lambda: [
+                _repo_candidate(self._github.get_repository(owner, name), fallback=repo)
+            ]
+
+        def expand_org(org: str) -> Callable[[], list[_RepoCandidate]]:
+            return lambda: _repo_candidates(self._github.list_org_repos(org))
+
+        def expand_team(team: str) -> Callable[[], list[_RepoCandidate]]:
             org, slug = _split_team(team)
-            for candidate in _repo_candidates(self._github.list_team_repos(org, slug)):
-                repos.setdefault(candidate.full_name, candidate)
+            return lambda: _repo_candidates(self._github.list_team_repos(org, slug))
+
+        explicit_count = len(source.repos)
+        expansions.extend(expand_repo(repo) for repo in source.repos)
+        expansions.extend(expand_org(org) for org in source.orgs)
+        expansions.extend(
+            expand_team(team) for team in normalize_team_refs(source.teams, source.orgs)
+        )
+
+        results = self._run_expansions(expansions)
+
+        repos: dict[str, _RepoCandidate] = {}
+        for index, candidates in enumerate(results):
+            for candidate in candidates:
+                if index < explicit_count:
+                    repos[candidate.full_name] = candidate
+                else:
+                    repos.setdefault(candidate.full_name, candidate)
         return [repos[name] for name in sorted(repos)]
+
+    def _run_expansions(
+        self,
+        expansions: list[Callable[[], list[_RepoCandidate]]],
+    ) -> list[list[_RepoCandidate]]:
+        total = len(expansions)
+        if total <= 1 or self._probe_concurrency == 1:
+            results = []
+            for index, expansion in enumerate(expansions):
+                results.append(expansion())
+                self._emit_progress("expanding", done=index + 1, total=total)
+            return results
+        done = 0
+        with ThreadPoolExecutor(max_workers=min(self._probe_concurrency, total)) as executor:
+            futures: list[Future[list[_RepoCandidate]]] = [
+                executor.submit(expansion) for expansion in expansions
+            ]
+            for _ in as_completed(futures):
+                done += 1
+                self._emit_progress("expanding", done=done, total=total)
+            return [future.result() for future in futures]
+
+    def _probe_progress(self, done: int, total: int) -> None:
+        self._emit_progress("probing", done=done, total=total)
+
+    def _emit_progress(
+        self,
+        phase: Literal["expanding", "probing", "fetching"],
+        *,
+        done: int,
+        total: int,
+        changed: int | None = None,
+    ) -> None:
+        if self._on_progress is None:
+            return
+        self._on_progress(
+            RefreshProgressEvent(phase=phase, done=done, total=total, changed=changed)
+        )
 
     def _ref_scan_metadata(
         self,
         source_key: str,
         repo: str,
-        refs: list[GitRef],
+        refs: tuple[GitRef, ...],
     ) -> dict[tuple[str, str], RefScanMetadata]:
         return self._index.ref_scans(
             source_key,
@@ -401,75 +554,6 @@ class RefreshGitSourceIndex:
                     )
                 )
         return edges
-
-
-def _ref_selections(
-    source: SourceDefinition,
-    default_branch: str,
-    ref_scan_default: RefScanDefault,
-) -> list[_RefSelection]:
-    selections: list[_RefSelection] = []
-    for selection in source_ref_selections(
-        source,
-        default_branch=default_branch,
-        ref_scan_default=ref_scan_default,
-    ):
-        refspecs = tuple(_namespace_refspec(namespace) for namespace in selection.namespaces)
-        selections.append(
-            _RefSelection(
-                kind=selection.kind,
-                patterns=selection.patterns,
-                refspecs=refspecs,
-                namespaces=tuple(selection.namespaces),
-            )
-        )
-    return selections
-
-
-def _namespace_refspec(namespace: str) -> str:
-    kind, _, suffix = namespace.partition("/")
-    if not suffix:
-        return f"+refs/{kind}/*:refs/{kind}/*"
-    if suffix.endswith("/"):
-        return f"+refs/{kind}/{suffix}*:refs/{kind}/{suffix}*"
-    return f"+refs/{kind}/{suffix}:refs/{kind}/{suffix}"
-
-
-def _selected_refs(git: GitCache, bare: Path, selections: list[_RefSelection]) -> list[GitRef]:
-    selected: dict[tuple[str, str], GitRef] = {}
-    refs_by_kind = {
-        kind: git.list_refs(bare, kind)
-        for kind in sorted({selection.kind for selection in selections})
-    }
-    for selection in selections:
-        for ref in refs_by_kind[selection.kind]:
-            if not pattern_matches(ref.name, selection.patterns):
-                continue
-            selected[(ref.kind, ref.name)] = ref
-    return [selected[key] for key in sorted(selected)]
-
-
-def _selected_remote_refs(
-    git: GitCache,
-    url: str,
-    selections: list[_RefSelection],
-    *,
-    auth_header: str | None,
-) -> list[GitRef]:
-    selected: dict[tuple[str, str], GitRef] = {}
-    namespaces = sorted(
-        {namespace for selection in selections for namespace in selection.namespaces}
-    )
-    refs = git.list_remote_refs(url, namespaces=namespaces, auth_header=auth_header)
-    refs_by_kind: dict[str, list[GitRef]] = {}
-    for ref in refs:
-        refs_by_kind.setdefault(ref.kind, []).append(ref)
-    for selection in selections:
-        for ref in refs_by_kind.get(selection.kind, []):
-            if not pattern_matches(ref.name, selection.patterns):
-                continue
-            selected[(ref.kind, ref.name)] = ref
-    return [selected[key] for key in sorted(selected)]
 
 
 def _exact_refspec(ref: GitRef) -> str:

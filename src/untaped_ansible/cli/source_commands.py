@@ -6,6 +6,7 @@ import hashlib
 import json
 import time
 from base64 import b64encode
+from collections.abc import Callable
 from typing import Annotated
 
 from cyclopts import Parameter, validators
@@ -25,8 +26,11 @@ from untaped_github import GithubClient, GithubSettings
 
 from untaped_ansible.application.refresh_git_index import RefreshGitSourceIndex
 from untaped_ansible.application.refresh_index import RefreshResult
+from untaped_ansible.cli._progress import StderrProgress
+from untaped_ansible.domain.payloads import RefreshProgressEvent
 from untaped_ansible.infrastructure import (
     AliasRepository,
+    GithubRefProbe,
     GitRepositoryCache,
     SourceRepository,
     SqliteDependencyIndex,
@@ -34,6 +38,7 @@ from untaped_ansible.infrastructure import (
 from untaped_ansible.settings import AnsibleSettings, SourceDefinition, normalize_team_refs
 
 _FINGERPRINT_HEX_CHARS = 16
+_LOW_RATE_LIMIT_THRESHOLD = 500
 
 ConcurrencyOption = Annotated[
     int | None,
@@ -288,16 +293,21 @@ def source_refresh_command(
         aliases = AliasRepository().entries()
         git_concurrency = concurrency or settings.git_fetch_concurrency
         started_at = time.perf_counter()
-        result = _refresh_source(
-            source,
-            source_key=_saved_source_key(name),
-            index=SqliteDependencyIndex(settings.index_path),
-            aliases=aliases,
-            settings=settings,
-            github_settings=ctx.section("github", GithubSettings),
-            http=ctx.http,
-            concurrency=git_concurrency,
-        )
+        progress = StderrProgress()
+        try:
+            result = _refresh_source(
+                source,
+                source_key=_saved_source_key(name),
+                index=SqliteDependencyIndex(settings.index_path),
+                aliases=aliases,
+                settings=settings,
+                github_settings=ctx.section("github", GithubSettings),
+                http=ctx.http,
+                concurrency=git_concurrency,
+                on_progress=_progress_reporter(progress),
+            )
+        finally:
+            progress.finish()
         echo(
             _refresh_summary(
                 "refreshed",
@@ -308,6 +318,14 @@ def source_refresh_command(
             ),
             err=True,
         )
+        _warn_low_rate_limit(result)
+        if result.failures:
+            for failure in result.failures:
+                echo(f"failed {failure.repo}: {failure.reason}", err=True)
+            raise UntapedError(
+                f"refresh completed with {len(result.failures)} repo failure(s); "
+                "successes were saved"
+            )
 
 
 def _source_definition(
@@ -519,6 +537,7 @@ def _refresh_source(
     github_settings: GithubSettings,
     http: HttpSettings,
     concurrency: int,
+    on_progress: Callable[[RefreshProgressEvent], None] | None = None,
 ) -> RefreshResult:
     with GithubClient(github_settings, http=http) as github:
         token = (
@@ -529,6 +548,7 @@ def _refresh_source(
         result = RefreshGitSourceIndex(
             github=github,
             git=GitRepositoryCache(),
+            probe=GithubRefProbe(github, concurrency=settings.probe_concurrency),
             index=index,
             aliases=aliases,
             default_dependency_paths=settings.dependency_paths,
@@ -538,9 +558,44 @@ def _refresh_source(
             blob_filter=settings.git_blob_filter,
             auth_header=_git_auth_header(token) if token else None,
             concurrency=concurrency,
+            probe_concurrency=settings.probe_concurrency,
             ref_scan_default=settings.ref_scan_default,
+            on_progress=on_progress,
         )(source, source_key=source_key)
     return result
+
+
+def _progress_reporter(progress: StderrProgress) -> Callable[[RefreshProgressEvent], None]:
+    last_phase: str | None = None
+
+    def report(event: RefreshProgressEvent) -> None:
+        nonlocal last_phase
+        if event.phase != last_phase:
+            last_phase = event.phase
+            progress.reset_throttle()
+        fraction = event.done / event.total if event.total else None
+        progress.update(_format_progress(event), fraction=fraction)
+
+    return report
+
+
+def _format_progress(event: RefreshProgressEvent) -> str:
+    if event.phase == "expanding":
+        return f"expanding source: {event.done}/{event.total} selectors"
+    noun = "probing refs" if event.phase == "probing" else "fetching changes"
+    message = f"{noun}: {event.done}/{event.total} repos"
+    if event.changed is not None:
+        message = f"{message}, {event.changed} changed"
+    return message
+
+
+def _warn_low_rate_limit(result: RefreshResult) -> None:
+    remaining = result.rate_limit_remaining
+    if remaining is not None and remaining < _LOW_RATE_LIMIT_THRESHOLD:
+        echo(
+            f"warning: GitHub GraphQL rate limit is low: {remaining} points remaining",
+            err=True,
+        )
 
 
 def _refresh_summary(

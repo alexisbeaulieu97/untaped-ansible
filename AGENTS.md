@@ -194,17 +194,50 @@ repo's default branch under `refs/heads/`. `--ref-pattern` narrows source refs
 across branches and tags unless paired with `--ref-kind`; `--ref-kind tags`
 without a pattern scans all tags.
 
-Source refresh is git-only. Git refresh keeps bare repositories under
-`ansible.repo_cache_path`, checks selected remote ref SHAs before touching the
-local bare cache, fetches only changed or missing refs, reads dependency files
-with Git object plumbing, and commits SQLite ref scans per `(source_key, repo,
-ref_kind, ref_name)`. Do not create working checkouts for source indexing. Do
-not reintroduce `ansible.cache_backend`, `--cache-backend`, or a REST/API
-source-refresh fallback.
-Git source refresh supports bounded per-repo concurrency through
-`ansible.git_fetch_concurrency` and `--concurrency`; repo/team/org expansion
-remains serial, and SQLite mutation remains a single atomic commit after repo
-workers finish successfully. Refresh status and progress belong on stderr.
+Source refresh is git-only for data transport. A refresh runs three phases:
+
+1. **Expansion** resolves explicit repos, orgs, and teams into a deduped,
+   sorted repo list through a thread pool bounded by
+   `ansible.probe_concurrency`. Explicit repos win over org/team listings.
+   Expansion failures are fatal: an unknown org/team/repo is a source
+   misconfiguration, not a per-repo failure.
+2. **Freshness probe** is GraphQL-only: one `RefProbe.probe()` call
+   (`infrastructure/github_ref_probe.py` wrapping
+   `GithubClient.batch_repo_refs`) covers every repo with the union of
+   needed ref kinds, driving ~50-repo aliased chunks concurrently under
+   `ansible.probe_concurrency`. The probe also supplies each repo's exact
+   default branch (expansion metadata is the fallback) and the minimum
+   GraphQL `rate_limit_remaining` across chunks; the CLI warns on stderr
+   when that drops below 500. Do not reintroduce `git ls-remote` ref
+   checks.
+3. **Fetch/parse** keeps bare repositories under `ansible.repo_cache_path`,
+   fetches only changed or missing refs (bounded by
+   `ansible.git_fetch_concurrency` / `--concurrency`), reads dependency
+   files with Git object plumbing, and commits SQLite ref scans per
+   `(source_key, repo, ref_kind, ref_name)` in one atomic transaction.
+
+Refresh is resilient to per-repo failures. Probe misses (missing or
+inaccessible repos) and per-repo fetch/parse errors (`GitCacheError`,
+`HttpError`, `UntapedError`) are recorded as `RefreshResult.failures`
+instead of aborting the run, and pruning is scoped to succeeded repos: a
+failed repo's previously cached refs and repo metadata must survive the
+commit (`commit_source_ref_refresh(..., failed_repos=...)`). After the
+summary, `source refresh` echoes each `failed <repo>: <reason>` to stderr
+and exits 1 (`refresh completed with N repo failure(s); successes were
+saved`); the graph refresh path instead prepends a graph warning and
+proceeds with possibly stale data for the failed repos.
+
+The application layer stays UI-free: `RefreshGitSourceIndex` emits
+`RefreshProgressEvent` payloads (phase `expanding`/`probing`/`fetching`
+with done/total/changed counts) through an optional `on_progress`
+callback, and the CLI renders them through `cli/_progress.py`
+(`StderrProgress`): in-place `\r` updates on a TTY, throttled lines
+(~2s or 10% steps) otherwise. Refresh status and progress belong on
+stderr; stdout stays data-only.
+
+Do not create working checkouts for source indexing. Do not reintroduce
+`ansible.cache_backend`, `--cache-backend`, or a REST/API source-refresh
+fallback.
 
 Saving or editing a source clears cached source data only when the saved
 definition changes. Re-saving or editing to an identical source must preserve
