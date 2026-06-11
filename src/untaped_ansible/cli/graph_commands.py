@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import time
 from configparser import ConfigParser
 from dataclasses import dataclass
 from pathlib import Path
@@ -22,7 +21,7 @@ from untaped_github import GithubClient, GithubSettings
 import untaped_ansible.cli.source_commands as source_commands
 from untaped_ansible.application import BuildGraph, GraphRequest
 from untaped_ansible.application.ports import DependencyIndex
-from untaped_ansible.cli._progress import StderrProgress
+from untaped_ansible.cli._refresh import pluralize, run_source_refresh
 from untaped_ansible.domain.graph import DependencyGraph
 from untaped_ansible.domain.identity import IdentityResolver
 from untaped_ansible.domain.models import DependencyDeclaration
@@ -221,38 +220,23 @@ def graph_command(
                 raise_usage("--refresh requires --source or inline source selectors")
             github_settings = ctx.section("github", GithubSettings)
             for selection in graph_source.selections:
-                started_at = time.perf_counter()
-                progress = StderrProgress()
-                try:
-                    result = source_commands._refresh_source(
-                        selection.definition,
-                        source_key=selection.key,
-                        index=sqlite_index,
-                        aliases=aliases,
-                        settings=settings,
-                        github_settings=github_settings,
-                        http=ctx.http,
-                        concurrency=git_concurrency,
-                        on_progress=source_commands._progress_reporter(progress),
-                    )
-                finally:
-                    progress.finish()
-                echo(
-                    source_commands._refresh_summary(
-                        "refreshed" if refresh else "checked",
-                        selection.label,
-                        result,
-                        concurrency=git_concurrency,
-                        elapsed=time.perf_counter() - started_at,
-                    ),
-                    err=True,
+                result = run_source_refresh(
+                    selection.definition,
+                    source_key=selection.key,
+                    action="refreshed" if refresh else "checked",
+                    label=selection.label,
+                    index=sqlite_index,
+                    aliases=aliases,
+                    settings=settings,
+                    github_settings=github_settings,
+                    http=ctx.http,
+                    concurrency=git_concurrency,
                 )
-                source_commands._warn_low_rate_limit(result)
                 if result.failures:
-                    count = len(result.failures)
-                    noun = "failure" if count == 1 else "failures"
                     refresh_warnings.append(
-                        f"source refresh had {count} {noun}; data for those repos may be stale"
+                        f"refresh of {selection.label} had "
+                        f"{pluralize(len(result.failures), 'failure')}; "
+                        "data for those repos may be stale"
                     )
 
         direction, graph_warnings = _effective_direction(

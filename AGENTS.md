@@ -34,8 +34,8 @@ resolution, output helpers, HTTP/TLS primitives, and shared errors.
    state reads/writes; `untaped.testing` stays test-only. Command bodies
    resolve settings once at the composition root via `plugin_context(profile)`
    and read sections with `ctx.section("ansible", AnsibleSettings)`; helpers
-   like `_refresh_source` receive resolved GitHub/HTTP settings as arguments
-   instead of reading ambient config.
+   like `cli/_refresh.py`'s `refresh_source` receive resolved GitHub/HTTP
+   settings as arguments instead of reading ambient config.
 5. **Use the 4-layer DDD layout.** `cli -> application -> domain`, with
    `infrastructure -> domain`; `application` and `infrastructure` must not
    import each other at runtime.
@@ -65,6 +65,7 @@ src/untaped_ansible/
 ├── __init__.py           # lazy PEP 562 re-export of app
 ├── plugin.py             # entry-point plugin object (manifest only, no CLI imports)
 ├── settings.py           # plugin-owned config/state model
+├── _concurrency.py       # bounded_map thread-pool helper shared by application and infrastructure
 ├── cli/                  # Cyclopts composition root plus concern-specific commands
 ├── application/          # use cases and ports
 ├── domain/               # pure models, parser, graph, renderers
@@ -82,8 +83,13 @@ plugins once so `plugin_context().section(...)` resolves registered config
 sections, and clears the settings cache around every test.
 
 `cli/commands.py` is the Ansible Cyclopts composition root only. Keep graph
-execution in `cli/graph_commands.py`, source management and refresh wiring in
+execution in `cli/graph_commands.py`, source management in
 `cli/source_commands.py`, and alias management in `cli/alias_commands.py`.
+Source-refresh wiring shared by the `source refresh` and `graph` paths —
+adapter construction (`refresh_source`), the progress-wrapped
+`run_source_refresh` runner, summary/rate-limit stderr output, and the
+`pluralize` helper — lives in `cli/_refresh.py`; command modules must use it
+instead of reaching into each other's helpers.
 
 ## CLI Output Contracts
 
@@ -226,6 +232,12 @@ summary, `source refresh` echoes each `failed <repo>: <reason>` to stderr
 and exits 1 (`refresh completed with N repo failure(s); successes were
 saved`); the graph refresh path instead prepends a graph warning and
 proceeds with possibly stale data for the failed repos.
+
+When every expanded repo fails, there is nothing trustworthy to commit: the
+index commit is skipped entirely so cached data and `scanned_at` stay
+untouched and the run does not look fresh — staleness remains visible in
+`source status`. An empty expansion (zero repos) is a successful refresh,
+not a failure, and still commits (pruning now-unselected repos).
 
 The application layer stays UI-free: `RefreshGitSourceIndex` emits
 `RefreshProgressEvent` payloads (phase `expanding`/`probing`/`fetching`

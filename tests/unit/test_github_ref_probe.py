@@ -122,6 +122,7 @@ def test_probe_marks_failed_chunks_without_aborting_others() -> None:
     assert set(report.repos) == {"acme/ok", "acme/also-ok"}
     assert "acme/boom" in report.failures
     assert "502" in report.failures["acme/boom"]
+    assert report.failures["acme/boom"].startswith("ref probe failed: ")
 
 
 def test_probe_marks_untaped_error_chunks_as_failures() -> None:
@@ -131,7 +132,7 @@ def test_probe_marks_untaped_error_chunks_as_failures() -> None:
     report = GithubRefProbe(client).probe(["acme/bad"], kinds=("heads",))
 
     assert report.repos == {}
-    assert report.failures == {"acme/bad": "invalid repository 'acme/bad'"}
+    assert report.failures == {"acme/bad": "ref probe failed: invalid repository 'acme/bad'"}
 
 
 def test_probe_validates_construction_arguments() -> None:

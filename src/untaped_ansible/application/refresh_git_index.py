@@ -5,15 +5,15 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Callable, Iterable
-from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict
-from untaped.api import HttpError, UntapedError
+from untaped.api import UntapedError
 
+from untaped_ansible._concurrency import bounded_map
 from untaped_ansible.application.ports import (
     GitHubDependencyReader,
     IncrementalDependencyIndexWriter,
@@ -44,7 +44,11 @@ from untaped_ansible.settings import SourceDefinition, normalize_team_refs
 
 ProgressCallback = Callable[[RefreshProgressEvent], None]
 
-_REPO_FAILURE_ERRORS = (GitCacheError, HttpError, UntapedError)
+# Errors a fetch/parse worker may raise: GitCacheError from the local Git
+# cache and UntapedError from the SQLite index. The worker has no HTTP path
+# (GitHub REST/GraphQL traffic happens in expansion and the probe), so no
+# HTTP-specific error type belongs here.
+_REPO_FAILURE_ERRORS = (GitCacheError, UntapedError)
 
 
 class GitCache(Protocol):
@@ -228,46 +232,36 @@ class RefreshGitSourceIndex:
         paths: list[str],
         checked_at: datetime,
     ) -> Iterable[tuple[str, _RepoRefreshResult | str]]:
-        """Run per-repo fetch/parse workers; yield results or failure reasons."""
+        """Run per-repo fetch/parse workers; collect results or failure reasons."""
         paths_fingerprint = _dependency_paths_fingerprint(paths)
         aliases_fingerprint = _aliases_fingerprint(self._aliases)
         total = len(tasks)
         done = 0
         changed = 0
+        outcomes: list[tuple[str, _RepoRefreshResult | str]] = []
 
-        def refresh_one(task: _RepoRefreshTask) -> _RepoRefreshResult:
-            return self._refresh_repo(
-                task,
-                source_key=source_key,
-                paths=paths,
-                paths_fingerprint=paths_fingerprint,
-                aliases_fingerprint=aliases_fingerprint,
-                checked_at=checked_at,
-            )
-
-        def outcome_of(task: _RepoRefreshTask) -> tuple[str, _RepoRefreshResult | str]:
+        def outcome_of(task: _RepoRefreshTask) -> _RepoRefreshResult | str:
             try:
-                return task.repo.full_name, refresh_one(task)
+                return self._refresh_repo(
+                    task,
+                    source_key=source_key,
+                    paths=paths,
+                    paths_fingerprint=paths_fingerprint,
+                    aliases_fingerprint=aliases_fingerprint,
+                    checked_at=checked_at,
+                )
             except _REPO_FAILURE_ERRORS as exc:
-                return task.repo.full_name, str(exc) or type(exc).__name__
+                return str(exc) or type(exc).__name__
 
-        if len(tasks) <= 1 or self._concurrency == 1:
-            for task in tasks:
-                full_name, outcome = outcome_of(task)
-                done += 1
-                changed += len(outcome.scans) if isinstance(outcome, _RepoRefreshResult) else 0
-                self._emit_progress("fetching", done=done, total=total, changed=changed)
-                yield full_name, outcome
-            return
+        def record(task: _RepoRefreshTask, outcome: _RepoRefreshResult | str) -> None:
+            nonlocal done, changed
+            done += 1
+            changed += len(outcome.scans) if isinstance(outcome, _RepoRefreshResult) else 0
+            self._emit_progress("fetching", done=done, total=total, changed=changed)
+            outcomes.append((task.repo.full_name, outcome))
 
-        with ThreadPoolExecutor(max_workers=min(self._concurrency, len(tasks))) as executor:
-            futures = [executor.submit(outcome_of, task) for task in tasks]
-            for future in as_completed(futures):
-                full_name, outcome = future.result()
-                done += 1
-                changed += len(outcome.scans) if isinstance(outcome, _RepoRefreshResult) else 0
-                self._emit_progress("fetching", done=done, total=total, changed=changed)
-                yield full_name, outcome
+        bounded_map(outcome_of, tasks, concurrency=self._concurrency, on_each=record)
+        return outcomes
 
     def _probe_kinds(self, source: SourceDefinition) -> tuple[str, ...]:
         """Union of ref kinds needed across all repos.
@@ -462,21 +456,17 @@ class RefreshGitSourceIndex:
         expansions: list[Callable[[], list[_RepoCandidate]]],
     ) -> list[list[_RepoCandidate]]:
         total = len(expansions)
-        if total <= 1 or self._probe_concurrency == 1:
-            results = []
-            for index, expansion in enumerate(expansions):
-                results.append(expansion())
-                self._emit_progress("expanding", done=index + 1, total=total)
-            return results
-        done = 0
-        with ThreadPoolExecutor(max_workers=min(self._probe_concurrency, total)) as executor:
-            futures: list[Future[list[_RepoCandidate]]] = [
-                executor.submit(expansion) for expansion in expansions
-            ]
-            for _ in as_completed(futures):
-                done += 1
-                self._emit_progress("expanding", done=done, total=total)
-            return [future.result() for future in futures]
+        results: dict[int, list[_RepoCandidate]] = {}
+
+        def expand(index: int) -> list[_RepoCandidate]:
+            return expansions[index]()
+
+        def record(index: int, candidates: list[_RepoCandidate]) -> None:
+            results[index] = candidates
+            self._emit_progress("expanding", done=len(results), total=total)
+
+        bounded_map(expand, range(total), concurrency=self._probe_concurrency, on_each=record)
+        return [results[index] for index in range(total)]
 
     def _probe_progress(self, done: int, total: int) -> None:
         self._emit_progress("probing", done=done, total=total)

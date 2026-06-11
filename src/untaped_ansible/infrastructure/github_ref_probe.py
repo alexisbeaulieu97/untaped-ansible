@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import TYPE_CHECKING, Protocol
 
 from untaped.api import HttpError, UntapedError
 
+from untaped_ansible._concurrency import bounded_map
 from untaped_ansible.domain.payloads import GitRef, ProbedRepo, ProbeReport
 
 if TYPE_CHECKING:
@@ -90,24 +90,17 @@ class GithubRefProbe:
                     else min(rate_limit_remaining, outcome.rate_limit_remaining)
                 )
 
-        if len(chunks) <= 1 or self._concurrency == 1:
-            for chunk in chunks:
-                merge(chunk, self._probe_chunk(chunk, kinds))
-                done += len(chunk)
-                if on_progress is not None:
-                    on_progress(done, total)
-            return ProbeReport(
-                repos=probed, failures=failures, rate_limit_remaining=rate_limit_remaining
-            )
+        def probe_chunk(chunk: tuple[str, ...]) -> BatchRepoRefsResult | str:
+            return self._probe_chunk(chunk, kinds)
 
-        with ThreadPoolExecutor(max_workers=min(self._concurrency, len(chunks))) as executor:
-            futures = {executor.submit(self._probe_chunk, chunk, kinds): chunk for chunk in chunks}
-            for future in as_completed(futures):
-                chunk = futures[future]
-                merge(chunk, future.result())
-                done += len(chunk)
-                if on_progress is not None:
-                    on_progress(done, total)
+        def record(chunk: tuple[str, ...], outcome: BatchRepoRefsResult | str) -> None:
+            nonlocal done
+            merge(chunk, outcome)
+            done += len(chunk)
+            if on_progress is not None:
+                on_progress(done, total)
+
+        bounded_map(probe_chunk, chunks, concurrency=self._concurrency, on_each=record)
         return ProbeReport(
             repos=probed, failures=failures, rate_limit_remaining=rate_limit_remaining
         )
@@ -120,4 +113,6 @@ class GithubRefProbe:
         try:
             return self._github.batch_repo_refs(chunk, kinds=kinds, chunk_size=len(chunk))
         except (HttpError, UntapedError) as exc:
-            return str(exc) or type(exc).__name__
+            # Provenance prefix: distinguishes probe transport failures from
+            # git-fetch failures in `failed <repo>: <reason>` stderr listings.
+            return f"ref probe failed: {str(exc) or type(exc).__name__}"
