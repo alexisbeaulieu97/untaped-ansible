@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from collections.abc import Callable
+from typing import Literal, NamedTuple
 
 from pydantic import BaseModel, ConfigDict
 
@@ -38,6 +39,50 @@ class BuildGraph:
         return builder.build()
 
 
+class _AddNodeItem(NamedTuple):
+    repo: str
+    ref: str | None
+    ref_kind: str | None
+
+
+class _AddTargetItem(NamedTuple):
+    indexed: IndexedDependency
+
+
+class _AddEdgeItem(NamedTuple):
+    source_id: str
+    target_id: str
+    relation: Literal["requires", "impacts"]
+    indexed: IndexedDependency
+
+
+class _MissingRefItem(NamedTuple):
+    repo: str
+    ref: str | None
+
+
+_ReplayItem = _AddNodeItem | _AddTargetItem | _AddEdgeItem | _MissingRefItem
+
+
+class _Walk:
+    """One frontier entry: a node to expand carrying its own traversal path stack."""
+
+    __slots__ = ("items", "ref", "remaining", "repo", "stack")
+
+    def __init__(
+        self,
+        repo: str,
+        ref: str | None,
+        remaining: int | None,
+        stack: set[str],
+    ) -> None:
+        self.repo = repo
+        self.ref = ref
+        self.remaining = remaining
+        self.stack = stack
+        self.items: list[_ReplayItem | _Walk] = []
+
+
 class _GraphBuilder:
     def __init__(self, index: DependencyIndex, request: GraphRequest) -> None:
         self._index = index
@@ -57,18 +102,16 @@ class _GraphBuilder:
         self._add_node(self._request.repo, self._request.ref)
         depth = self._request.depth
         if self._request.direction in {"deps", "both"}:
-            self._walk_deps(
-                self._request.repo,
-                self._request.ref,
-                remaining=depth,
-                stack={target_id},
+            self._walk(
+                _Walk(self._request.repo, self._request.ref, depth, {target_id}),
+                expand=self._expand_deps,
+                prefetch=self._prefetch_deps_level,
             )
         if self._request.direction in {"impact", "both"}:
-            self._walk_impact(
-                self._request.repo,
-                self._request.ref,
-                remaining=depth,
-                stack={target_id},
+            self._walk(
+                _Walk(self._request.repo, self._request.ref, depth, {target_id}),
+                expand=self._expand_impact,
+                prefetch=self._prefetch_impact_level,
             )
         warnings: list[str] = []
         if self._request.direction in {"impact", "both"} and self._index.is_stale(
@@ -84,67 +127,157 @@ class _GraphBuilder:
             warnings=tuple(warnings),
         )
 
-    def _walk_deps(
+    def _walk(
         self,
-        repo: str,
-        ref: str | None,
+        root: _Walk,
         *,
-        remaining: int | None,
-        stack: set[str],
+        expand: Callable[[_Walk], list[_Walk]],
+        prefetch: Callable[[list[_Walk]], None],
     ) -> None:
-        if remaining == 0:
-            return
-        next_remaining = None if remaining is None else remaining - 1
-        dependencies = self._dependencies_for(repo, ref)
+        """Expand the graph level by level, then replay emissions in DFS order.
+
+        Each depth level's uncached index reads are bulk-loaded before any
+        entry in that level is expanded, so expansion reads only from the
+        per-run caches. Emissions are recorded per entry and replayed
+        depth-first afterwards, keeping node/edge/warning ordering identical
+        to the previous recursive depth-first traversal.
+        """
+        level = [root]
+        while level:
+            prefetch(level)
+            level = [child for entry in level for child in expand(entry)]
+        self._replay(root)
+
+    def _expand_deps(self, entry: _Walk) -> list[_Walk]:
+        if entry.remaining == 0:
+            return []
+        next_remaining = None if entry.remaining is None else entry.remaining - 1
+        dependencies = self._dependencies_for(entry.repo, entry.ref)
         if not dependencies:
-            self._warn_if_missing_cached_ref(repo, ref)
-            return
+            entry.items.append(_MissingRefItem(entry.repo, entry.ref))
+            return []
+        children: list[_Walk] = []
         for indexed in dependencies:
-            source_ref = ref if ref is not None else indexed.source_ref
-            source_id = self._add_node(repo, source_ref, ref_kind=indexed.source_ref_kind)
-            source_stack = {*stack, source_id}
-            target_id = self._target_node_for_dependency(indexed)
+            source_ref = entry.ref if entry.ref is not None else indexed.source_ref
+            source_id = _node_id(entry.repo, source_ref)
+            entry.items.append(_AddNodeItem(entry.repo, source_ref, indexed.source_ref_kind))
+            source_stack = {*entry.stack, source_id}
+            target_id = _dependency_target_id(indexed)
+            entry.items.append(_AddTargetItem(indexed))
             if target_id in source_stack:
                 continue
-            self._add_edge(source_id, target_id, "requires", indexed)
+            entry.items.append(_AddEdgeItem(source_id, target_id, "requires", indexed))
             if indexed.dependency_repo is None:
                 continue
-            self._walk_deps(
+            child = _Walk(
                 indexed.dependency_repo,
                 indexed.dependency_version,
-                remaining=next_remaining,
-                stack={*source_stack, target_id},
+                next_remaining,
+                {*source_stack, target_id},
             )
+            entry.items.append(child)
+            children.append(child)
+        return children
 
-    def _walk_impact(
-        self,
-        repo: str,
-        ref: str | None,
-        *,
-        remaining: int | None,
-        stack: set[str],
-    ) -> None:
-        if remaining == 0:
-            return
-        next_remaining = None if remaining is None else remaining - 1
-        for indexed in self._dependents_for(repo, ref):
-            target_ref = ref if ref is not None else indexed.dependency_version
-            target_id = self._add_node(repo, target_ref)
-            target_stack = {*stack, target_id}
-            source_id = self._add_node(
-                indexed.source_repo,
-                indexed.source_ref,
-                ref_kind=indexed.source_ref_kind,
+    def _expand_impact(self, entry: _Walk) -> list[_Walk]:
+        if entry.remaining == 0:
+            return []
+        next_remaining = None if entry.remaining is None else entry.remaining - 1
+        children: list[_Walk] = []
+        for indexed in self._dependents_for(entry.repo, entry.ref):
+            target_ref = entry.ref if entry.ref is not None else indexed.dependency_version
+            target_id = _node_id(entry.repo, target_ref)
+            entry.items.append(_AddNodeItem(entry.repo, target_ref, None))
+            target_stack = {*entry.stack, target_id}
+            source_id = _node_id(indexed.source_repo, indexed.source_ref)
+            entry.items.append(
+                _AddNodeItem(indexed.source_repo, indexed.source_ref, indexed.source_ref_kind)
             )
             if source_id in target_stack:
                 continue
-            self._add_edge(source_id, target_id, "impacts", indexed)
-            self._walk_impact(
+            entry.items.append(_AddEdgeItem(source_id, target_id, "impacts", indexed))
+            child = _Walk(
                 indexed.source_repo,
                 indexed.source_ref,
-                remaining=next_remaining,
-                stack={*target_stack, source_id},
+                next_remaining,
+                {*target_stack, source_id},
             )
+            entry.items.append(child)
+            children.append(child)
+        return children
+
+    def _replay(self, entry: _Walk) -> None:
+        for item in entry.items:
+            if isinstance(item, _Walk):
+                self._replay(item)
+            elif isinstance(item, _AddNodeItem):
+                self._add_node(item.repo, item.ref, ref_kind=item.ref_kind)
+            elif isinstance(item, _AddTargetItem):
+                self._target_node_for_dependency(item.indexed)
+            elif isinstance(item, _AddEdgeItem):
+                self._add_edge(item.source_id, item.target_id, item.relation, item.indexed)
+            else:
+                self._warn_if_missing_cached_ref(item.repo, item.ref)
+
+    def _prefetch_deps_level(self, level: list[_Walk]) -> None:
+        self._prefetch_edges(level, cache=self._dependencies, batch=self._index.dependencies_batch)
+        repos: set[str] = set()
+        for entry in level:
+            if entry.remaining == 0:
+                continue
+            for indexed in self._dependencies_for(entry.repo, entry.ref):
+                source_ref = entry.ref if entry.ref is not None else indexed.source_ref
+                if source_ref is not None:
+                    repos.add(entry.repo)
+                if indexed.dependency_repo is not None and indexed.dependency_version is not None:
+                    repos.add(indexed.dependency_repo)
+        self._prefetch_ref_metadata(repos)
+
+    def _prefetch_impact_level(self, level: list[_Walk]) -> None:
+        self._prefetch_edges(level, cache=self._dependents, batch=self._index.dependents_batch)
+        repos: set[str] = set()
+        for entry in level:
+            if entry.remaining == 0:
+                continue
+            for indexed in self._dependents_for(entry.repo, entry.ref):
+                target_ref = entry.ref if entry.ref is not None else indexed.dependency_version
+                if target_ref is not None:
+                    repos.add(entry.repo)
+                if indexed.source_ref is not None:
+                    repos.add(indexed.source_repo)
+        self._prefetch_ref_metadata(repos)
+
+    def _prefetch_edges(
+        self,
+        level: list[_Walk],
+        *,
+        cache: dict[tuple[str, str | None, str | None], list[IndexedDependency]],
+        batch: Callable[..., dict[tuple[str, str | None], list[IndexedDependency]]],
+    ) -> None:
+        source_key = self._request.source_key
+        pairs = list(
+            dict.fromkeys(
+                (entry.repo, entry.ref)
+                for entry in level
+                if entry.remaining != 0 and (entry.repo, entry.ref, source_key) not in cache
+            )
+        )
+        if not pairs:
+            return
+        loaded = batch(pairs, source_key=source_key)
+        for repo, ref in pairs:
+            cache[(repo, ref, source_key)] = loaded[(repo, ref)]
+
+    def _prefetch_ref_metadata(self, repos: set[str]) -> None:
+        source_key = self._request.source_key
+        missing = sorted(
+            repo for repo in repos if (repo, source_key) not in self._cached_ref_metadata
+        )
+        if not missing:
+            return
+        loaded = self._index.cached_ref_metadata_batch(missing, source_key=source_key)
+        for repo in missing:
+            self._cached_ref_metadata[(repo, source_key)] = loaded[repo]
 
     def _target_node_for_dependency(self, indexed: IndexedDependency) -> str:
         if indexed.dependency_repo is not None:
@@ -318,6 +451,13 @@ class _NodeMetadata(BaseModel):
 
 def _node_id(repo: str, ref: str | None) -> str:
     return f"{repo}@{ref}" if ref else repo
+
+
+def _dependency_target_id(indexed: IndexedDependency) -> str:
+    """Compute a dependency's target node id without emitting the node."""
+    if indexed.dependency_repo is not None:
+        return _node_id(indexed.dependency_repo, indexed.dependency_version)
+    return f"unresolved:{indexed.unresolved or indexed.dependency_name}"
 
 
 def _label(repo: str, ref: str | None) -> str:

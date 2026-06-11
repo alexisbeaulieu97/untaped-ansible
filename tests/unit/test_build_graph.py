@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 from untaped_ansible.application.graph import BuildGraph, GraphRequest
 from untaped_ansible.domain.payloads import CachedRef, IndexedDependency
 
@@ -27,6 +29,8 @@ class StubIndex:
         self.dependency_calls: dict[tuple[str, str | None, str | None], int] = {}
         self.dependent_calls: dict[tuple[str, str | None, str | None], int] = {}
         self.cached_refs_calls: dict[tuple[str, str | None], int] = {}
+        self.dependencies_batch_calls: list[list[tuple[str, str | None]]] = []
+        self.dependents_batch_calls: list[list[tuple[str, str | None]]] = []
 
     def dependencies(
         self, repo: str, ref: str | None, *, source_key: str | None
@@ -64,6 +68,36 @@ class StubIndex:
         if source_key is None:
             return ()
         return self._cached_ref_metadata.get(repo, ())
+
+    def dependencies_batch(
+        self,
+        pairs: Sequence[tuple[str, str | None]],
+        *,
+        source_key: str | None,
+    ) -> dict[tuple[str, str | None], list[IndexedDependency]]:
+        self.dependencies_batch_calls.append(list(pairs))
+        return {
+            (repo, ref): self.dependencies(repo, ref, source_key=source_key) for repo, ref in pairs
+        }
+
+    def dependents_batch(
+        self,
+        pairs: Sequence[tuple[str, str | None]],
+        *,
+        source_key: str | None,
+    ) -> dict[tuple[str, str | None], list[IndexedDependency]]:
+        self.dependents_batch_calls.append(list(pairs))
+        return {
+            (repo, ref): self.dependents(repo, ref, source_key=source_key) for repo, ref in pairs
+        }
+
+    def cached_ref_metadata_batch(
+        self,
+        repos: Sequence[str],
+        *,
+        source_key: str | None,
+    ) -> dict[str, tuple[CachedRef, ...]]:
+        return {repo: self.cached_ref_metadata(repo, source_key=source_key) for repo in repos}
 
 
 def test_build_graph_includes_dependencies_impact_unresolved_and_stale_warning() -> None:
@@ -618,3 +652,52 @@ def test_impact_traversal_caches_repeated_index_reads_for_converging_paths() -> 
         (edge.source_id, edge.target_id, edge.relation) for edge in graph.edges
     ]
     assert index.dependent_calls[("acme/shared", "main", "source:prod")] == 1
+
+
+def test_depth_fanout_issues_one_dependencies_batch_read_per_level() -> None:
+    edges: list[IndexedDependency] = []
+    cached_refs: dict[str, set[str]] = {"acme/root": {"main"}}
+    for child_n in range(4):
+        child = f"acme/child-{child_n}"
+        cached_refs[child] = {"main"}
+        edges.append(
+            IndexedDependency(
+                source_repo="acme/root",
+                source_ref="main",
+                dependency_repo=child,
+                dependency_name=f"child-{child_n}",
+                dependency_version="main",
+                source_path="roles/requirements.yml",
+            )
+        )
+        for leaf_n in range(4):
+            leaf = f"acme/leaf-{child_n}-{leaf_n}"
+            cached_refs[leaf] = {"main"}
+            edges.append(
+                IndexedDependency(
+                    source_repo=child,
+                    source_ref="main",
+                    dependency_repo=leaf,
+                    dependency_name=f"leaf-{child_n}-{leaf_n}",
+                    dependency_version="main",
+                    source_path="roles/requirements.yml",
+                )
+            )
+    index = StubIndex(edges, cached_refs=cached_refs)
+
+    graph = BuildGraph(index)(
+        GraphRequest(
+            repo="acme/root",
+            ref="main",
+            source_key="source:prod",
+            direction="deps",
+            depth=3,
+        )
+    )
+
+    assert len(graph.nodes) == 21
+    assert len(graph.edges) == 20
+    assert graph.warnings == ()
+    # One bulk read per traversal level instead of one point read per node.
+    assert len(index.dependencies_batch_calls) <= 3
+    assert [len(pairs) for pairs in index.dependencies_batch_calls] == [1, 4, 16]

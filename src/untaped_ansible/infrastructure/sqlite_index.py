@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Sequence
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -135,6 +135,42 @@ class SqliteDependencyIndex:
             params.append(source_key)
         return self._select_edges(clauses, params)
 
+    def dependencies_batch(
+        self,
+        pairs: Sequence[tuple[str, str | None]],
+        *,
+        source_key: str | None,
+    ) -> dict[tuple[str, str | None], list[IndexedDependency]]:
+        return self._select_edges_batch(
+            pairs,
+            source_key=source_key,
+            join_sql="""
+                join source_ref_scans as scans
+                  on scans.source_repo = requested.repo
+                 and (requested.ref is null or scans.source_ref = requested.ref)
+                join snapshot_edges as edges
+                  on edges.snapshot_id = scans.snapshot_id
+            """,
+        )
+
+    def dependents_batch(
+        self,
+        pairs: Sequence[tuple[str, str | None]],
+        *,
+        source_key: str | None,
+    ) -> dict[tuple[str, str | None], list[IndexedDependency]]:
+        return self._select_edges_batch(
+            pairs,
+            source_key=source_key,
+            join_sql="""
+                join snapshot_edges as edges
+                  on edges.dependency_repo = requested.repo
+                 and (requested.ref is null or edges.dependency_version = requested.ref)
+                join source_ref_scans as scans
+                  on scans.snapshot_id = edges.snapshot_id
+            """,
+        )
+
     def cached_refs(self, repo: str, *, source_key: str | None) -> set[str]:
         if source_key is None:
             return set()
@@ -178,6 +214,53 @@ class SqliteDependencyIndex:
                 ),
             )
         return tuple(refs.values())
+
+    def cached_ref_metadata_batch(
+        self,
+        repos: Sequence[str],
+        *,
+        source_key: str | None,
+    ) -> dict[str, tuple[CachedRef, ...]]:
+        requested = list(dict.fromkeys(repos))
+        if source_key is None or not requested:
+            return dict.fromkeys(requested, ())
+        grouped: dict[str, dict[tuple[str, str | None], CachedRef]] = {
+            repo: {} for repo in requested
+        }
+        with self._db() as db:
+            for chunk in _chunks(requested, 400):
+                placeholders = ",".join("(?)" for _ in chunk)
+                params: list[object] = [*chunk, source_key]
+                rows = db.execute(
+                    f"""
+                    with requested(repo) as (
+                        values {placeholders}
+                    )
+                    select scans.source_repo, scans.source_ref as name,
+                           nullif(scans.ref_kind, '') as kind,
+                           metadata.default_branch
+                    from requested
+                    join source_ref_scans as scans
+                      on scans.source_repo = requested.repo
+                    left join source_repo_metadata as metadata
+                      on metadata.source_key = scans.source_key
+                     and metadata.source_repo = scans.source_repo
+                    where scans.source_key = ? and scans.source_ref != ''
+                    order by scans.id
+                    """,
+                    params,
+                ).fetchall()
+                for row in rows:
+                    key = (str(row["name"]), _optional_str(row["kind"]))
+                    grouped[str(row["source_repo"])].setdefault(
+                        key,
+                        CachedRef(
+                            name=key[0],
+                            kind=key[1],
+                            default_branch=_optional_str(row["default_branch"]),
+                        ),
+                    )
+        return {repo: tuple(refs.values()) for repo, refs in grouped.items()}
 
     def status(self, source_key: str) -> SourceIndexStatus | None:
         with self._db() as db:
@@ -238,6 +321,57 @@ class SqliteDependencyIndex:
                 params,
             ).fetchall()
         return [edge_from_row(row) for row in rows]
+
+    def _select_edges_batch(
+        self,
+        pairs: Sequence[tuple[str, str | None]],
+        *,
+        source_key: str | None,
+        join_sql: str,
+    ) -> dict[tuple[str, str | None], list[IndexedDependency]]:
+        requested = list(dict.fromkeys(pairs))
+        results: dict[tuple[str, str | None], list[IndexedDependency]] = {
+            pair: [] for pair in requested
+        }
+        if not requested:
+            return results
+        key_clause = "" if source_key is None else "where scans.source_key = ?"
+        with self._db() as db:
+            # 400 pairs x 2 columns = 800 bound params, under the pre-3.32
+            # limit of 999 (matching the ref_scans VALUES chunking above).
+            for chunk in _chunks(requested, 400):
+                placeholders = ",".join("(?, ?)" for _ in chunk)
+                params: list[object] = [value for pair in chunk for value in pair]
+                if source_key is not None:
+                    params.append(source_key)
+                rows = db.execute(
+                    f"""
+                    with requested(repo, ref) as (
+                        values {placeholders}
+                    )
+                    select requested.repo as requested_repo,
+                           requested.ref as requested_ref,
+                           scans.source_repo,
+                           nullif(scans.source_ref, '') as source_ref,
+                           nullif(scans.ref_kind, '') as source_ref_kind,
+                           nullif(scans.source_sha, '') as source_sha,
+                           edges.dependency_repo, edges.dependency_name,
+                           edges.dependency_version, edges.source_path, edges.unresolved
+                    from requested
+                    {join_sql}
+                    {key_clause}
+                    order by scans.id, edges.id
+                    """,
+                    params,
+                ).fetchall()
+                for row in rows:
+                    requested_ref = row["requested_ref"]
+                    key = (
+                        str(row["requested_repo"]),
+                        str(requested_ref) if requested_ref is not None else None,
+                    )
+                    results[key].append(edge_from_row(row))
+        return results
 
     def _connect(self) -> sqlite3.Connection:
         db = sqlite3.connect(self._path)

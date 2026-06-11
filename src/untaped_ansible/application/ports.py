@@ -10,7 +10,14 @@ from untaped_ansible.domain import payloads
 
 
 class DependencyIndex(Protocol):
-    """Read port for indexed dependency edges."""
+    """Read port for indexed dependency edges.
+
+    Batch reads bulk-load many keys in one call for level-batched graph
+    traversal. Every requested key must appear in the returned mapping --
+    with an empty list/tuple when nothing is indexed -- so callers can cache
+    negative results. A ``None`` ref in a ``(repo, ref)`` pair keeps the
+    single-read semantics: edges for every indexed ref of that repo.
+    """
 
     def dependencies(
         self,
@@ -28,11 +35,32 @@ class DependencyIndex(Protocol):
         source_key: str | None,
     ) -> list[payloads.IndexedDependency]: ...
 
+    def dependencies_batch(
+        self,
+        pairs: Sequence[tuple[str, str | None]],
+        *,
+        source_key: str | None,
+    ) -> dict[tuple[str, str | None], list[payloads.IndexedDependency]]: ...
+
+    def dependents_batch(
+        self,
+        pairs: Sequence[tuple[str, str | None]],
+        *,
+        source_key: str | None,
+    ) -> dict[tuple[str, str | None], list[payloads.IndexedDependency]]: ...
+
     def cached_refs(self, repo: str, *, source_key: str | None) -> set[str]: ...
 
     def cached_ref_metadata(
         self, repo: str, *, source_key: str | None
     ) -> tuple[payloads.CachedRef, ...]: ...
+
+    def cached_ref_metadata_batch(
+        self,
+        repos: Sequence[str],
+        *,
+        source_key: str | None,
+    ) -> dict[str, tuple[payloads.CachedRef, ...]]: ...
 
     def is_stale(self, source_key: str | None, *, max_age_seconds: int) -> bool: ...
 

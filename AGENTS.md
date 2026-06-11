@@ -166,6 +166,22 @@ they cross the application/infrastructure boundary. `application/ports.py`
 should stay protocol-only, and the layering tests enforce that `application`
 and `infrastructure` do not import each other at runtime.
 
+Graph reads are level-batched. The `DependencyIndex` port exposes batch reads
+(`dependencies_batch`, `dependents_batch`, `cached_ref_metadata_batch`)
+alongside the single-key reads; every requested key must appear in the result
+mapping — with an empty list/tuple when nothing is indexed — so callers can
+cache negative results, and a `None` ref in a requested pair keeps the
+single-read "all indexed refs of the repo" semantics. `BuildGraph` walks each
+direction as an explicit per-level worklist with per-path cycle stacks,
+bulk-loads each depth level's uncached frontier through the batch reads
+(~one batched query per depth level instead of one point query per node), and
+replays recorded emissions depth-first so node/edge/warning ordering stays
+identical to the previous recursive traversal. The SQLite adapter drives the
+batch queries with chunked `with requested(...) as (values ...)` CTEs; the
+overlay, live-GitHub, and multi-source wrappers implement the batch reads by
+delegating to the wrapped index's batch reads and applying the same
+overlay/fan-out semantics as their single-key counterparts.
+
 `graph` is the primary user command. Downstream dependency reads do not require
 a source or cached data. When a source is configured, downstream graphing
 checks selected remote refs and prefers the refreshed cache; `--cached` skips

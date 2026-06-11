@@ -9,6 +9,8 @@ from untaped_ansible.domain.parser import parse_dependency_file
 from untaped_ansible.domain.payloads import CachedRef, IndexedDependency
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from untaped_ansible.application.ports import DependencyIndex, GitHubDependencyReader
 
 
@@ -50,6 +52,25 @@ class GithubDependencyIndex:
     ) -> list[IndexedDependency]:
         return self._wrapped.dependents(repo, ref, source_key=source_key)
 
+    def dependencies_batch(
+        self,
+        pairs: Sequence[tuple[str, str | None]],
+        *,
+        source_key: str | None,
+    ) -> dict[tuple[str, str | None], list[IndexedDependency]]:
+        return {
+            (repo, ref): self.dependencies(repo, ref, source_key=source_key)
+            for repo, ref in dict.fromkeys(pairs)
+        }
+
+    def dependents_batch(
+        self,
+        pairs: Sequence[tuple[str, str | None]],
+        *,
+        source_key: str | None,
+    ) -> dict[tuple[str, str | None], list[IndexedDependency]]:
+        return self._wrapped.dependents_batch(pairs, source_key=source_key)
+
     def cached_refs(self, repo: str, *, source_key: str | None) -> set[str]:
         refs = set(self._wrapped.cached_refs(repo, source_key=source_key))
         refs.update(
@@ -60,16 +81,35 @@ class GithubDependencyIndex:
         return refs
 
     def cached_ref_metadata(self, repo: str, *, source_key: str | None) -> tuple[CachedRef, ...]:
-        metadata = list(self._wrapped.cached_ref_metadata(repo, source_key=source_key))
+        return self._with_live_refs(
+            repo,
+            self._wrapped.cached_ref_metadata(repo, source_key=source_key),
+        )
+
+    def cached_ref_metadata_batch(
+        self,
+        repos: Sequence[str],
+        *,
+        source_key: str | None,
+    ) -> dict[str, tuple[CachedRef, ...]]:
+        wrapped = self._wrapped.cached_ref_metadata_batch(repos, source_key=source_key)
+        return {repo: self._with_live_refs(repo, metadata) for repo, metadata in wrapped.items()}
+
+    def is_stale(self, source_key: str | None, *, max_age_seconds: int) -> bool:
+        return self._wrapped.is_stale(source_key, max_age_seconds=max_age_seconds)
+
+    def _with_live_refs(
+        self,
+        repo: str,
+        wrapped: tuple[CachedRef, ...],
+    ) -> tuple[CachedRef, ...]:
+        metadata = list(wrapped)
         known = {(cached_ref.name, cached_ref.kind) for cached_ref in metadata}
         for cached_repo, cached_ref in self._cache:
             if cached_repo != repo or cached_ref is None or (cached_ref, None) in known:
                 continue
             metadata.append(CachedRef(name=cached_ref))
         return tuple(metadata)
-
-    def is_stale(self, source_key: str | None, *, max_age_seconds: int) -> bool:
-        return self._wrapped.is_stale(source_key, max_age_seconds=max_age_seconds)
 
     def _live_dependencies(self, repo: str, ref: str | None) -> list[IndexedDependency]:
         owner, name = _split_repo(repo)
