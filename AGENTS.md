@@ -270,7 +270,7 @@ Source refresh is git-only for data transport. A refresh runs three phases:
 
 Refresh is resilient to per-repo failures. Probe misses (missing or
 inaccessible repos) and per-repo fetch/parse errors (`GitCacheError`,
-`HttpError`, `UntapedError`) are recorded as `RefreshResult.failures`
+`UntapedError`) are recorded as `RefreshResult.failures`
 instead of aborting the run, and pruning is scoped to succeeded repos: a
 failed repo's previously cached refs and repo metadata must survive the
 commit (`commit_source_ref_refresh(..., failed_repos=...)`). After the
