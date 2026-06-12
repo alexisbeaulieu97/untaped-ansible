@@ -10,7 +10,6 @@ from cyclopts import Parameter, validators
 from untaped.api import (
     ColumnsOption,
     FormatOption,
-    ProfileOverrideOption,
     UntapedError,
     create_app,
     echo,
@@ -246,11 +245,10 @@ def source_status_command(
     *,
     fmt: FormatOption = "table",
     columns: ColumnsOption = None,
-    profile: ProfileOverrideOption = None,
 ) -> None:
     """Show cached source data status."""
     with report_errors():
-        ctx = plugin_context(profile)
+        ctx = plugin_context()
         settings = ctx.section("ansible", AnsibleSettings)
         index = SqliteDependencyIndex(settings.index_path)
         source_repo = SourceRepository()
@@ -275,11 +273,10 @@ def source_refresh_command(
     name: Annotated[str, Parameter(help="Source name.")],
     *,
     concurrency: ConcurrencyOption = None,
-    profile: ProfileOverrideOption = None,
 ) -> None:
     """Refresh a saved source from GitHub."""
     with report_errors():
-        ctx = plugin_context(profile)
+        ctx = plugin_context()
         source = SourceRepository().get(name)
         if source is None:
             raise UntapedError(f"unknown source: {name!r}")
