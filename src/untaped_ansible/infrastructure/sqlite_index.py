@@ -108,15 +108,8 @@ class SqliteDependencyIndex:
         *,
         source_key: str | None,
     ) -> list[IndexedDependency]:
-        clauses = ["scans.source_repo = ?"]
-        params: list[object] = [repo]
-        if ref is not None:
-            clauses.append("scans.source_ref = ?")
-            params.append(ref)
-        if source_key is not None:
-            clauses.append("scans.source_key = ?")
-            params.append(source_key)
-        return self._select_edges(clauses, params)
+        # Batch-of-one keeps single/batch read parity by construction.
+        return self.dependencies_batch([(repo, ref)], source_key=source_key)[(repo, ref)]
 
     def dependents(
         self,
@@ -125,15 +118,8 @@ class SqliteDependencyIndex:
         *,
         source_key: str | None,
     ) -> list[IndexedDependency]:
-        clauses = ["edges.dependency_repo = ?"]
-        params: list[object] = [repo]
-        if ref is not None:
-            clauses.append("edges.dependency_version = ?")
-            params.append(ref)
-        if source_key is not None:
-            clauses.append("scans.source_key = ?")
-            params.append(source_key)
-        return self._select_edges(clauses, params)
+        # Batch-of-one keeps single/batch read parity by construction.
+        return self.dependents_batch([(repo, ref)], source_key=source_key)[(repo, ref)]
 
     def dependencies_batch(
         self,
@@ -186,34 +172,8 @@ class SqliteDependencyIndex:
         return {str(row["source_ref"]) for row in rows}
 
     def cached_ref_metadata(self, repo: str, *, source_key: str | None) -> tuple[CachedRef, ...]:
-        if source_key is None:
-            return ()
-        with self._db() as db:
-            rows = db.execute(
-                """
-                select scans.source_ref as name, nullif(scans.ref_kind, '') as kind,
-                       metadata.default_branch
-                from source_ref_scans as scans
-                left join source_repo_metadata as metadata
-                  on metadata.source_key = scans.source_key
-                 and metadata.source_repo = scans.source_repo
-                where scans.source_key = ? and scans.source_repo = ? and scans.source_ref != ''
-                order by scans.id
-                """,
-                (source_key, repo),
-            ).fetchall()
-        refs: dict[tuple[str, str | None], CachedRef] = {}
-        for row in rows:
-            key = (str(row["name"]), _optional_str(row["kind"]))
-            refs.setdefault(
-                key,
-                CachedRef(
-                    name=key[0],
-                    kind=key[1],
-                    default_branch=_optional_str(row["default_branch"]),
-                ),
-            )
-        return tuple(refs.values())
+        # Batch-of-one keeps single/batch read parity by construction.
+        return self.cached_ref_metadata_batch([repo], source_key=source_key)[repo]
 
     def cached_ref_metadata_batch(
         self,
@@ -300,27 +260,6 @@ class SqliteDependencyIndex:
             db.execute("delete from source_ref_scans where source_key = ?", (source_key,))
             db.execute("delete from source_repo_metadata where source_key = ?", (source_key,))
             _delete_orphan_snapshots(db)
-
-    def _select_edges(self, clauses: list[str], params: list[object]) -> list[IndexedDependency]:
-        where = " and ".join(clauses)
-        with self._db() as db:
-            rows = db.execute(
-                f"""
-                select scans.source_repo,
-                       nullif(scans.source_ref, '') as source_ref,
-                       nullif(scans.ref_kind, '') as source_ref_kind,
-                       nullif(scans.source_sha, '') as source_sha,
-                       edges.dependency_repo, edges.dependency_name, edges.dependency_version,
-                       edges.source_path, edges.unresolved
-                from source_ref_scans as scans
-                join snapshot_edges as edges
-                  on edges.snapshot_id = scans.snapshot_id
-                where {where}
-                order by scans.id, edges.id
-                """,
-                params,
-            ).fetchall()
-        return [edge_from_row(row) for row in rows]
 
     def _select_edges_batch(
         self,

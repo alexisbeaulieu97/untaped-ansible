@@ -178,9 +178,12 @@ bulk-loads each depth level's uncached frontier through the batch reads
 replays recorded emissions depth-first so node/edge/warning ordering stays
 identical to the previous recursive traversal. The SQLite adapter drives the
 batch queries with chunked `with requested(...) as (values ...)` CTEs; the
-overlay, live-GitHub, and multi-source wrappers implement the batch reads by
-delegating to the wrapped index's batch reads and applying the same
-overlay/fan-out semantics as their single-key counterparts.
+overlay and multi-source wrappers implement the batch reads by delegating to
+the wrapped index's batch reads and applying the same overlay/fan-out
+semantics as their single-key counterparts, while the live-GitHub index
+serves `dependencies_batch` with intentionally per-pair live reads (per-repo
+tree/content fetches don't batch) and delegates its other batch reads to the
+wrapped index.
 
 `graph` is the primary user command. Downstream dependency reads do not require
 a source or cached data. When a source is configured, downstream graphing

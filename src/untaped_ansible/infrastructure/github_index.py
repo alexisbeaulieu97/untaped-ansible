@@ -58,6 +58,7 @@ class GithubDependencyIndex:
         *,
         source_key: str | None,
     ) -> dict[tuple[str, str | None], list[IndexedDependency]]:
+        # Intentionally per-pair: live reads (per-repo tree/content fetches) don't batch.
         return {
             (repo, ref): self.dependencies(repo, ref, source_key=source_key)
             for repo, ref in dict.fromkeys(pairs)

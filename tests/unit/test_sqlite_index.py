@@ -696,7 +696,7 @@ def test_cached_ref_metadata_batch_includes_missing_repos(tmp_path) -> None:
 
     batch = index.cached_ref_metadata_batch(["acme/site", "acme/missing"], source_key="source:prod")
 
-    assert set(batch[("acme/site")]) == {
+    assert set(batch["acme/site"]) == {
         CachedRef(name="v2.0.0", kind="tags", default_branch="trunk"),
         CachedRef(name="trunk", kind="heads", default_branch="trunk"),
     }

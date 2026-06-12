@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from typing import Literal, NamedTuple
+from collections.abc import Callable, Sequence
+from typing import Literal, NamedTuple, Protocol, assert_never
 
 from pydantic import BaseModel, ConfigDict
 
@@ -62,6 +62,17 @@ class _MissingRefItem(NamedTuple):
 
 
 _ReplayItem = _AddNodeItem | _AddTargetItem | _AddEdgeItem | _MissingRefItem
+
+
+class _EdgeBatchRead(Protocol):
+    """Batch edge read matching ``dependencies_batch``/``dependents_batch``."""
+
+    def __call__(
+        self,
+        pairs: Sequence[tuple[str, str | None]],
+        *,
+        source_key: str | None,
+    ) -> dict[tuple[str, str | None], list[IndexedDependency]]: ...
 
 
 class _Walk:
@@ -213,13 +224,18 @@ class _GraphBuilder:
             elif isinstance(item, _AddNodeItem):
                 self._add_node(item.repo, item.ref, ref_kind=item.ref_kind)
             elif isinstance(item, _AddTargetItem):
-                self._target_node_for_dependency(item.indexed)
+                self._emit_target_node(item.indexed)
             elif isinstance(item, _AddEdgeItem):
                 self._add_edge(item.source_id, item.target_id, item.relation, item.indexed)
-            else:
+            elif isinstance(item, _MissingRefItem):
+                # Intentionally unbatched: missing-ref warnings are a rare path,
+                # so the prefetch sets are not extended to cover its reads.
                 self._warn_if_missing_cached_ref(item.repo, item.ref)
+            else:
+                assert_never(item)
 
     def _prefetch_deps_level(self, level: list[_Walk]) -> None:
+        # Must mirror the read conditions of _expand_deps + _node_metadata.
         self._prefetch_edges(level, cache=self._dependencies, batch=self._index.dependencies_batch)
         repos: set[str] = set()
         for entry in level:
@@ -234,6 +250,7 @@ class _GraphBuilder:
         self._prefetch_ref_metadata(repos)
 
     def _prefetch_impact_level(self, level: list[_Walk]) -> None:
+        # Must mirror the read conditions of _expand_impact + _node_metadata.
         self._prefetch_edges(level, cache=self._dependents, batch=self._index.dependents_batch)
         repos: set[str] = set()
         for entry in level:
@@ -252,7 +269,7 @@ class _GraphBuilder:
         level: list[_Walk],
         *,
         cache: dict[tuple[str, str | None, str | None], list[IndexedDependency]],
-        batch: Callable[..., dict[tuple[str, str | None], list[IndexedDependency]]],
+        batch: _EdgeBatchRead,
     ) -> None:
         source_key = self._request.source_key
         pairs = list(
@@ -279,11 +296,16 @@ class _GraphBuilder:
         for repo in missing:
             self._cached_ref_metadata[(repo, source_key)] = loaded[repo]
 
-    def _target_node_for_dependency(self, indexed: IndexedDependency) -> str:
+    def _emit_target_node(self, indexed: IndexedDependency) -> None:
+        """Emit the node (and any warning) for a dependency's target.
+
+        The target node id itself comes from :func:`_dependency_target_id`.
+        """
         if indexed.dependency_repo is not None:
-            return self._add_node(indexed.dependency_repo, indexed.dependency_version)
+            self._add_node(indexed.dependency_repo, indexed.dependency_version)
+            return
+        node_id = _dependency_target_id(indexed)
         unresolved = indexed.unresolved or indexed.dependency_name
-        node_id = f"unresolved:{unresolved}"
         self._nodes.setdefault(
             node_id,
             GraphNode(id=node_id, label=f"unresolved: {unresolved}", unresolved=unresolved),
@@ -292,7 +314,6 @@ class _GraphBuilder:
             f"unresolved dependency {unresolved} from "
             f"{_node_id(indexed.source_repo, indexed.source_ref)} in {indexed.source_path}"
         )
-        return node_id
 
     def _add_node(self, repo: str, ref: str | None, *, ref_kind: str | None = None) -> str:
         node_id = _node_id(repo, ref)

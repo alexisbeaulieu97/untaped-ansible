@@ -26,33 +26,42 @@ class StubIndex:
                 if edge.source_ref is not None:
                     cached_refs.setdefault(edge.source_repo, set()).add(edge.source_ref)
         self._cached_refs = cached_refs
+        # Point-read counters, kept separate from the batch-call records below
+        # so tests can prove the traversal never falls back to point reads.
         self.dependency_calls: dict[tuple[str, str | None, str | None], int] = {}
         self.dependent_calls: dict[tuple[str, str | None, str | None], int] = {}
         self.cached_refs_calls: dict[tuple[str, str | None], int] = {}
+        # Batch-call records: one entry per batch read, listing the pairs asked.
         self.dependencies_batch_calls: list[list[tuple[str, str | None]]] = []
         self.dependents_batch_calls: list[list[tuple[str, str | None]]] = []
 
-    def dependencies(
-        self, repo: str, ref: str | None, *, source_key: str | None
-    ) -> list[IndexedDependency]:
-        key = (repo, ref, source_key)
-        self.dependency_calls[key] = self.dependency_calls.get(key, 0) + 1
+    def _dependency_edges(self, repo: str, ref: str | None) -> list[IndexedDependency]:
         return [
             edge
             for edge in self.edges
             if edge.source_repo == repo and (ref is None or edge.source_ref == ref)
         ]
 
-    def dependents(
-        self, repo: str, ref: str | None, *, source_key: str | None
-    ) -> list[IndexedDependency]:
-        key = (repo, ref, source_key)
-        self.dependent_calls[key] = self.dependent_calls.get(key, 0) + 1
+    def _dependent_edges(self, repo: str, ref: str | None) -> list[IndexedDependency]:
         return [
             edge
             for edge in self.edges
             if edge.dependency_repo == repo and (ref is None or edge.dependency_version == ref)
         ]
+
+    def dependencies(
+        self, repo: str, ref: str | None, *, source_key: str | None
+    ) -> list[IndexedDependency]:
+        key = (repo, ref, source_key)
+        self.dependency_calls[key] = self.dependency_calls.get(key, 0) + 1
+        return self._dependency_edges(repo, ref)
+
+    def dependents(
+        self, repo: str, ref: str | None, *, source_key: str | None
+    ) -> list[IndexedDependency]:
+        key = (repo, ref, source_key)
+        self.dependent_calls[key] = self.dependent_calls.get(key, 0) + 1
+        return self._dependent_edges(repo, ref)
 
     def is_stale(self, source_key: str | None, *, max_age_seconds: int) -> bool:
         return self.stale
@@ -75,10 +84,9 @@ class StubIndex:
         *,
         source_key: str | None,
     ) -> dict[tuple[str, str | None], list[IndexedDependency]]:
+        # Answers from stub data directly so point-read counters stay untouched.
         self.dependencies_batch_calls.append(list(pairs))
-        return {
-            (repo, ref): self.dependencies(repo, ref, source_key=source_key) for repo, ref in pairs
-        }
+        return {(repo, ref): self._dependency_edges(repo, ref) for repo, ref in pairs}
 
     def dependents_batch(
         self,
@@ -86,10 +94,9 @@ class StubIndex:
         *,
         source_key: str | None,
     ) -> dict[tuple[str, str | None], list[IndexedDependency]]:
+        # Answers from stub data directly so point-read counters stay untouched.
         self.dependents_batch_calls.append(list(pairs))
-        return {
-            (repo, ref): self.dependents(repo, ref, source_key=source_key) for repo, ref in pairs
-        }
+        return {(repo, ref): self._dependent_edges(repo, ref) for repo, ref in pairs}
 
     def cached_ref_metadata_batch(
         self,
@@ -582,7 +589,11 @@ def test_graph_traversal_caches_repeated_index_reads_for_converging_paths() -> N
     assert ("acme/shared@main", "acme/leaf@main", "requires") in [
         (edge.source_id, edge.target_id, edge.relation) for edge in graph.edges
     ]
-    assert index.dependency_calls[("acme/shared", "main", "source:prod")] == 1
+    # Converging paths must request the shared node from the index only once,
+    # and only through batch reads -- never through point reads.
+    batched_pairs = [pair for call in index.dependencies_batch_calls for pair in call]
+    assert batched_pairs.count(("acme/shared", "main")) == 1
+    assert index.dependency_calls == {}
 
 
 def test_impact_traversal_caches_repeated_index_reads_for_converging_paths() -> None:
@@ -651,7 +662,11 @@ def test_impact_traversal_caches_repeated_index_reads_for_converging_paths() -> 
     assert ("acme/leaf@main", "acme/shared@main", "impacts") in [
         (edge.source_id, edge.target_id, edge.relation) for edge in graph.edges
     ]
-    assert index.dependent_calls[("acme/shared", "main", "source:prod")] == 1
+    # Converging paths must request the shared node from the index only once,
+    # and only through batch reads -- never through point reads.
+    batched_pairs = [pair for call in index.dependents_batch_calls for pair in call]
+    assert batched_pairs.count(("acme/shared", "main")) == 1
+    assert index.dependent_calls == {}
 
 
 def test_depth_fanout_issues_one_dependencies_batch_read_per_level() -> None:
@@ -699,5 +714,6 @@ def test_depth_fanout_issues_one_dependencies_batch_read_per_level() -> None:
     assert len(graph.edges) == 20
     assert graph.warnings == ()
     # One bulk read per traversal level instead of one point read per node.
-    assert len(index.dependencies_batch_calls) <= 3
     assert [len(pairs) for pairs in index.dependencies_batch_calls] == [1, 4, 16]
+    assert index.dependency_calls == {}
+    assert index.dependent_calls == {}
