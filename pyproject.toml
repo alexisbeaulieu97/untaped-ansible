@@ -24,7 +24,7 @@ build-backend = "uv_build"
 
 [tool.uv.sources]
 untaped = { git = "https://github.com/alexisbeaulieu97/untaped" }
-untaped-github = { git = "file:///Users/alexisbeaulieu/Projects/untaped-dev/untaped-github", rev = "c64967abd15277022a592f8d6cc3c7c1b9be15ca" }
+untaped-github = { git = "https://github.com/alexisbeaulieu97/untaped-github" }
 
 [dependency-groups]
 dev = [
