@@ -198,6 +198,32 @@ Cached downstream traversal is strict about refs. If a dependency points at
 `repo@v1` and only `repo@main` is cached, traversal must warn and stop there
 instead of falling back to another cached ref.
 
+Graph flag conflicts are parse-time errors: `--refresh`/`--cached`/`--live`
+form one Cyclopts mutually-exclusive group and
+`--upstream`/`--downstream`/`--both` another
+(`Group(..., validator=validators.LimitedChoice())` attached via
+`Parameter(group=...)`; `LimitedChoice()` is the typed equivalent of
+cyclopts' untyped `MutuallyExclusive` alias), so conflicting flags exit 2
+before the command body runs. The cross-flag rule "`--refresh` requires `--source` or inline
+selectors" cannot be a group validator; it is the first statement of the
+command body so it fails (exit 2) before any settings or index construction.
+
+The default source-freshness check has an opt-in TTL: `ansible.freshness_ttl`
+(seconds, `ge=0`, default unset = always check). When set, the graph command
+skips the probe/refresh for any source selection whose last successful scan
+(`scanned_at` via index status) is within the TTL, emitting one stderr info
+line per skipped selection (`source '<label>' refreshed <age> ago (within
+freshness_ttl); skipping check — pass --refresh to force`). The TTL is
+evaluated per selection, so a multi-source graph may skip fresh selections
+while probing stale ones. `--refresh` always probes regardless of TTL;
+`--cached` always skips every check (unchanged).
+
+Stale-data and missing-cached-ref graph warnings carry the exact fix command.
+The application layer stays free of CLI strings: the CLI composes
+`GraphRequest.refresh_hint` (`untaped ansible source refresh NAME` for saved
+sources; re-run with `--refresh` for inline sources) and `BuildGraph` appends
+it to those warnings.
+
 Saved sources are configured under `ansible.sources`. `graph --source NAME` is
 repeatable; repeated saved sources are additive and graph reads union their
 existing `source:NAME` caches without creating a synthetic persisted source.

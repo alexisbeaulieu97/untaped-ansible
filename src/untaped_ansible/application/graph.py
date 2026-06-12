@@ -26,6 +26,12 @@ class GraphRequest(BaseModel):
     direction: GraphDirection = "both"
     depth: int | None = 3
     stale_after: int = 86_400
+    refresh_hint: str | None = None
+    """Caller-composed fix instruction appended to stale/missing-ref warnings.
+
+    The application layer stays free of CLI strings; the CLI passes the exact
+    refresh command (or flag guidance) to surface in actionable warnings.
+    """
 
 
 class BuildGraph:
@@ -129,7 +135,11 @@ class _GraphBuilder:
             self._request.source_key,
             max_age_seconds=self._request.stale_after,
         ):
-            warnings.append("source data is stale; refresh it before relying on upstream impact")
+            warnings.append(
+                self._with_refresh_hint(
+                    "source data is stale; refresh it before relying on upstream impact"
+                )
+            )
         warnings.extend(self._warnings)
         return DependencyGraph(
             target_id=target_id,
@@ -375,15 +385,26 @@ class _GraphBuilder:
         if cached_refs:
             available = ", ".join(self._sorted_cached_ref_names(repo, cached_refs))
             self._add_warning(
-                f"not expanding {node} from cached source data: ref is not cached "
-                f"(available refs: {available}). Scan the matching ref/tag or use --live "
-                "for downstream."
+                self._with_refresh_hint(
+                    f"not expanding {node} from cached source data: ref is not cached "
+                    f"(available refs: {available}). Scan the matching ref/tag or use --live "
+                    "for downstream."
+                )
             )
             return
         self._add_warning(
-            f"not expanding {node} from cached source data: repo/ref is not cached. "
-            "Add it to the source, scan the matching ref/tag, or use --live for downstream."
+            self._with_refresh_hint(
+                f"not expanding {node} from cached source data: repo/ref is not cached. "
+                "Add it to the source, scan the matching ref/tag, or use --live for downstream."
+            )
         )
+
+    def _with_refresh_hint(self, message: str) -> str:
+        hint = self._request.refresh_hint
+        if hint is None:
+            return message
+        separator = " " if message.endswith(".") else ". "
+        return f"{message}{separator}{hint}"
 
     def _dependencies_for(self, repo: str, ref: str | None) -> list[IndexedDependency]:
         key = (repo, ref, self._request.source_key)

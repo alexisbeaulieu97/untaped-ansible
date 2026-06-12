@@ -58,7 +58,10 @@ def source_save_command(
         list[str] | None,
         Parameter(
             name="--team",
-            help="GitHub team slug with one --org, or ORG/SLUG.",
+            help=(
+                "GitHub team as ORG/SLUG; a bare SLUG is allowed when exactly one "
+                "--org is given and normalizes to ORG/SLUG."
+            ),
             consume_multiple=False,
         ),
     ] = None,

@@ -42,6 +42,14 @@ def test_ansible_settings_default_to_git_source_refresh() -> None:
     assert settings.git_blob_filter is True
 
 
+def test_ansible_settings_freshness_ttl_defaults_off_and_rejects_negative_values() -> None:
+    assert AnsibleSettings().freshness_ttl is None
+    assert AnsibleSettings(freshness_ttl=0).freshness_ttl == 0
+    assert AnsibleSettings(freshness_ttl=3600).freshness_ttl == 3600
+    with pytest.raises(ValidationError, match="freshness_ttl"):
+        AnsibleSettings(freshness_ttl=-1)
+
+
 def test_ansible_settings_validate_ref_scan_and_git_options() -> None:
     with pytest.raises(ValidationError, match="ref_scan_default"):
         AnsibleSettings(ref_scan_default="main")

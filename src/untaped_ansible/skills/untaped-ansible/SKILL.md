@@ -21,6 +21,10 @@ Use this skill when the user wants an agent to operate `untaped ansible` for Ans
 - Inline selectors such as `--org`, `--team`, `--repo`, `--path`, `--ref-kind`, and `--ref-pattern` are also additive where accepted.
 - `--cached` uses SQLite cache as-is; source-backed graphing refreshes by default unless cached mode is selected.
 - `--live` is the explicit opt-in for live GitHub downstream reads.
+- `--refresh`, `--cached`, and `--live` are mutually exclusive, as are `--upstream`, `--downstream`, and `--both`; conflicting flags are usage errors (exit 2). `--refresh` also requires `--source` or inline selectors.
+- `--team` accepts ORG/SLUG; a bare SLUG is allowed when exactly one `--org` is given and normalizes to ORG/SLUG.
+- Inline source selectors are cached under a deterministic fingerprint key, so repeating the identical graph command reuses the scan.
+- `ansible.freshness_ttl` (seconds, opt-in; default unset = always check) lets graph skip the remote freshness check per source selection whose last scan is within the TTL, with one stderr info line per skipped selection. `--refresh` always probes; `--cached` always skips all checks.
 
 ## Agent Guidance
 

@@ -30,16 +30,18 @@ def _write_config(
     *,
     index_path: Path | None = None,
     extra_profile: dict[str, object] | None = None,
+    ansible_profile: dict[str, object] | None = None,
     top_level_ansible: dict[str, object] | None = None,
     top_level_ui: dict[str, object] | None = None,
 ) -> Path:
     cfg = tmp_path / "config.yml"
-    profile = {
-        "ansible": {
-            "index_path": str(index_path or tmp_path / "index.sqlite3"),
-            "stale_after": 86400,
-        }
+    ansible_section: dict[str, object] = {
+        "index_path": str(index_path or tmp_path / "index.sqlite3"),
+        "stale_after": 86400,
     }
+    if ansible_profile:
+        ansible_section.update(ansible_profile)
+    profile = {"ansible": ansible_section}
     if extra_profile:
         profile.update(extra_profile)
     data: dict[str, object] = {"profiles": {"default": profile}}
@@ -1276,6 +1278,7 @@ def test_graph_cached_missing_ref_lists_available_refs_in_display_order(
 
     assert result.exit_code == 0, result.output
     assert ("available refs: trunk, docs, feature/2, v2.0.0, v1.0.0") in result.stdout
+    assert "Run `untaped ansible source refresh platform` to update it." in result.stdout
 
 
 def test_graph_both_renders_downstream_and_warns_when_upstream_unavailable(
@@ -1406,14 +1409,48 @@ def test_graph_downstream_with_source_live_flag_reads_remote_dependencies(
     assert "acme/cached" not in result.stdout
 
 
-def test_graph_direction_flags_are_mutually_exclusive(tmp_path: Path, monkeypatch) -> None:
+def test_graph_direction_flags_are_mutually_exclusive_at_parse_time(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
     cfg = _write_config(tmp_path)
     monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
+    runner = CliInvoker()
 
-    result = CliInvoker().invoke(app, ["graph", "acme/site", "--upstream", "--downstream"])
+    for args in (["--upstream", "--downstream"], ["--upstream", "--both"]):
+        result = runner.invoke(app, ["graph", "acme/site", *args])
+        output = " ".join(result.output.split())
+        assert result.exit_code == 2, result.output
+        assert "Mutually exclusive arguments" in output
+        for flag in args:
+            assert flag in output
 
-    assert result.exit_code == 2
-    assert "choose only one of --upstream, --downstream, or --both" in result.output
+
+def test_graph_refresh_cached_and_live_are_mutually_exclusive_at_parse_time(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    cfg = _write_config(
+        tmp_path,
+        top_level_ansible={"sources": [{"name": "platform", "orgs": ["acme"]}]},
+    )
+    monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
+    runner = CliInvoker()
+
+    for args in (["--refresh", "--cached"], ["--cached", "--live"]):
+        result = runner.invoke(app, ["graph", "acme/site", "--source", "platform", *args])
+        output = " ".join(result.output.split())
+        assert result.exit_code == 2, result.output
+        assert "Mutually exclusive arguments" in output
+        for flag in args:
+            assert flag in output
+
+
+def test_graph_refresh_without_source_fails_fast_with_usage_error() -> None:
+    result = CliInvoker().invoke(app, ["graph", "acme/site", "--refresh"])
+
+    assert result.exit_code == 2, result.output
+    assert "--refresh requires --source or inline source selectors" in result.output
 
 
 def test_graph_source_conflicts_with_inline_selectors(tmp_path: Path, monkeypatch) -> None:
@@ -1770,6 +1807,9 @@ def test_graph_help_teaches_clean_source_first_workflow() -> None:
     assert "--target-repo" in output
     assert "--both" in output
     assert "Show upstream and downstream (default)." in output
+    assert "Show what TARGET depends on (works without a source)." in output
+    assert "Show repos that depend on TARGET (reverse impact; requires a source)." in output
+    assert "deterministic fingerprint key" in output
     assert "Examples:" in output
     assert (
         "untaped ansible graph acme/base --org acme --team platform --upstream --refresh" in output
@@ -2208,6 +2248,230 @@ def test_graph_cached_skips_source_refresh(tmp_path: Path, monkeypatch) -> None:
 
     assert result.exit_code == 0, result.output
     assert "    +-- acme/site@main" in result.stdout
+
+
+def _fresh_platform_dependency() -> IndexedDependency:
+    return IndexedDependency(
+        source_repo="acme/site",
+        source_ref="main",
+        dependency_repo="acme/base",
+        dependency_name="base",
+        dependency_version=None,
+        source_path="roles/requirements.yml",
+    )
+
+
+def _counting_refresh(calls: list[str]):
+    def fake_refresh(
+        source,
+        *,
+        source_key: str,
+        index: SqliteDependencyIndex,
+        aliases: dict[str, str],
+        settings,
+        github_settings,
+        http,
+        concurrency: int,
+        on_progress=None,
+    ) -> RefreshResult:
+        del aliases, settings, concurrency
+        calls.append(source.name)
+        source_repo = source.repos[0]
+        _seed_index(
+            index,
+            source_key,
+            (
+                IndexedDependency(
+                    source_repo=source_repo,
+                    source_ref="main",
+                    dependency_repo="acme/base",
+                    dependency_name="base",
+                    dependency_version=None,
+                    source_path="roles/requirements.yml",
+                ),
+            ),
+        )
+        return RefreshResult(source_key=source_key, repos=1, refs=1, edges=1, changed_refs=1)
+
+    return fake_refresh
+
+
+def test_graph_freshness_ttl_skips_remote_check_for_fresh_source(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    index_path = tmp_path / "index.sqlite3"
+    _seed_index(
+        SqliteDependencyIndex(index_path),
+        "source:platform",
+        (_fresh_platform_dependency(),),
+        scanned_at=datetime.now(UTC),
+    )
+    cfg = _write_config(
+        tmp_path,
+        index_path=index_path,
+        ansible_profile={"freshness_ttl": 3600},
+        top_level_ansible={"sources": [{"name": "platform", "repos": ["acme/site"]}]},
+    )
+    monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
+
+    with respx.mock(base_url="https://api.github.com", assert_all_called=False) as mock:
+        result = CliInvoker().invoke(
+            app,
+            ["graph", "acme/base", "--source", "platform", "--upstream"],
+        )
+        assert len(mock.calls) == 0
+
+    assert result.exit_code == 0, result.output
+    assert "    +-- acme/site@main" in result.stdout
+    assert "source 'platform' refreshed " in result.stderr
+    assert "ago (within freshness_ttl); skipping check — pass --refresh to force" in result.stderr
+
+
+def test_graph_freshness_ttl_with_refresh_flag_still_probes(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    index_path = tmp_path / "index.sqlite3"
+    _seed_index(
+        SqliteDependencyIndex(index_path),
+        "source:platform",
+        (_fresh_platform_dependency(),),
+        scanned_at=datetime.now(UTC),
+    )
+    cfg = _write_config(
+        tmp_path,
+        index_path=index_path,
+        ansible_profile={"freshness_ttl": 3600},
+        top_level_ansible={"sources": [{"name": "platform", "repos": ["acme/site"]}]},
+    )
+    monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
+    calls: list[str] = []
+    monkeypatch.setattr(_refresh, "refresh_source", _counting_refresh(calls))
+
+    result = CliInvoker().invoke(
+        app,
+        ["graph", "acme/base", "--source", "platform", "--upstream", "--refresh"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert calls == ["platform"]
+    assert "skipping check" not in result.stderr
+
+
+def test_graph_freshness_ttl_still_probes_stale_source(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    index_path = tmp_path / "index.sqlite3"
+    _seed_index(
+        SqliteDependencyIndex(index_path),
+        "source:platform",
+        (_fresh_platform_dependency(),),
+        scanned_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    cfg = _write_config(
+        tmp_path,
+        index_path=index_path,
+        ansible_profile={"freshness_ttl": 60},
+        top_level_ansible={"sources": [{"name": "platform", "repos": ["acme/site"]}]},
+    )
+    monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
+    calls: list[str] = []
+    monkeypatch.setattr(_refresh, "refresh_source", _counting_refresh(calls))
+
+    result = CliInvoker().invoke(
+        app,
+        ["graph", "acme/base", "--source", "platform", "--upstream"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert calls == ["platform"]
+    assert "skipping check" not in result.stderr
+
+
+def test_graph_freshness_ttl_is_per_selection_for_mixed_sources(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    index_path = tmp_path / "index.sqlite3"
+    index = SqliteDependencyIndex(index_path)
+    _seed_index(
+        index,
+        "source:platform",
+        (_fresh_platform_dependency(),),
+        scanned_at=datetime.now(UTC),
+    )
+    _seed_index(
+        index,
+        "source:ops",
+        (
+            IndexedDependency(
+                source_repo="acme/deploy",
+                source_ref="main",
+                dependency_repo="acme/base",
+                dependency_name="base",
+                dependency_version=None,
+                source_path="roles/requirements.yml",
+            ),
+        ),
+        scanned_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    cfg = _write_config(
+        tmp_path,
+        index_path=index_path,
+        ansible_profile={"freshness_ttl": 3600},
+        top_level_ansible={
+            "sources": [
+                {"name": "platform", "repos": ["acme/site"]},
+                {"name": "ops", "repos": ["acme/deploy"]},
+            ]
+        },
+    )
+    monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
+    calls: list[str] = []
+    monkeypatch.setattr(_refresh, "refresh_source", _counting_refresh(calls))
+
+    result = CliInvoker().invoke(
+        app,
+        ["graph", "acme/base", "--source", "platform", "--source", "ops", "--upstream"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert calls == ["ops"]
+    assert "source 'platform' refreshed" in result.stderr
+    assert "source 'ops' refreshed" not in result.stderr
+    assert "    +-- acme/site@main" in result.stdout
+    assert "    +-- acme/deploy@main" in result.stdout
+
+
+def test_graph_stale_warning_includes_exact_refresh_command(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    index_path = tmp_path / "index.sqlite3"
+    _seed_index(
+        SqliteDependencyIndex(index_path),
+        "source:platform",
+        (_fresh_platform_dependency(),),
+        scanned_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    cfg = _write_config(
+        tmp_path,
+        index_path=index_path,
+        ansible_profile={"stale_after": 60},
+        top_level_ansible={"sources": [{"name": "platform", "repos": ["acme/site"]}]},
+    )
+    monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
+
+    result = CliInvoker().invoke(
+        app,
+        ["graph", "acme/base", "--source", "platform", "--upstream", "--cached"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "source data is stale" in result.stdout
+    assert "Run `untaped ansible source refresh platform` to update it." in result.stdout
 
 
 def test_source_save_expands_bare_team_slug_with_single_org(tmp_path: Path, monkeypatch) -> None:

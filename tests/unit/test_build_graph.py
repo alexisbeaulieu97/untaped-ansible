@@ -323,6 +323,42 @@ def test_transitive_dependency_traversal_warns_and_stops_when_ref_is_not_cached(
     )
 
 
+def test_refresh_hint_is_appended_to_stale_and_missing_ref_warnings() -> None:
+    index = StubIndex(
+        [
+            IndexedDependency(
+                source_repo="acme/a",
+                source_ref="main",
+                dependency_repo="acme/b",
+                dependency_name="b",
+                dependency_version="v1",
+                source_path="roles/requirements.yml",
+            ),
+        ],
+        cached_refs={"acme/a": {"main"}, "acme/b": {"main"}},
+        stale=True,
+    )
+
+    graph = BuildGraph(index)(
+        GraphRequest(
+            repo="acme/a",
+            ref="main",
+            source_key="source:prod",
+            direction="both",
+            depth=3,
+            refresh_hint="Run `untaped ansible source refresh prod` to update it.",
+        )
+    )
+
+    assert graph.warnings == (
+        "source data is stale; refresh it before relying on upstream impact. "
+        "Run `untaped ansible source refresh prod` to update it.",
+        "not expanding acme/b@v1 from cached source data: ref is not cached "
+        "(available refs: main). Scan the matching ref/tag or use --live for downstream. "
+        "Run `untaped ansible source refresh prod` to update it.",
+    )
+
+
 def test_cached_ref_warning_uses_branch_and_semver_display_order() -> None:
     index = StubIndex(
         [],
