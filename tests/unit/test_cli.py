@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import json
 from base64 import b64encode
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import httpx
+import pytest
 import respx
 import yaml
 from untaped.settings import get_settings
@@ -1409,41 +1410,49 @@ def test_graph_downstream_with_source_live_flag_reads_remote_dependencies(
     assert "acme/cached" not in result.stdout
 
 
+@pytest.mark.parametrize(
+    "args",
+    [["--upstream", "--downstream"], ["--upstream", "--both"]],
+)
 def test_graph_direction_flags_are_mutually_exclusive_at_parse_time(
     tmp_path: Path,
     monkeypatch,
+    args: list[str],
 ) -> None:
     cfg = _write_config(tmp_path)
     monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
-    runner = CliInvoker()
 
-    for args in (["--upstream", "--downstream"], ["--upstream", "--both"]):
-        result = runner.invoke(app, ["graph", "acme/site", *args])
-        output = " ".join(result.output.split())
-        assert result.exit_code == 2, result.output
-        assert "Mutually exclusive arguments" in output
-        for flag in args:
-            assert flag in output
+    result = CliInvoker().invoke(app, ["graph", "acme/site", *args])
+    output = " ".join(result.output.split())
+
+    assert result.exit_code == 2, result.output
+    assert "Mutually exclusive arguments" in output
+    for flag in args:
+        assert flag in output
 
 
+@pytest.mark.parametrize(
+    "args",
+    [["--refresh", "--cached"], ["--cached", "--live"], ["--refresh", "--live"]],
+)
 def test_graph_refresh_cached_and_live_are_mutually_exclusive_at_parse_time(
     tmp_path: Path,
     monkeypatch,
+    args: list[str],
 ) -> None:
     cfg = _write_config(
         tmp_path,
         top_level_ansible={"sources": [{"name": "platform", "orgs": ["acme"]}]},
     )
     monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
-    runner = CliInvoker()
 
-    for args in (["--refresh", "--cached"], ["--cached", "--live"]):
-        result = runner.invoke(app, ["graph", "acme/site", "--source", "platform", *args])
-        output = " ".join(result.output.split())
-        assert result.exit_code == 2, result.output
-        assert "Mutually exclusive arguments" in output
-        for flag in args:
-            assert flag in output
+    result = CliInvoker().invoke(app, ["graph", "acme/site", "--source", "platform", *args])
+    output = " ".join(result.output.split())
+
+    assert result.exit_code == 2, result.output
+    assert "Mutually exclusive arguments" in output
+    for flag in args:
+        assert flag in output
 
 
 def test_graph_refresh_without_source_fails_fast_with_usage_error() -> None:
@@ -2325,7 +2334,68 @@ def test_graph_freshness_ttl_skips_remote_check_for_fresh_source(
     assert result.exit_code == 0, result.output
     assert "    +-- acme/site@main" in result.stdout
     assert "source 'platform' refreshed " in result.stderr
-    assert "ago (within freshness_ttl); skipping check — pass --refresh to force" in result.stderr
+    assert (
+        "ago (within freshness_ttl of 3600s); skipping check — pass --refresh to force"
+        in result.stderr
+    )
+
+
+def test_graph_freshness_ttl_skip_message_reports_age_in_hours(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    index_path = tmp_path / "index.sqlite3"
+    _seed_index(
+        SqliteDependencyIndex(index_path),
+        "source:platform",
+        (_fresh_platform_dependency(),),
+        scanned_at=datetime.now(UTC) - timedelta(hours=3),
+    )
+    cfg = _write_config(
+        tmp_path,
+        index_path=index_path,
+        ansible_profile={"freshness_ttl": 14400},
+        top_level_ansible={"sources": [{"name": "platform", "repos": ["acme/site"]}]},
+    )
+    monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
+
+    with respx.mock(base_url="https://api.github.com", assert_all_called=False) as mock:
+        result = CliInvoker().invoke(
+            app,
+            ["graph", "acme/base", "--source", "platform", "--upstream"],
+        )
+        assert len(mock.calls) == 0
+
+    assert result.exit_code == 0, result.output
+    assert (
+        "source 'platform' refreshed 3 hours ago (within freshness_ttl of 14400s); "
+        "skipping check — pass --refresh to force" in result.stderr
+    )
+
+
+def test_graph_freshness_ttl_probes_source_that_was_never_scanned(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    index_path = tmp_path / "index.sqlite3"
+    cfg = _write_config(
+        tmp_path,
+        index_path=index_path,
+        ansible_profile={"freshness_ttl": 3600},
+        top_level_ansible={"sources": [{"name": "platform", "repos": ["acme/site"]}]},
+    )
+    monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
+    calls: list[str] = []
+    monkeypatch.setattr(_refresh, "refresh_source", _counting_refresh(calls))
+
+    result = CliInvoker().invoke(
+        app,
+        ["graph", "acme/base", "--source", "platform", "--upstream"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert calls == ["platform"]
+    assert "skipping check" not in result.stderr
 
 
 def test_graph_freshness_ttl_with_refresh_flag_still_probes(

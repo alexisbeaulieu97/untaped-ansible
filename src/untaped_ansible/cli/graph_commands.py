@@ -252,12 +252,20 @@ def graph_command(
         if should_refresh_source:
             github_settings = ctx.section("github", GithubSettings)
             for selection in graph_source.selections:
-                if not refresh and _within_freshness_ttl(
-                    sqlite_index,
-                    selection,
-                    ttl=settings.freshness_ttl,
-                ):
-                    continue
+                if not refresh:
+                    fresh_age = _within_freshness_ttl(
+                        sqlite_index,
+                        selection,
+                        ttl=settings.freshness_ttl,
+                    )
+                    if fresh_age is not None:
+                        echo(
+                            f"source '{selection.label}' refreshed {_human_age(fresh_age)} ago "
+                            f"(within freshness_ttl of {settings.freshness_ttl}s); "
+                            "skipping check — pass --refresh to force",
+                            err=True,
+                        )
+                        continue
                 result = run_source_refresh(
                     selection.definition,
                     source_key=selection.key,
@@ -535,11 +543,9 @@ def _missing_source_index_message(
     missing: tuple[_GraphSourceSelection, ...],
 ) -> str:
     if source_state.saved:
+        refresh_commands = _source_refresh_commands(missing)
         if len(missing) > 1:
             labels = ", ".join(repr(selection.label) for selection in missing)
-            refresh_commands = " and ".join(
-                f"`untaped ansible source refresh {selection.label}`" for selection in missing
-            )
             source_flags = " ".join(
                 f"--source {selection.label}" for selection in source_state.selections
             )
@@ -550,8 +556,8 @@ def _missing_source_index_message(
             )
         label = missing[0].label
         return (
-            f"no cached source data found for source {label!r}. Run: "
-            f"`untaped ansible source refresh {label}`. Or re-run graph with: "
+            f"no cached source data found for source {label!r}. Run: {refresh_commands}. "
+            f"Or re-run graph with: "
             f"`untaped ansible graph {target} --source {label} --upstream --refresh`."
         )
     return (
@@ -665,12 +671,16 @@ def _refresh_hint(source_state: _GraphSource) -> str | None:
     if not source_state.selections:
         return None
     if source_state.saved:
-        commands = " and ".join(
-            f"`untaped ansible source refresh {selection.label}`"
-            for selection in source_state.selections
-        )
+        commands = _source_refresh_commands(source_state.selections)
         return f"Run {commands} to update it."
-    return "Re-run this graph command with `--refresh` to update it."
+    return "Re-run this graph command with `--refresh` (without `--cached`) to update it."
+
+
+def _source_refresh_commands(selections: tuple[_GraphSourceSelection, ...]) -> str:
+    """Join the exact `untaped ansible source refresh NAME` commands for selections."""
+    return " and ".join(
+        f"`untaped ansible source refresh {selection.label}`" for selection in selections
+    )
 
 
 def _within_freshness_ttl(
@@ -678,22 +688,17 @@ def _within_freshness_ttl(
     selection: _GraphSourceSelection,
     *,
     ttl: int | None,
-) -> bool:
-    """True (with one stderr info line) when the selection's scan is within the TTL."""
+) -> timedelta | None:
+    """Age of the selection's last scan when within the TTL, None otherwise."""
     if ttl is None:
-        return False
+        return None
     status = index.status(selection.key)
     if status is None:
-        return False
+        return None
     age = datetime.now(UTC) - status.scanned_at
     if age.total_seconds() > ttl:
-        return False
-    echo(
-        f"source '{selection.label}' refreshed {_human_age(age)} ago "
-        "(within freshness_ttl); skipping check — pass --refresh to force",
-        err=True,
-    )
-    return True
+        return None
+    return age
 
 
 def _human_age(age: timedelta) -> str:

@@ -213,10 +213,11 @@ The default source-freshness check has an opt-in TTL: `ansible.freshness_ttl`
 skips the probe/refresh for any source selection whose last successful scan
 (`scanned_at` via index status) is within the TTL, emitting one stderr info
 line per skipped selection (`source '<label>' refreshed <age> ago (within
-freshness_ttl); skipping check — pass --refresh to force`). The TTL is
-evaluated per selection, so a multi-source graph may skip fresh selections
-while probing stale ones. `--refresh` always probes regardless of TTL;
-`--cached` always skips every check (unchanged).
+freshness_ttl of <ttl>s); skipping check — pass --refresh to force`). The TTL
+is evaluated per selection, so a multi-source graph may skip fresh selections
+while probing stale ones. `freshness_ttl: 0` is equivalent to unset (always
+check). `--refresh` always probes regardless of TTL; `--cached` always skips
+every check (unchanged).
 
 Stale-data and missing-cached-ref graph warnings carry the exact fix command.
 The application layer stays free of CLI strings: the CLI composes
