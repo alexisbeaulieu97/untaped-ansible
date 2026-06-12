@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Sequence
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -83,15 +83,21 @@ class SqliteDependencyIndex:
         keep: set[tuple[str, str, str]],
         repo_metadata: tuple[SourceRepoMetadata, ...] = (),
         scanned_at: datetime,
+        failed_repos: frozenset[str] = frozenset(),
     ) -> None:
+        """Commit a refresh; ``scans`` must be unique per (source_key, source_repo,
+        ref_kind, source_ref) -- duplicates raise IntegrityError inside the
+        transaction instead of last-wins. Cached refs and repo metadata for
+        ``failed_repos`` are preserved even though they are absent from
+        ``keep``."""
         self._path.parent.mkdir(parents=True, exist_ok=True)
         with self._db() as db:
-            for scan in scans:
-                _replace_ref_scan(db, scan)
-            for touch in touches:
-                _touch_ref_scan(db, touch)
-            _prune_source_refs(db, source_key, keep)
-            _replace_source_repo_metadata(db, source_key, repo_metadata)
+            _replace_ref_scans(db, scans)
+            _touch_ref_scans(db, touches)
+            _prune_source_refs(db, source_key, keep, preserve_repos=failed_repos)
+            _replace_source_repo_metadata(
+                db, source_key, repo_metadata, preserve_repos=failed_repos
+            )
             _refresh_source_run_from_ref_scans(db, source_key, scanned_at=scanned_at)
             _delete_orphan_snapshots(db)
 
@@ -102,15 +108,8 @@ class SqliteDependencyIndex:
         *,
         source_key: str | None,
     ) -> list[IndexedDependency]:
-        clauses = ["scans.source_repo = ?"]
-        params: list[object] = [repo]
-        if ref is not None:
-            clauses.append("scans.source_ref = ?")
-            params.append(ref)
-        if source_key is not None:
-            clauses.append("scans.source_key = ?")
-            params.append(source_key)
-        return self._select_edges(clauses, params)
+        # Batch-of-one keeps single/batch read parity by construction.
+        return self.dependencies_batch([(repo, ref)], source_key=source_key)[(repo, ref)]
 
     def dependents(
         self,
@@ -119,15 +118,44 @@ class SqliteDependencyIndex:
         *,
         source_key: str | None,
     ) -> list[IndexedDependency]:
-        clauses = ["edges.dependency_repo = ?"]
-        params: list[object] = [repo]
-        if ref is not None:
-            clauses.append("edges.dependency_version = ?")
-            params.append(ref)
-        if source_key is not None:
-            clauses.append("scans.source_key = ?")
-            params.append(source_key)
-        return self._select_edges(clauses, params)
+        # Batch-of-one keeps single/batch read parity by construction.
+        return self.dependents_batch([(repo, ref)], source_key=source_key)[(repo, ref)]
+
+    def dependencies_batch(
+        self,
+        pairs: Sequence[tuple[str, str | None]],
+        *,
+        source_key: str | None,
+    ) -> dict[tuple[str, str | None], list[IndexedDependency]]:
+        return self._select_edges_batch(
+            pairs,
+            source_key=source_key,
+            join_sql="""
+                join source_ref_scans as scans
+                  on scans.source_repo = requested.repo
+                 and (requested.ref is null or scans.source_ref = requested.ref)
+                join snapshot_edges as edges
+                  on edges.snapshot_id = scans.snapshot_id
+            """,
+        )
+
+    def dependents_batch(
+        self,
+        pairs: Sequence[tuple[str, str | None]],
+        *,
+        source_key: str | None,
+    ) -> dict[tuple[str, str | None], list[IndexedDependency]]:
+        return self._select_edges_batch(
+            pairs,
+            source_key=source_key,
+            join_sql="""
+                join snapshot_edges as edges
+                  on edges.dependency_repo = requested.repo
+                 and (requested.ref is null or edges.dependency_version = requested.ref)
+                join source_ref_scans as scans
+                  on scans.snapshot_id = edges.snapshot_id
+            """,
+        )
 
     def cached_refs(self, repo: str, *, source_key: str | None) -> set[str]:
         if source_key is None:
@@ -144,34 +172,55 @@ class SqliteDependencyIndex:
         return {str(row["source_ref"]) for row in rows}
 
     def cached_ref_metadata(self, repo: str, *, source_key: str | None) -> tuple[CachedRef, ...]:
-        if source_key is None:
-            return ()
+        # Batch-of-one keeps single/batch read parity by construction.
+        return self.cached_ref_metadata_batch([repo], source_key=source_key)[repo]
+
+    def cached_ref_metadata_batch(
+        self,
+        repos: Sequence[str],
+        *,
+        source_key: str | None,
+    ) -> dict[str, tuple[CachedRef, ...]]:
+        requested = list(dict.fromkeys(repos))
+        if source_key is None or not requested:
+            return dict.fromkeys(requested, ())
+        grouped: dict[str, dict[tuple[str, str | None], CachedRef]] = {
+            repo: {} for repo in requested
+        }
         with self._db() as db:
-            rows = db.execute(
-                """
-                select scans.source_ref as name, nullif(scans.ref_kind, '') as kind,
-                       metadata.default_branch
-                from source_ref_scans as scans
-                left join source_repo_metadata as metadata
-                  on metadata.source_key = scans.source_key
-                 and metadata.source_repo = scans.source_repo
-                where scans.source_key = ? and scans.source_repo = ? and scans.source_ref != ''
-                order by scans.id
-                """,
-                (source_key, repo),
-            ).fetchall()
-        refs: dict[tuple[str, str | None], CachedRef] = {}
-        for row in rows:
-            key = (str(row["name"]), _optional_str(row["kind"]))
-            refs.setdefault(
-                key,
-                CachedRef(
-                    name=key[0],
-                    kind=key[1],
-                    default_branch=_optional_str(row["default_branch"]),
-                ),
-            )
-        return tuple(refs.values())
+            for chunk in _chunks(requested, 400):
+                placeholders = ",".join("(?)" for _ in chunk)
+                params: list[object] = [*chunk, source_key]
+                rows = db.execute(
+                    f"""
+                    with requested(repo) as (
+                        values {placeholders}
+                    )
+                    select scans.source_repo, scans.source_ref as name,
+                           nullif(scans.ref_kind, '') as kind,
+                           metadata.default_branch
+                    from requested
+                    join source_ref_scans as scans
+                      on scans.source_repo = requested.repo
+                    left join source_repo_metadata as metadata
+                      on metadata.source_key = scans.source_key
+                     and metadata.source_repo = scans.source_repo
+                    where scans.source_key = ? and scans.source_ref != ''
+                    order by scans.id
+                    """,
+                    params,
+                ).fetchall()
+                for row in rows:
+                    key = (str(row["name"]), _optional_str(row["kind"]))
+                    grouped[str(row["source_repo"])].setdefault(
+                        key,
+                        CachedRef(
+                            name=key[0],
+                            kind=key[1],
+                            default_branch=_optional_str(row["default_branch"]),
+                        ),
+                    )
+        return {repo: tuple(refs.values()) for repo, refs in grouped.items()}
 
     def status(self, source_key: str) -> SourceIndexStatus | None:
         with self._db() as db:
@@ -212,26 +261,56 @@ class SqliteDependencyIndex:
             db.execute("delete from source_repo_metadata where source_key = ?", (source_key,))
             _delete_orphan_snapshots(db)
 
-    def _select_edges(self, clauses: list[str], params: list[object]) -> list[IndexedDependency]:
-        where = " and ".join(clauses)
+    def _select_edges_batch(
+        self,
+        pairs: Sequence[tuple[str, str | None]],
+        *,
+        source_key: str | None,
+        join_sql: str,
+    ) -> dict[tuple[str, str | None], list[IndexedDependency]]:
+        requested = list(dict.fromkeys(pairs))
+        results: dict[tuple[str, str | None], list[IndexedDependency]] = {
+            pair: [] for pair in requested
+        }
+        if not requested:
+            return results
+        key_clause = "" if source_key is None else "where scans.source_key = ?"
         with self._db() as db:
-            rows = db.execute(
-                f"""
-                select scans.source_repo,
-                       nullif(scans.source_ref, '') as source_ref,
-                       nullif(scans.ref_kind, '') as source_ref_kind,
-                       nullif(scans.source_sha, '') as source_sha,
-                       edges.dependency_repo, edges.dependency_name, edges.dependency_version,
-                       edges.source_path, edges.unresolved
-                from source_ref_scans as scans
-                join snapshot_edges as edges
-                  on edges.snapshot_id = scans.snapshot_id
-                where {where}
-                order by scans.id, edges.id
-                """,
-                params,
-            ).fetchall()
-        return [edge_from_row(row) for row in rows]
+            # 400 pairs x 2 columns = 800 bound params, under the pre-3.32
+            # limit of 999 (matching the ref_scans VALUES chunking above).
+            for chunk in _chunks(requested, 400):
+                placeholders = ",".join("(?, ?)" for _ in chunk)
+                params: list[object] = [value for pair in chunk for value in pair]
+                if source_key is not None:
+                    params.append(source_key)
+                rows = db.execute(
+                    f"""
+                    with requested(repo, ref) as (
+                        values {placeholders}
+                    )
+                    select requested.repo as requested_repo,
+                           requested.ref as requested_ref,
+                           scans.source_repo,
+                           nullif(scans.source_ref, '') as source_ref,
+                           nullif(scans.ref_kind, '') as source_ref_kind,
+                           nullif(scans.source_sha, '') as source_sha,
+                           edges.dependency_repo, edges.dependency_name,
+                           edges.dependency_version, edges.source_path, edges.unresolved
+                    from requested
+                    {join_sql}
+                    {key_clause}
+                    order by scans.id, edges.id
+                    """,
+                    params,
+                ).fetchall()
+                for row in rows:
+                    requested_ref = row["requested_ref"]
+                    key = (
+                        str(row["requested_repo"]),
+                        str(requested_ref) if requested_ref is not None else None,
+                    )
+                    results[key].append(edge_from_row(row))
+        return results
 
     def _connect(self) -> sqlite3.Connection:
         db = sqlite3.connect(self._path)
@@ -243,7 +322,7 @@ class SqliteDependencyIndex:
             return
         with self._schema_lock:
             if not self._schema_ready:
-                ensure_schema(db)
+                ensure_schema(db, self._path)
                 self._schema_ready = True
 
     @contextmanager
@@ -257,17 +336,34 @@ class SqliteDependencyIndex:
             db.close()
 
 
-def _replace_ref_scan(db: sqlite3.Connection, scan: RefScan) -> None:
-    snapshot_id = _snapshot_id(db, scan)
-    _insert_snapshot_edges_if_missing(db, snapshot_id, scan.dependencies)
-    db.execute(
+_SnapshotIdentity = tuple[str, str, str, str]
+
+
+def _snapshot_identity(scan: RefScan) -> _SnapshotIdentity:
+    return (
+        scan.source_repo,
+        scan.source_sha,
+        scan.dependency_paths_fingerprint,
+        scan.aliases_fingerprint,
+    )
+
+
+def _replace_ref_scans(db: sqlite3.Connection, scans: tuple[RefScan, ...]) -> None:
+    if not scans:
+        return
+    snapshot_ids = _existing_snapshot_ids(db, scans)
+    for scan in scans:
+        identity = _snapshot_identity(scan)
+        if identity not in snapshot_ids:
+            snapshot_ids[identity] = _insert_snapshot(db, scan)
+    db.executemany(
         """
         delete from source_ref_scans
         where source_key = ? and source_repo = ? and ref_kind = ? and source_ref = ?
         """,
-        (scan.source_key, scan.source_repo, scan.ref_kind, scan.source_ref),
+        [(scan.source_key, scan.source_repo, scan.ref_kind, scan.source_ref) for scan in scans],
     )
-    db.execute(
+    db.executemany(
         """
         insert into source_ref_scans(
             source_key, source_repo, ref_kind, source_ref, source_sha,
@@ -275,104 +371,125 @@ def _replace_ref_scan(db: sqlite3.Connection, scan: RefScan) -> None:
             aliases_fingerprint, checked_at, indexed_at, snapshot_id
         ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (
-            scan.source_key,
-            scan.source_repo,
-            scan.ref_kind,
-            scan.source_ref,
-            scan.source_sha,
-            scan.clone_url,
-            scan.clone_protocol,
-            scan.dependency_paths_fingerprint,
-            scan.aliases_fingerprint,
-            dump_dt(scan.checked_at),
-            dump_dt(scan.indexed_at),
-            snapshot_id,
-        ),
+        [
+            (
+                scan.source_key,
+                scan.source_repo,
+                scan.ref_kind,
+                scan.source_ref,
+                scan.source_sha,
+                scan.clone_url,
+                scan.clone_protocol,
+                scan.dependency_paths_fingerprint,
+                scan.aliases_fingerprint,
+                dump_dt(scan.checked_at),
+                dump_dt(scan.indexed_at),
+                snapshot_ids[_snapshot_identity(scan)],
+            )
+            for scan in scans
+        ],
     )
 
 
-def _snapshot_id(db: sqlite3.Connection, scan: RefScan) -> int:
-    db.execute(
+def _existing_snapshot_ids(
+    db: sqlite3.Connection,
+    scans: tuple[RefScan, ...],
+) -> dict[_SnapshotIdentity, int]:
+    identities = sorted({_snapshot_identity(scan) for scan in scans})
+    ids: dict[_SnapshotIdentity, int] = {}
+    # 200 identities x 4 columns = 800 bound params, under the pre-3.32 limit of
+    # 999, even though this module already assumes SQLite >= 3.35 (RETURNING).
+    for chunk in _chunks(identities, 200):
+        placeholders = ",".join("(?, ?, ?, ?)" for _ in chunk)
+        params = [value for identity in chunk for value in identity]
+        rows = db.execute(
+            f"""
+            with requested(
+                source_repo, source_sha, dependency_paths_fingerprint, aliases_fingerprint
+            ) as (
+                values {placeholders}
+            )
+            select snapshots.id, snapshots.source_repo, snapshots.source_sha,
+                   snapshots.dependency_paths_fingerprint, snapshots.aliases_fingerprint
+            from dependency_snapshots as snapshots
+            join requested
+              on requested.source_repo = snapshots.source_repo
+             and requested.source_sha = snapshots.source_sha
+             and requested.dependency_paths_fingerprint
+                 = snapshots.dependency_paths_fingerprint
+             and requested.aliases_fingerprint = snapshots.aliases_fingerprint
+            """,
+            params,
+        ).fetchall()
+        for row in rows:
+            identity = (
+                str(row["source_repo"]),
+                str(row["source_sha"]),
+                str(row["dependency_paths_fingerprint"]),
+                str(row["aliases_fingerprint"]),
+            )
+            ids[identity] = int(row["id"])
+    return ids
+
+
+def _insert_snapshot(db: sqlite3.Connection, scan: RefScan) -> int:
+    """Insert a new dependency snapshot with its edges and return its id."""
+    row = db.execute(
         """
         insert into dependency_snapshots(
             source_repo, source_sha, dependency_paths_fingerprint, aliases_fingerprint
         ) values (?, ?, ?, ?)
         on conflict(source_repo, source_sha, dependency_paths_fingerprint, aliases_fingerprint)
-        do nothing
+        -- no-op update: only needed so RETURNING yields a row when another
+        -- process inserted the same identity first (DO NOTHING returns nothing)
+        do update set source_repo = excluded.source_repo
+        returning id
         """,
-        (
-            scan.source_repo,
-            scan.source_sha,
-            scan.dependency_paths_fingerprint,
-            scan.aliases_fingerprint,
-        ),
-    )
-    row = db.execute(
-        """
-        select id
-        from dependency_snapshots
-        where source_repo = ? and source_sha = ? and dependency_paths_fingerprint = ?
-          and aliases_fingerprint = ?
-        """,
-        (
-            scan.source_repo,
-            scan.source_sha,
-            scan.dependency_paths_fingerprint,
-            scan.aliases_fingerprint,
-        ),
+        _snapshot_identity(scan),
     ).fetchone()
-    if row is None:
-        raise RuntimeError("dependency snapshot insert failed")
-    return int(row["id"])
+    snapshot_id = int(row["id"])
+    if scan.dependencies:
+        db.executemany(
+            """
+            insert into snapshot_edges(
+                snapshot_id, dependency_repo, dependency_name, dependency_version,
+                source_path, unresolved
+            ) values (?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    snapshot_id,
+                    edge.dependency_repo,
+                    edge.dependency_name,
+                    edge.dependency_version,
+                    edge.source_path,
+                    edge.unresolved,
+                )
+                for edge in scan.dependencies
+            ],
+        )
+    return snapshot_id
 
 
-def _insert_snapshot_edges_if_missing(
-    db: sqlite3.Connection,
-    snapshot_id: int,
-    dependencies: tuple[IndexedDependency, ...],
-) -> None:
-    row = db.execute(
-        "select count(*) as edges from snapshot_edges where snapshot_id = ?",
-        (snapshot_id,),
-    ).fetchone()
-    if int(row["edges"] or 0) > 0 or not dependencies:
+def _touch_ref_scans(db: sqlite3.Connection, touches: tuple[RefScanTouch, ...]) -> None:
+    if not touches:
         return
     db.executemany(
-        """
-        insert into snapshot_edges(
-            snapshot_id, dependency_repo, dependency_name, dependency_version,
-            source_path, unresolved
-        ) values (?, ?, ?, ?, ?, ?)
-        """,
-        [
-            (
-                snapshot_id,
-                edge.dependency_repo,
-                edge.dependency_name,
-                edge.dependency_version,
-                edge.source_path,
-                edge.unresolved,
-            )
-            for edge in dependencies
-        ],
-    )
-
-
-def _touch_ref_scan(db: sqlite3.Connection, touch: RefScanTouch) -> None:
-    db.execute(
         """
         update source_ref_scans
         set checked_at = ?
         where source_key = ? and source_repo = ? and ref_kind = ? and source_ref = ?
         """,
-        (
-            dump_dt(touch.checked_at),
-            touch.source_key,
-            touch.source_repo,
-            touch.ref_kind,
-            touch.source_ref,
-        ),
+        [
+            (
+                dump_dt(touch.checked_at),
+                touch.source_key,
+                touch.source_repo,
+                touch.ref_kind,
+                touch.source_ref,
+            )
+            for touch in touches
+        ],
     )
 
 
@@ -380,19 +497,24 @@ def _replace_source_repo_metadata(
     db: sqlite3.Connection,
     source_key: str,
     metadata: tuple[SourceRepoMetadata, ...],
+    *,
+    preserve_repos: frozenset[str] = frozenset(),
 ) -> None:
     by_repo = {row.source_repo: row for row in metadata if row.source_key == source_key}
-    if not by_repo:
+    retained = sorted(set(by_repo) | preserve_repos)
+    if not retained:
         db.execute("delete from source_repo_metadata where source_key = ?", (source_key,))
         return
-    placeholders = ",".join("?" for _ in by_repo)
+    placeholders = ",".join("?" for _ in retained)
     db.execute(
         f"""
         delete from source_repo_metadata
         where source_key = ? and source_repo not in ({placeholders})
         """,
-        (source_key, *by_repo),
+        (source_key, *retained),
     )
+    if not by_repo:
+        return
     db.executemany(
         """
         insert into source_repo_metadata(source_key, source_repo, default_branch)
@@ -411,6 +533,8 @@ def _prune_source_refs(
     db: sqlite3.Connection,
     source_key: str,
     keep: set[tuple[str, str, str]],
+    *,
+    preserve_repos: frozenset[str] = frozenset(),
 ) -> None:
     rows = db.execute(
         """
@@ -423,7 +547,7 @@ def _prune_source_refs(
     stale: list[tuple[str, str, str]] = []
     for row in rows:
         key = (str(row["source_repo"]), str(row["ref_kind"]), str(row["source_ref"]))
-        if key not in keep:
+        if key not in keep and key[0] not in preserve_repos:
             stale.append(key)
     if stale:
         db.executemany(

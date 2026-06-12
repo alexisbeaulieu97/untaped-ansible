@@ -34,8 +34,8 @@ resolution, output helpers, HTTP/TLS primitives, and shared errors.
    state reads/writes; `untaped.testing` stays test-only. Command bodies
    resolve settings once at the composition root via `plugin_context(profile)`
    and read sections with `ctx.section("ansible", AnsibleSettings)`; helpers
-   like `_refresh_source` receive resolved GitHub/HTTP settings as arguments
-   instead of reading ambient config.
+   like `cli/_refresh.py`'s `refresh_source` receive resolved GitHub/HTTP
+   settings as arguments instead of reading ambient config.
 5. **Use the 4-layer DDD layout.** `cli -> application -> domain`, with
    `infrastructure -> domain`; `application` and `infrastructure` must not
    import each other at runtime.
@@ -65,6 +65,7 @@ src/untaped_ansible/
 ├── __init__.py           # lazy PEP 562 re-export of app
 ├── plugin.py             # entry-point plugin object (manifest only, no CLI imports)
 ├── settings.py           # plugin-owned config/state model
+├── _concurrency.py       # bounded_map thread-pool helper shared by application and infrastructure
 ├── cli/                  # Cyclopts composition root plus concern-specific commands
 ├── application/          # use cases and ports
 ├── domain/               # pure models, parser, graph, renderers
@@ -82,8 +83,13 @@ plugins once so `plugin_context().section(...)` resolves registered config
 sections, and clears the settings cache around every test.
 
 `cli/commands.py` is the Ansible Cyclopts composition root only. Keep graph
-execution in `cli/graph_commands.py`, source management and refresh wiring in
+execution in `cli/graph_commands.py`, source management in
 `cli/source_commands.py`, and alias management in `cli/alias_commands.py`.
+Source-refresh wiring shared by the `source refresh` and `graph` paths —
+adapter construction (`refresh_source`), the progress-wrapped
+`run_source_refresh` runner, summary/rate-limit stderr output, and the
+`pluralize` helper — lives in `cli/_refresh.py`; command modules must use it
+instead of reaching into each other's helpers.
 
 ## CLI Output Contracts
 
@@ -137,18 +143,47 @@ share one parsed edge set. `source_ref_scans` remains the authoritative
 repo/ref identity table for graph reads and display metadata.
 
 Keep SQLite adapter methods in `infrastructure/sqlite_index.py` focused on
-transaction boundaries and query flow. Schema creation helpers live in
+transaction boundaries and query flow. Refresh commits stay one transaction
+and write in batches: existing snapshot ids are pre-looked-up in chunks, new
+snapshots use `insert ... on conflict ... returning id` (edges are inserted
+only for newly created snapshots), and ref-scan replaces/touches run as single
+`executemany` statements. Schema creation helpers live in
 `infrastructure/sqlite_schema.py`, and row/datetime mapping lives in
-`infrastructure/sqlite_rows.py`. The legacy source-cache cleanup is
-cache-schema-breaking. Cache schema compatibility is intentionally not
-preserved yet; users must delete the file configured by `ansible.index_path`
-and refresh saved sources after schema-breaking changes.
+`infrastructure/sqlite_rows.py`.
+
+Cache schema compatibility is intentionally not preserved; there is no
+migration code. `sqlite_schema.SCHEMA_VERSION` is enforced through SQLite's
+`PRAGMA user_version`: a fresh empty database gets the tables and the current
+version stamp, while any database whose `user_version` differs (including
+pre-versioning databases with tables but `user_version = 0`) makes
+`ensure_schema` raise an `UntapedError` telling the user to delete the file
+configured by `ansible.index_path` and re-run `untaped ansible source
+refresh`. Bump `SCHEMA_VERSION` in the same commit as any schema change.
 
 Source-index payload DTOs such as `IndexedDependency`, `GitRef`, `RefScan`,
 `RefScanTouch`, and `SourceRepoMetadata` live in `domain/payloads.py` because
 they cross the application/infrastructure boundary. `application/ports.py`
 should stay protocol-only, and the layering tests enforce that `application`
 and `infrastructure` do not import each other at runtime.
+
+Graph reads are level-batched. The `DependencyIndex` port exposes batch reads
+(`dependencies_batch`, `dependents_batch`, `cached_ref_metadata_batch`)
+alongside the single-key reads; every requested key must appear in the result
+mapping — with an empty list/tuple when nothing is indexed — so callers can
+cache negative results, and a `None` ref in a requested pair keeps the
+single-read "all indexed refs of the repo" semantics. `BuildGraph` walks each
+direction as an explicit per-level worklist with per-path cycle stacks,
+bulk-loads each depth level's uncached frontier through the batch reads
+(~one batched query per depth level instead of one point query per node), and
+replays recorded emissions depth-first so node/edge/warning ordering stays
+identical to the previous recursive traversal. The SQLite adapter drives the
+batch queries with chunked `with requested(...) as (values ...)` CTEs; the
+overlay and multi-source wrappers implement the batch reads by delegating to
+the wrapped index's batch reads and applying the same overlay/fan-out
+semantics as their single-key counterparts, while the live-GitHub index
+serves `dependencies_batch` with intentionally per-pair live reads (per-repo
+tree/content fetches don't batch) and delegates its other batch reads to the
+wrapped index.
 
 `graph` is the primary user command. Downstream dependency reads do not require
 a source or cached data. When a source is configured, downstream graphing
@@ -162,6 +197,33 @@ source-backed graphing refreshes by default unless `--cached` is passed.
 Cached downstream traversal is strict about refs. If a dependency points at
 `repo@v1` and only `repo@main` is cached, traversal must warn and stop there
 instead of falling back to another cached ref.
+
+Graph flag conflicts are parse-time errors: `--refresh`/`--cached`/`--live`
+form one Cyclopts mutually-exclusive group and
+`--upstream`/`--downstream`/`--both` another
+(`Group(..., validator=validators.LimitedChoice())` attached via
+`Parameter(group=...)`; `LimitedChoice()` is the typed equivalent of
+cyclopts' untyped `MutuallyExclusive` alias), so conflicting flags exit 2
+before the command body runs. The cross-flag rule "`--refresh` requires `--source` or inline
+selectors" cannot be a group validator; it is the first statement of the
+command body so it fails (exit 2) before any settings or index construction.
+
+The default source-freshness check has an opt-in TTL: `ansible.freshness_ttl`
+(seconds, `ge=0`, default unset = always check). When set, the graph command
+skips the probe/refresh for any source selection whose last successful scan
+(`scanned_at` via index status) is within the TTL, emitting one stderr info
+line per skipped selection (`source '<label>' refreshed <age> ago (within
+freshness_ttl of <ttl>s); skipping check — pass --refresh to force`). The TTL
+is evaluated per selection, so a multi-source graph may skip fresh selections
+while probing stale ones. `freshness_ttl: 0` is equivalent to unset (always
+check). `--refresh` always probes regardless of TTL; `--cached` always skips
+every check (unchanged).
+
+Stale-data and missing-cached-ref graph warnings carry the exact fix command.
+The application layer stays free of CLI strings: the CLI composes
+`GraphRequest.refresh_hint` (`untaped ansible source refresh NAME` for saved
+sources; re-run with `--refresh` for inline sources) and `BuildGraph` appends
+it to those warnings.
 
 Saved sources are configured under `ansible.sources`. `graph --source NAME` is
 repeatable; repeated saved sources are additive and graph reads union their
@@ -184,17 +246,56 @@ repo's default branch under `refs/heads/`. `--ref-pattern` narrows source refs
 across branches and tags unless paired with `--ref-kind`; `--ref-kind tags`
 without a pattern scans all tags.
 
-Source refresh is git-only. Git refresh keeps bare repositories under
-`ansible.repo_cache_path`, checks selected remote ref SHAs before touching the
-local bare cache, fetches only changed or missing refs, reads dependency files
-with Git object plumbing, and commits SQLite ref scans per `(source_key, repo,
-ref_kind, ref_name)`. Do not create working checkouts for source indexing. Do
-not reintroduce `ansible.cache_backend`, `--cache-backend`, or a REST/API
-source-refresh fallback.
-Git source refresh supports bounded per-repo concurrency through
-`ansible.git_fetch_concurrency` and `--concurrency`; repo/team/org expansion
-remains serial, and SQLite mutation remains a single atomic commit after repo
-workers finish successfully. Refresh status and progress belong on stderr.
+Source refresh is git-only for data transport. A refresh runs three phases:
+
+1. **Expansion** resolves explicit repos, orgs, and teams into a deduped,
+   sorted repo list through a thread pool bounded by
+   `ansible.probe_concurrency`. Explicit repos win over org/team listings.
+   Expansion failures are fatal: an unknown org/team/repo is a source
+   misconfiguration, not a per-repo failure.
+2. **Freshness probe** is GraphQL-only: one `RefProbe.probe()` call
+   (`infrastructure/github_ref_probe.py` wrapping
+   `GithubClient.batch_repo_refs`) covers every repo with the union of
+   needed ref kinds, driving ~50-repo aliased chunks concurrently under
+   `ansible.probe_concurrency`. The probe also supplies each repo's exact
+   default branch (expansion metadata is the fallback) and the minimum
+   GraphQL `rate_limit_remaining` across chunks; the CLI warns on stderr
+   when that drops below 500. Do not reintroduce `git ls-remote` ref
+   checks.
+3. **Fetch/parse** keeps bare repositories under `ansible.repo_cache_path`,
+   fetches only changed or missing refs (bounded by
+   `ansible.git_fetch_concurrency` / `--concurrency`), reads dependency
+   files with Git object plumbing, and commits SQLite ref scans per
+   `(source_key, repo, ref_kind, ref_name)` in one atomic transaction.
+
+Refresh is resilient to per-repo failures. Probe misses (missing or
+inaccessible repos) and per-repo fetch/parse errors (`GitCacheError`,
+`UntapedError`) are recorded as `RefreshResult.failures`
+instead of aborting the run, and pruning is scoped to succeeded repos: a
+failed repo's previously cached refs and repo metadata must survive the
+commit (`commit_source_ref_refresh(..., failed_repos=...)`). After the
+summary, `source refresh` echoes each `failed <repo>: <reason>` to stderr
+and exits 1 (`refresh completed with N repo failure(s); successes were
+saved`); the graph refresh path instead prepends a graph warning and
+proceeds with possibly stale data for the failed repos.
+
+When every expanded repo fails, there is nothing trustworthy to commit: the
+index commit is skipped entirely so cached data and `scanned_at` stay
+untouched and the run does not look fresh — staleness remains visible in
+`source status`. An empty expansion (zero repos) is a successful refresh,
+not a failure, and still commits (pruning now-unselected repos).
+
+The application layer stays UI-free: `RefreshGitSourceIndex` emits
+`RefreshProgressEvent` payloads (phase `expanding`/`probing`/`fetching`
+with done/total/changed counts) through an optional `on_progress`
+callback, and the CLI renders them through `cli/_progress.py`
+(`StderrProgress`): in-place `\r` updates on a TTY, throttled lines
+(~2s or 10% steps) otherwise. Refresh status and progress belong on
+stderr; stdout stays data-only.
+
+Do not create working checkouts for source indexing. Do not reintroduce
+`ansible.cache_backend`, `--cache-backend`, or a REST/API source-refresh
+fallback.
 
 Saving or editing a source clears cached source data only when the saved
 definition changes. Re-saving or editing to an identical source must preserve

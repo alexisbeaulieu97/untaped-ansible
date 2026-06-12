@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import json
 from base64 import b64encode
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import httpx
+import pytest
 import respx
 import yaml
 from untaped.settings import get_settings
@@ -15,8 +16,13 @@ from untaped.testing import CliInvoker
 
 from untaped_ansible import app
 from untaped_ansible.application.refresh_index import RefreshResult
-from untaped_ansible.cli import source_commands
-from untaped_ansible.domain.payloads import IndexedDependency, RefScan, SourceRepoMetadata
+from untaped_ansible.cli import _refresh
+from untaped_ansible.domain.payloads import (
+    IndexedDependency,
+    RefScan,
+    RepoFailure,
+    SourceRepoMetadata,
+)
 from untaped_ansible.infrastructure import SqliteDependencyIndex
 
 
@@ -25,16 +31,18 @@ def _write_config(
     *,
     index_path: Path | None = None,
     extra_profile: dict[str, object] | None = None,
+    ansible_profile: dict[str, object] | None = None,
     top_level_ansible: dict[str, object] | None = None,
     top_level_ui: dict[str, object] | None = None,
 ) -> Path:
     cfg = tmp_path / "config.yml"
-    profile = {
-        "ansible": {
-            "index_path": str(index_path or tmp_path / "index.sqlite3"),
-            "stale_after": 86400,
-        }
+    ansible_section: dict[str, object] = {
+        "index_path": str(index_path or tmp_path / "index.sqlite3"),
+        "stale_after": 86400,
     }
+    if ansible_profile:
+        ansible_section.update(ansible_profile)
+    profile = {"ansible": ansible_section}
     if extra_profile:
         profile.update(extra_profile)
     data: dict[str, object] = {"profiles": {"default": profile}}
@@ -70,35 +78,116 @@ def _mock_dependency_file(
     )
 
 
-def _mock_refresh_repo(
+def _graphql_repo_node(repo: str, *, sha: str, default_branch: str = "main") -> dict[str, object]:
+    empty_page = {"hasNextPage": False, "endCursor": None}
+    return {
+        "nameWithOwner": repo,
+        "defaultBranchRef": {"name": default_branch},
+        "heads": {
+            "pageInfo": empty_page,
+            "nodes": [{"name": default_branch, "target": {"oid": sha}}],
+        },
+        "tags": {"pageInfo": empty_page, "nodes": []},
+    }
+
+
+def _mock_refresh_repos(
     mock: respx.MockRouter,
-    repo: str,
+    repos: dict[str, str],
     *,
-    sha: str,
-    content: str,
-    refs_path: str = "heads/main",
-    default_branch: str | None = "main",
+    missing: tuple[str, ...] = (),
+    rate_limit_remaining: int = 4900,
 ) -> None:
-    owner, name = repo.split("/", maxsplit=1)
-    if default_branch is not None:
+    """Mock source-refresh expansion (REST) and the GraphQL ref probe.
+
+    ``repos`` maps ``owner/name`` to the sha of its single ``heads/main``
+    ref; ``missing`` repos expand fine but probe as NOT_FOUND.
+    """
+    names = sorted([*repos, *missing])
+    data: dict[str, object] = {
+        "rateLimit": {
+            "cost": 1,
+            "remaining": rate_limit_remaining,
+            "resetAt": "2026-01-01T00:00:00Z",
+        }
+    }
+    errors: list[dict[str, object]] = []
+    for index, full_name in enumerate(names):
+        alias = f"r{index}"
+        owner, name = full_name.split("/", maxsplit=1)
         mock.get(f"/repos/{owner}/{name}").mock(
-            return_value=httpx.Response(200, json={"default_branch": default_branch})
+            return_value=httpx.Response(
+                200,
+                json={
+                    "full_name": full_name,
+                    "default_branch": "main",
+                    "clone_url": f"https://github.com/{full_name}.git",
+                },
+            )
         )
-    mock.get(f"/repos/{owner}/{name}/git/matching-refs/{refs_path}").mock(
-        return_value=httpx.Response(
-            200,
-            json=[{"ref": "refs/heads/main", "object": {"sha": sha}}],
-        )
-    )
-    mock.get(f"/repos/{owner}/{name}/git/trees/{sha}").mock(
-        return_value=httpx.Response(
-            200,
-            json={"tree": [{"path": "roles/requirements.yml", "type": "blob"}]},
-        )
-    )
-    mock.get(f"/repos/{owner}/{name}/contents/roles/requirements.yml").mock(
-        return_value=httpx.Response(200, text=content)
-    )
+        if full_name in missing:
+            data[alias] = None
+            errors.append(
+                {
+                    "type": "NOT_FOUND",
+                    "path": [alias],
+                    "message": f"Could not resolve to a Repository named {full_name!r}.",
+                }
+            )
+            continue
+        data[alias] = _graphql_repo_node(full_name, sha=repos[full_name])
+    payload: dict[str, object] = {"data": data}
+    if errors:
+        payload["errors"] = errors
+    mock.post("/graphql").mock(return_value=httpx.Response(200, json=payload))
+
+
+class _SeedGitCache:
+    """Git transport stub for seeding: fetches succeed, no dependency files."""
+
+    def ensure_bare(self, url: str, *, cache_dir: Path, auth_header: str | None) -> Path:
+        return cache_dir / url.removesuffix(".git").rsplit("/", maxsplit=1)[-1]
+
+    def fetch_refs(
+        self,
+        bare_path: Path,
+        *,
+        refspecs: list[str],
+        depth: int,
+        blob_filter: bool,
+        auth_header: str | None,
+    ) -> None:
+        return None
+
+    def read_file(
+        self,
+        bare_path: Path,
+        sha: str,
+        path: str,
+        *,
+        auth_header: str | None,
+    ) -> str | None:
+        return None
+
+
+def _seed_unchanged_scan(
+    monkeypatch,
+    repos: dict[str, str],
+    *,
+    missing: tuple[str, ...] = (),
+) -> None:
+    """Seed scans a later refresh's probe will consider unchanged.
+
+    Runs one ``source refresh prod`` through the public CLI (with the git
+    transport stubbed out) so the cached scans carry exactly the metadata and
+    fingerprints a subsequent refresh recomputes.
+    """
+    with monkeypatch.context() as patcher:
+        patcher.setattr(_refresh, "GitRepositoryCache", _SeedGitCache)
+        with respx.mock(base_url="https://api.github.com") as mock:
+            _mock_refresh_repos(mock, repos, missing=missing)
+            result = CliInvoker().invoke(app, ["source", "refresh", "prod"])
+    assert result.exit_code == (1 if missing else 0), result.output
 
 
 def _seed_index(
@@ -621,6 +710,7 @@ def test_graph_inline_upstream_refreshes_and_renders_impact(
         github_settings,
         http,
         concurrency: int,
+        on_progress=None,
     ) -> RefreshResult:
         del source, aliases, settings, concurrency
         _seed_index(
@@ -639,7 +729,7 @@ def test_graph_inline_upstream_refreshes_and_renders_impact(
         )
         return RefreshResult(source_key=source_key, repos=1, refs=1, edges=1, changed_refs=1)
 
-    monkeypatch.setattr(source_commands, "_refresh_source", fake_refresh)
+    monkeypatch.setattr(_refresh, "refresh_source", fake_refresh)
 
     result = CliInvoker().invoke(
         app,
@@ -684,6 +774,7 @@ def test_graph_inline_source_reuses_fingerprint_cache_without_refresh(
         github_settings,
         http,
         concurrency: int,
+        on_progress=None,
     ) -> RefreshResult:
         nonlocal refresh_calls
         del source, aliases, settings, concurrency
@@ -704,7 +795,7 @@ def test_graph_inline_source_reuses_fingerprint_cache_without_refresh(
         )
         return RefreshResult(source_key=source_key, repos=1, refs=1, edges=1, changed_refs=1)
 
-    monkeypatch.setattr(source_commands, "_refresh_source", fake_refresh)
+    monkeypatch.setattr(_refresh, "refresh_source", fake_refresh)
 
     first = runner.invoke(
         app,
@@ -859,6 +950,7 @@ def test_graph_repeated_sources_refresh_each_saved_source(
         github_settings,
         http,
         concurrency: int,
+        on_progress=None,
     ) -> RefreshResult:
         del aliases, settings, concurrency
         calls.append((source.name, source_key))
@@ -887,7 +979,7 @@ def test_graph_repeated_sources_refresh_each_saved_source(
             unchanged_refs=0,
         )
 
-    monkeypatch.setattr(source_commands, "_refresh_source", fake_refresh)
+    monkeypatch.setattr(_refresh, "refresh_source", fake_refresh)
 
     result = CliInvoker().invoke(
         app,
@@ -1187,6 +1279,7 @@ def test_graph_cached_missing_ref_lists_available_refs_in_display_order(
 
     assert result.exit_code == 0, result.output
     assert ("available refs: trunk, docs, feature/2, v2.0.0, v1.0.0") in result.stdout
+    assert "Run `untaped ansible source refresh platform` to update it." in result.stdout
 
 
 def test_graph_both_renders_downstream_and_warns_when_upstream_unavailable(
@@ -1317,14 +1410,56 @@ def test_graph_downstream_with_source_live_flag_reads_remote_dependencies(
     assert "acme/cached" not in result.stdout
 
 
-def test_graph_direction_flags_are_mutually_exclusive(tmp_path: Path, monkeypatch) -> None:
+@pytest.mark.parametrize(
+    "args",
+    [["--upstream", "--downstream"], ["--upstream", "--both"]],
+)
+def test_graph_direction_flags_are_mutually_exclusive_at_parse_time(
+    tmp_path: Path,
+    monkeypatch,
+    args: list[str],
+) -> None:
     cfg = _write_config(tmp_path)
     monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
 
-    result = CliInvoker().invoke(app, ["graph", "acme/site", "--upstream", "--downstream"])
+    result = CliInvoker().invoke(app, ["graph", "acme/site", *args])
+    output = " ".join(result.output.split())
 
-    assert result.exit_code == 2
-    assert "choose only one of --upstream, --downstream, or --both" in result.output
+    assert result.exit_code == 2, result.output
+    assert "Mutually exclusive arguments" in output
+    for flag in args:
+        assert flag in output
+
+
+@pytest.mark.parametrize(
+    "args",
+    [["--refresh", "--cached"], ["--cached", "--live"], ["--refresh", "--live"]],
+)
+def test_graph_refresh_cached_and_live_are_mutually_exclusive_at_parse_time(
+    tmp_path: Path,
+    monkeypatch,
+    args: list[str],
+) -> None:
+    cfg = _write_config(
+        tmp_path,
+        top_level_ansible={"sources": [{"name": "platform", "orgs": ["acme"]}]},
+    )
+    monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
+
+    result = CliInvoker().invoke(app, ["graph", "acme/site", "--source", "platform", *args])
+    output = " ".join(result.output.split())
+
+    assert result.exit_code == 2, result.output
+    assert "Mutually exclusive arguments" in output
+    for flag in args:
+        assert flag in output
+
+
+def test_graph_refresh_without_source_fails_fast_with_usage_error() -> None:
+    result = CliInvoker().invoke(app, ["graph", "acme/site", "--refresh"])
+
+    assert result.exit_code == 2, result.output
+    assert "--refresh requires --source or inline source selectors" in result.output
 
 
 def test_graph_source_conflicts_with_inline_selectors(tmp_path: Path, monkeypatch) -> None:
@@ -1400,6 +1535,7 @@ def test_inline_source_cache_key_is_order_insensitive(tmp_path: Path, monkeypatc
         github_settings,
         http,
         concurrency: int,
+        on_progress=None,
     ) -> RefreshResult:
         nonlocal refresh_calls
         del aliases, settings, concurrency
@@ -1427,7 +1563,7 @@ def test_inline_source_cache_key_is_order_insensitive(tmp_path: Path, monkeypatc
             changed_refs=len(source.repos),
         )
 
-    monkeypatch.setattr(source_commands, "_refresh_source", fake_refresh)
+    monkeypatch.setattr(_refresh, "refresh_source", fake_refresh)
 
     first = runner.invoke(
         app,
@@ -1680,6 +1816,9 @@ def test_graph_help_teaches_clean_source_first_workflow() -> None:
     assert "--target-repo" in output
     assert "--both" in output
     assert "Show upstream and downstream (default)." in output
+    assert "Show what TARGET depends on (works without a source)." in output
+    assert "Show repos that depend on TARGET (reverse impact; requires a source)." in output
+    assert "deterministic fingerprint key" in output
     assert "Examples:" in output
     assert (
         "untaped ansible graph acme/base --org acme --team platform --upstream --refresh" in output
@@ -1793,7 +1932,7 @@ def test_source_refresh_scans_source_with_git_backend(tmp_path: Path, monkeypatc
                 unchanged_refs=0,
             )
 
-    monkeypatch.setattr(source_commands, "RefreshGitSourceIndex", FakeGitRefresh)
+    monkeypatch.setattr(_refresh, "RefreshGitSourceIndex", FakeGitRefresh)
 
     result = CliInvoker().invoke(app, ["source", "refresh", "prod"])
 
@@ -1828,7 +1967,7 @@ def test_source_refresh_uses_basic_auth_for_git_backend(tmp_path: Path, monkeypa
                 unchanged_refs=0,
             )
 
-    monkeypatch.setattr(source_commands, "RefreshGitSourceIndex", FakeGitRefresh)
+    monkeypatch.setattr(_refresh, "RefreshGitSourceIndex", FakeGitRefresh)
 
     result = CliInvoker().invoke(app, ["source", "refresh", "prod"])
 
@@ -1861,7 +2000,7 @@ def test_source_refresh_allows_git_concurrency_override(tmp_path: Path, monkeypa
                 unchanged_refs=0,
             )
 
-    monkeypatch.setattr(source_commands, "RefreshGitSourceIndex", FakeGitRefresh)
+    monkeypatch.setattr(_refresh, "RefreshGitSourceIndex", FakeGitRefresh)
 
     result = CliInvoker().invoke(app, ["source", "refresh", "prod", "--concurrency", "5"])
 
@@ -1894,6 +2033,7 @@ def test_graph_with_source_refreshes_by_default_with_git_backend(
         github_settings,
         http,
         concurrency: int,
+        on_progress=None,
     ) -> RefreshResult:
         del source, aliases, settings
         calls.append(concurrency)
@@ -1920,7 +2060,7 @@ def test_graph_with_source_refreshes_by_default_with_git_backend(
             unchanged_refs=0,
         )
 
-    monkeypatch.setattr(source_commands, "_refresh_source", fake_refresh)
+    monkeypatch.setattr(_refresh, "refresh_source", fake_refresh)
 
     result = CliInvoker().invoke(
         app,
@@ -1953,6 +2093,7 @@ def test_graph_inline_upstream_with_ref_renders_all_matching_source_refs(
         github_settings,
         http,
         concurrency: int,
+        on_progress=None,
     ) -> RefreshResult:
         del aliases, settings, concurrency
         captured["ref_kinds"] = source.ref_kinds
@@ -1981,7 +2122,7 @@ def test_graph_inline_upstream_with_ref_renders_all_matching_source_refs(
         )
         return RefreshResult(source_key=source_key, repos=1, refs=2, edges=2)
 
-    monkeypatch.setattr(source_commands, "_refresh_source", fake_refresh)
+    monkeypatch.setattr(_refresh, "refresh_source", fake_refresh)
 
     result = CliInvoker().invoke(
         app,
@@ -2023,6 +2164,7 @@ def test_graph_inline_source_preserves_repeated_selectors(
         github_settings,
         http,
         concurrency: int,
+        on_progress=None,
     ) -> RefreshResult:
         del aliases, settings, concurrency
         captured["orgs"] = source.orgs
@@ -2034,7 +2176,7 @@ def test_graph_inline_source_preserves_repeated_selectors(
         _seed_index(index, source_key)
         return RefreshResult(source_key=source_key, repos=0, refs=0, edges=0)
 
-    monkeypatch.setattr(source_commands, "_refresh_source", fake_refresh)
+    monkeypatch.setattr(_refresh, "refresh_source", fake_refresh)
 
     result = CliInvoker().invoke(
         app,
@@ -2106,7 +2248,7 @@ def test_graph_cached_skips_source_refresh(tmp_path: Path, monkeypatch) -> None:
     def fail_refresh(*args, **kwargs) -> RefreshResult:
         raise AssertionError("--cached must not refresh source data")
 
-    monkeypatch.setattr(source_commands, "_refresh_source", fail_refresh)
+    monkeypatch.setattr(_refresh, "refresh_source", fail_refresh)
 
     result = CliInvoker().invoke(
         app,
@@ -2115,6 +2257,291 @@ def test_graph_cached_skips_source_refresh(tmp_path: Path, monkeypatch) -> None:
 
     assert result.exit_code == 0, result.output
     assert "    +-- acme/site@main" in result.stdout
+
+
+def _fresh_platform_dependency() -> IndexedDependency:
+    return IndexedDependency(
+        source_repo="acme/site",
+        source_ref="main",
+        dependency_repo="acme/base",
+        dependency_name="base",
+        dependency_version=None,
+        source_path="roles/requirements.yml",
+    )
+
+
+def _counting_refresh(calls: list[str]):
+    def fake_refresh(
+        source,
+        *,
+        source_key: str,
+        index: SqliteDependencyIndex,
+        aliases: dict[str, str],
+        settings,
+        github_settings,
+        http,
+        concurrency: int,
+        on_progress=None,
+    ) -> RefreshResult:
+        del aliases, settings, concurrency
+        calls.append(source.name)
+        source_repo = source.repos[0]
+        _seed_index(
+            index,
+            source_key,
+            (
+                IndexedDependency(
+                    source_repo=source_repo,
+                    source_ref="main",
+                    dependency_repo="acme/base",
+                    dependency_name="base",
+                    dependency_version=None,
+                    source_path="roles/requirements.yml",
+                ),
+            ),
+        )
+        return RefreshResult(source_key=source_key, repos=1, refs=1, edges=1, changed_refs=1)
+
+    return fake_refresh
+
+
+def test_graph_freshness_ttl_skips_remote_check_for_fresh_source(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    index_path = tmp_path / "index.sqlite3"
+    _seed_index(
+        SqliteDependencyIndex(index_path),
+        "source:platform",
+        (_fresh_platform_dependency(),),
+        scanned_at=datetime.now(UTC),
+    )
+    cfg = _write_config(
+        tmp_path,
+        index_path=index_path,
+        ansible_profile={"freshness_ttl": 3600},
+        top_level_ansible={"sources": [{"name": "platform", "repos": ["acme/site"]}]},
+    )
+    monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
+
+    with respx.mock(base_url="https://api.github.com", assert_all_called=False) as mock:
+        result = CliInvoker().invoke(
+            app,
+            ["graph", "acme/base", "--source", "platform", "--upstream"],
+        )
+        assert len(mock.calls) == 0
+
+    assert result.exit_code == 0, result.output
+    assert "    +-- acme/site@main" in result.stdout
+    assert "source 'platform' refreshed " in result.stderr
+    assert (
+        "ago (within freshness_ttl of 3600s); skipping check — pass --refresh to force"
+        in result.stderr
+    )
+
+
+def test_graph_freshness_ttl_skip_message_reports_age_in_hours(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    index_path = tmp_path / "index.sqlite3"
+    _seed_index(
+        SqliteDependencyIndex(index_path),
+        "source:platform",
+        (_fresh_platform_dependency(),),
+        scanned_at=datetime.now(UTC) - timedelta(hours=3),
+    )
+    cfg = _write_config(
+        tmp_path,
+        index_path=index_path,
+        ansible_profile={"freshness_ttl": 14400},
+        top_level_ansible={"sources": [{"name": "platform", "repos": ["acme/site"]}]},
+    )
+    monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
+
+    with respx.mock(base_url="https://api.github.com", assert_all_called=False) as mock:
+        result = CliInvoker().invoke(
+            app,
+            ["graph", "acme/base", "--source", "platform", "--upstream"],
+        )
+        assert len(mock.calls) == 0
+
+    assert result.exit_code == 0, result.output
+    assert (
+        "source 'platform' refreshed 3 hours ago (within freshness_ttl of 14400s); "
+        "skipping check — pass --refresh to force" in result.stderr
+    )
+
+
+def test_graph_freshness_ttl_probes_source_that_was_never_scanned(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    index_path = tmp_path / "index.sqlite3"
+    cfg = _write_config(
+        tmp_path,
+        index_path=index_path,
+        ansible_profile={"freshness_ttl": 3600},
+        top_level_ansible={"sources": [{"name": "platform", "repos": ["acme/site"]}]},
+    )
+    monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
+    calls: list[str] = []
+    monkeypatch.setattr(_refresh, "refresh_source", _counting_refresh(calls))
+
+    result = CliInvoker().invoke(
+        app,
+        ["graph", "acme/base", "--source", "platform", "--upstream"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert calls == ["platform"]
+    assert "skipping check" not in result.stderr
+
+
+def test_graph_freshness_ttl_with_refresh_flag_still_probes(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    index_path = tmp_path / "index.sqlite3"
+    _seed_index(
+        SqliteDependencyIndex(index_path),
+        "source:platform",
+        (_fresh_platform_dependency(),),
+        scanned_at=datetime.now(UTC),
+    )
+    cfg = _write_config(
+        tmp_path,
+        index_path=index_path,
+        ansible_profile={"freshness_ttl": 3600},
+        top_level_ansible={"sources": [{"name": "platform", "repos": ["acme/site"]}]},
+    )
+    monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
+    calls: list[str] = []
+    monkeypatch.setattr(_refresh, "refresh_source", _counting_refresh(calls))
+
+    result = CliInvoker().invoke(
+        app,
+        ["graph", "acme/base", "--source", "platform", "--upstream", "--refresh"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert calls == ["platform"]
+    assert "skipping check" not in result.stderr
+
+
+def test_graph_freshness_ttl_still_probes_stale_source(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    index_path = tmp_path / "index.sqlite3"
+    _seed_index(
+        SqliteDependencyIndex(index_path),
+        "source:platform",
+        (_fresh_platform_dependency(),),
+        scanned_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    cfg = _write_config(
+        tmp_path,
+        index_path=index_path,
+        ansible_profile={"freshness_ttl": 60},
+        top_level_ansible={"sources": [{"name": "platform", "repos": ["acme/site"]}]},
+    )
+    monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
+    calls: list[str] = []
+    monkeypatch.setattr(_refresh, "refresh_source", _counting_refresh(calls))
+
+    result = CliInvoker().invoke(
+        app,
+        ["graph", "acme/base", "--source", "platform", "--upstream"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert calls == ["platform"]
+    assert "skipping check" not in result.stderr
+
+
+def test_graph_freshness_ttl_is_per_selection_for_mixed_sources(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    index_path = tmp_path / "index.sqlite3"
+    index = SqliteDependencyIndex(index_path)
+    _seed_index(
+        index,
+        "source:platform",
+        (_fresh_platform_dependency(),),
+        scanned_at=datetime.now(UTC),
+    )
+    _seed_index(
+        index,
+        "source:ops",
+        (
+            IndexedDependency(
+                source_repo="acme/deploy",
+                source_ref="main",
+                dependency_repo="acme/base",
+                dependency_name="base",
+                dependency_version=None,
+                source_path="roles/requirements.yml",
+            ),
+        ),
+        scanned_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    cfg = _write_config(
+        tmp_path,
+        index_path=index_path,
+        ansible_profile={"freshness_ttl": 3600},
+        top_level_ansible={
+            "sources": [
+                {"name": "platform", "repos": ["acme/site"]},
+                {"name": "ops", "repos": ["acme/deploy"]},
+            ]
+        },
+    )
+    monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
+    calls: list[str] = []
+    monkeypatch.setattr(_refresh, "refresh_source", _counting_refresh(calls))
+
+    result = CliInvoker().invoke(
+        app,
+        ["graph", "acme/base", "--source", "platform", "--source", "ops", "--upstream"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert calls == ["ops"]
+    assert "source 'platform' refreshed" in result.stderr
+    assert "source 'ops' refreshed" not in result.stderr
+    assert "    +-- acme/site@main" in result.stdout
+    assert "    +-- acme/deploy@main" in result.stdout
+
+
+def test_graph_stale_warning_includes_exact_refresh_command(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    index_path = tmp_path / "index.sqlite3"
+    _seed_index(
+        SqliteDependencyIndex(index_path),
+        "source:platform",
+        (_fresh_platform_dependency(),),
+        scanned_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    cfg = _write_config(
+        tmp_path,
+        index_path=index_path,
+        ansible_profile={"stale_after": 60},
+        top_level_ansible={"sources": [{"name": "platform", "repos": ["acme/site"]}]},
+    )
+    monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
+
+    result = CliInvoker().invoke(
+        app,
+        ["graph", "acme/base", "--source", "platform", "--upstream", "--cached"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "source data is stale" in result.stdout
+    assert "Run `untaped ansible source refresh platform` to update it." in result.stdout
 
 
 def test_source_save_expands_bare_team_slug_with_single_org(tmp_path: Path, monkeypatch) -> None:
@@ -2128,6 +2555,177 @@ def test_source_save_expands_bare_team_slug_with_single_org(tmp_path: Path, monk
 
     assert result.exit_code == 0, result.output
     assert yaml.safe_load(cfg.read_text())["ansible"]["sources"][0]["teams"] == ["acme/platform"]
+
+
+def test_source_refresh_partial_failure_exits_nonzero_and_saves_successes(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    index_path = tmp_path / "index.sqlite3"
+    cfg = _write_config(
+        tmp_path,
+        index_path=index_path,
+        extra_profile={"github": {"token": "ghp_test"}},
+        top_level_ansible={"sources": [{"name": "prod", "repos": ["acme/gone", "acme/ok"]}]},
+    )
+    monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
+    _seed_unchanged_scan(monkeypatch, {"acme/ok": "sha-ok"}, missing=("acme/gone",))
+
+    with respx.mock(base_url="https://api.github.com") as mock:
+        _mock_refresh_repos(mock, {"acme/ok": "sha-ok"}, missing=("acme/gone",))
+        result = CliInvoker().invoke(app, ["source", "refresh", "prod"])
+
+    assert result.exit_code == 1
+    assert result.stdout == ""
+    assert "refreshed source 'prod':" in result.stderr
+    assert "failed acme/gone: " in result.stderr
+    assert "refresh completed with 1 repo failure; successes were saved" in result.output
+    # the succeeded repo's cached scan survived the partial failure
+    assert SqliteDependencyIndex(index_path).ref_scans(
+        "source:prod", "acme/ok", [("heads", "main")]
+    )
+
+
+def test_source_refresh_all_failures_exits_nonzero_and_leaves_index_unchanged(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    index_path = tmp_path / "index.sqlite3"
+    cfg = _write_config(
+        tmp_path,
+        index_path=index_path,
+        extra_profile={"github": {"token": "ghp_test"}},
+        top_level_ansible={"sources": [{"name": "prod", "repos": ["acme/gone", "acme/ok"]}]},
+    )
+    monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
+    _seed_unchanged_scan(monkeypatch, {"acme/ok": "sha-ok"}, missing=("acme/gone",))
+    before = SqliteDependencyIndex(index_path).status("source:prod")
+    assert before is not None
+
+    with respx.mock(base_url="https://api.github.com") as mock:
+        _mock_refresh_repos(mock, {}, missing=("acme/gone", "acme/ok"))
+        result = CliInvoker().invoke(app, ["source", "refresh", "prod"])
+
+    assert result.exit_code == 1
+    assert "failed acme/gone: " in result.stderr
+    assert "failed acme/ok: " in result.stderr
+    assert "refresh failed for all 2 repos; index left unchanged" in result.output
+    # the index commit was skipped: cached data and freshness are untouched
+    after = SqliteDependencyIndex(index_path).status("source:prod")
+    assert after is not None
+    assert after.scanned_at == before.scanned_at
+    assert SqliteDependencyIndex(index_path).ref_scans(
+        "source:prod", "acme/ok", [("heads", "main")]
+    )
+
+
+def test_source_refresh_emits_progress_lines_on_stderr_in_non_tty_mode(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    index_path = tmp_path / "index.sqlite3"
+    cfg = _write_config(
+        tmp_path,
+        index_path=index_path,
+        extra_profile={"github": {"token": "ghp_test"}},
+        top_level_ansible={"sources": [{"name": "prod", "repos": ["acme/ok"]}]},
+    )
+    monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
+    _seed_unchanged_scan(monkeypatch, {"acme/ok": "sha-ok"})
+
+    with respx.mock(base_url="https://api.github.com") as mock:
+        _mock_refresh_repos(mock, {"acme/ok": "sha-ok"})
+        result = CliInvoker().invoke(app, ["source", "refresh", "prod"])
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout == ""
+    assert "probing refs: 1/1 repos" in result.stderr
+    assert "fetching changes: 1/1 repos, 0 changed" in result.stderr
+
+
+def test_source_refresh_warns_when_graphql_rate_limit_is_low(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    index_path = tmp_path / "index.sqlite3"
+    cfg = _write_config(
+        tmp_path,
+        index_path=index_path,
+        extra_profile={"github": {"token": "ghp_test"}},
+        top_level_ansible={"sources": [{"name": "prod", "repos": ["acme/ok"]}]},
+    )
+    monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
+    _seed_unchanged_scan(monkeypatch, {"acme/ok": "sha-ok"})
+
+    with respx.mock(base_url="https://api.github.com") as mock:
+        _mock_refresh_repos(mock, {"acme/ok": "sha-ok"}, rate_limit_remaining=200)
+        result = CliInvoker().invoke(app, ["source", "refresh", "prod"])
+
+    assert result.exit_code == 0, result.output
+    assert "warning: GitHub GraphQL rate limit is low: 200 points remaining" in result.stderr
+
+
+def test_graph_refresh_with_partial_failures_warns_and_proceeds(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    index_path = tmp_path / "index.sqlite3"
+    cfg = _write_config(
+        tmp_path,
+        index_path=index_path,
+        top_level_ansible={"sources": [{"name": "platform", "repos": ["acme/site"]}]},
+    )
+    monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
+
+    def fake_refresh(
+        source,
+        *,
+        source_key: str,
+        index: SqliteDependencyIndex,
+        aliases: dict[str, str],
+        settings,
+        github_settings,
+        http,
+        concurrency: int,
+        on_progress=None,
+    ) -> RefreshResult:
+        del source, aliases, settings, concurrency
+        _seed_index(
+            index,
+            source_key,
+            (
+                IndexedDependency(
+                    source_repo="acme/site",
+                    source_ref="main",
+                    dependency_repo="acme/base",
+                    dependency_name="base",
+                    dependency_version=None,
+                    source_path="roles/requirements.yml",
+                ),
+            ),
+        )
+        return RefreshResult(
+            source_key=source_key,
+            repos=2,
+            refs=1,
+            edges=1,
+            changed_refs=1,
+            failures=(RepoFailure(repo="acme/gone", reason="boom"),),
+        )
+
+    monkeypatch.setattr(_refresh, "refresh_source", fake_refresh)
+
+    result = CliInvoker().invoke(
+        app,
+        ["graph", "acme/base", "--source", "platform", "--upstream", "--refresh"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert (
+        "warning: refresh of platform had 1 failure; data for those repos may be stale"
+        in result.stdout
+    )
+    assert "    +-- acme/site@main" in result.stdout
 
 
 def teardown_module() -> None:

@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import time
 from configparser import ConfigParser
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Literal
 
-from cyclopts import App, Parameter, validators
+from cyclopts import App, Group, Parameter, validators
 from untaped.api import (
     ProfileOverrideOption,
     UntapedError,
@@ -22,6 +22,7 @@ from untaped_github import GithubClient, GithubSettings
 import untaped_ansible.cli.source_commands as source_commands
 from untaped_ansible.application import BuildGraph, GraphRequest
 from untaped_ansible.application.ports import DependencyIndex
+from untaped_ansible.cli._refresh import pluralize, run_source_refresh
 from untaped_ansible.domain.graph import DependencyGraph
 from untaped_ansible.domain.identity import IdentityResolver
 from untaped_ansible.domain.models import DependencyDeclaration
@@ -44,6 +45,11 @@ GraphFormatOption = Annotated[
     Parameter(name=["--format", "-f"], help="Graph output format."),
 ]
 
+# LimitedChoice() defaults to at-most-one selection — cyclopts' MutuallyExclusive
+# is an untyped alias for exactly this, so the typed parent is used directly.
+_DIRECTION_GROUP = Group("Direction", validator=validators.LimitedChoice())
+_SOURCE_DATA_GROUP = Group("Source Data", validator=validators.LimitedChoice())
+
 
 def register_graph_command(app: App) -> None:
     """Register graph commands on the Ansible root app."""
@@ -52,6 +58,9 @@ def register_graph_command(app: App) -> None:
 
 _GRAPH_HELP = (
     "Graph Ansible dependency relationships for a role, repo, or playbook. "
+    "Inline source selectors (--org, --team, --repo, --path, --ref-kind, "
+    "--ref-pattern) are cached under a deterministic fingerprint key, so "
+    "repeated identical invocations reuse the same scan. "
     "Examples: untaped ansible graph acme/base --org acme --team platform "
     "--upstream --refresh; untaped ansible graph acme/app --source prod "
     "--both --cached; untaped ansible graph ./roles/web --target-repo acme/web "
@@ -83,25 +92,46 @@ def graph_command(
     ] = None,
     upstream: Annotated[
         bool,
-        Parameter(name="--upstream", negative="", help="Show who depends on TARGET."),
+        Parameter(
+            name="--upstream",
+            negative="",
+            group=_DIRECTION_GROUP,
+            help="Show repos that depend on TARGET (reverse impact; requires a source).",
+        ),
     ] = False,
     downstream: Annotated[
         bool,
-        Parameter(name="--downstream", negative="", help="Show what TARGET depends on."),
+        Parameter(
+            name="--downstream",
+            negative="",
+            group=_DIRECTION_GROUP,
+            help="Show what TARGET depends on (works without a source).",
+        ),
     ] = False,
     both: Annotated[
         bool,
-        Parameter(name="--both", negative="", help="Show upstream and downstream (default)."),
+        Parameter(
+            name="--both",
+            negative="",
+            group=_DIRECTION_GROUP,
+            help="Show upstream and downstream (default). Upstream still requires a source.",
+        ),
     ] = False,
     refresh: Annotated[
         bool,
-        Parameter(name="--refresh", negative="", help="Refresh source data before graphing."),
+        Parameter(
+            name="--refresh",
+            negative="",
+            group=_SOURCE_DATA_GROUP,
+            help="Refresh source data before graphing.",
+        ),
     ] = False,
     cached: Annotated[
         bool,
         Parameter(
             name="--cached",
             negative="",
+            group=_SOURCE_DATA_GROUP,
             help="Use cached source data without checking remote refs.",
         ),
     ] = False,
@@ -120,6 +150,7 @@ def graph_command(
         Parameter(
             name="--live",
             negative="",
+            group=_SOURCE_DATA_GROUP,
             help=(
                 "Use live GitHub reads for downstream graphing even when source data is configured."
             ),
@@ -138,7 +169,10 @@ def graph_command(
         list[str] | None,
         Parameter(
             name="--team",
-            help="Inline source GitHub team slug with one --org, or ORG/SLUG.",
+            help=(
+                "Inline source GitHub team as ORG/SLUG; a bare SLUG is allowed when "
+                "exactly one --org is given and normalizes to ORG/SLUG."
+            ),
             consume_multiple=False,
         ),
     ] = None,
@@ -184,6 +218,8 @@ def graph_command(
       untaped ansible graph acme/app --source prod --both --cached
       untaped ansible graph ./roles/web --target-repo acme/web --downstream
     """
+    if refresh and not any((source, orgs, teams, source_repos, paths, ref_kinds, ref_patterns)):
+        raise_usage("--refresh requires --source or inline source selectors")
     with report_errors():
         ctx = plugin_context(profile)
         settings = ctx.section("ansible", AnsibleSettings)
@@ -193,8 +229,6 @@ def graph_command(
             raise UntapedError(f"could not resolve target to a GitHub repo: {target!r}")
 
         direction = _graph_direction(upstream=upstream, downstream=downstream, both=both)
-        if cached and refresh:
-            raise_usage("--cached cannot be combined with --refresh")
         git_concurrency = concurrency or settings.git_fetch_concurrency
         graph_source = _graph_source(
             source_names=source,
@@ -214,15 +248,29 @@ def graph_command(
             live=live,
             refresh=refresh,
         )
+        refresh_warnings: list[str] = []
         if should_refresh_source:
-            if not graph_source.selections:
-                raise_usage("--refresh requires --source or inline source selectors")
             github_settings = ctx.section("github", GithubSettings)
             for selection in graph_source.selections:
-                started_at = time.perf_counter()
-                result = source_commands._refresh_source(
+                if not refresh:
+                    fresh_age = _within_freshness_ttl(
+                        sqlite_index,
+                        selection,
+                        ttl=settings.freshness_ttl,
+                    )
+                    if fresh_age is not None:
+                        echo(
+                            f"source '{selection.label}' refreshed {_human_age(fresh_age)} ago "
+                            f"(within freshness_ttl of {settings.freshness_ttl}s); "
+                            "skipping check — pass --refresh to force",
+                            err=True,
+                        )
+                        continue
+                result = run_source_refresh(
                     selection.definition,
                     source_key=selection.key,
+                    action="refreshed" if refresh else "checked",
+                    label=selection.label,
                     index=sqlite_index,
                     aliases=aliases,
                     settings=settings,
@@ -230,16 +278,12 @@ def graph_command(
                     http=ctx.http,
                     concurrency=git_concurrency,
                 )
-                echo(
-                    source_commands._refresh_summary(
-                        "refreshed" if refresh else "checked",
-                        selection.label,
-                        result,
-                        concurrency=git_concurrency,
-                        elapsed=time.perf_counter() - started_at,
-                    ),
-                    err=True,
-                )
+                if result.failures:
+                    refresh_warnings.append(
+                        f"refresh of {selection.label} had "
+                        f"{pluralize(len(result.failures), 'failure')}; "
+                        "data for those repos may be stale"
+                    )
 
         direction, graph_warnings = _effective_direction(
             target=target,
@@ -248,6 +292,7 @@ def graph_command(
             direction=direction,
             cached=cached,
         )
+        refresh_hint = _refresh_hint(graph_source)
 
         target_path = Path(target).expanduser()
         if target_path.exists():
@@ -271,6 +316,7 @@ def graph_command(
                 direction=direction,
                 depth=depth,
                 stale_after=settings.stale_after,
+                refresh_hint=refresh_hint,
             )
         else:
             if _should_use_live_dependencies(
@@ -294,6 +340,7 @@ def graph_command(
                         direction=direction,
                         depth=depth,
                         stale_after=settings.stale_after,
+                        refresh_hint=refresh_hint,
                     )
             else:
                 graph = _graph_from_index(
@@ -304,11 +351,13 @@ def graph_command(
                     direction=direction,
                     depth=depth,
                     stale_after=settings.stale_after,
+                    refresh_hint=refresh_hint,
                 )
 
         graph = _with_graph_warnings(
             graph,
             [
+                *refresh_warnings,
                 *graph_warnings,
                 *_empty_graph_warnings(
                     graph,
@@ -337,9 +386,8 @@ class _GraphSource:
 
 
 def _graph_direction(*, upstream: bool, downstream: bool, both: bool) -> GraphDirection:
-    selected = [upstream, downstream, both].count(True)
-    if selected > 1:
-        raise_usage("choose only one of --upstream, --downstream, or --both")
+    # Mutual exclusion is enforced at parse time by _DIRECTION_GROUP.
+    del both
     if upstream:
         return "impact"
     if downstream:
@@ -495,11 +543,9 @@ def _missing_source_index_message(
     missing: tuple[_GraphSourceSelection, ...],
 ) -> str:
     if source_state.saved:
+        refresh_commands = _source_refresh_commands(missing)
         if len(missing) > 1:
             labels = ", ".join(repr(selection.label) for selection in missing)
-            refresh_commands = " and ".join(
-                f"`untaped ansible source refresh {selection.label}`" for selection in missing
-            )
             source_flags = " ".join(
                 f"--source {selection.label}" for selection in source_state.selections
             )
@@ -510,8 +556,8 @@ def _missing_source_index_message(
             )
         label = missing[0].label
         return (
-            f"no cached source data found for source {label!r}. Run: "
-            f"`untaped ansible source refresh {label}`. Or re-run graph with: "
+            f"no cached source data found for source {label!r}. Run: {refresh_commands}. "
+            f"Or re-run graph with: "
             f"`untaped ansible graph {target} --source {label} --upstream --refresh`."
         )
     return (
@@ -605,6 +651,7 @@ def _graph_from_index(
     direction: GraphDirection,
     depth: str,
     stale_after: int,
+    refresh_hint: str | None,
 ) -> DependencyGraph:
     return BuildGraph(index)(
         GraphRequest(
@@ -614,8 +661,57 @@ def _graph_from_index(
             direction=direction,
             depth=_parse_depth(depth),
             stale_after=stale_after,
+            refresh_hint=refresh_hint,
         )
     )
+
+
+def _refresh_hint(source_state: _GraphSource) -> str | None:
+    """Compose the exact fix command surfaced in stale/missing-ref warnings."""
+    if not source_state.selections:
+        return None
+    if source_state.saved:
+        commands = _source_refresh_commands(source_state.selections)
+        return f"Run {commands} to update it."
+    return "Re-run this graph command with `--refresh` (without `--cached`) to update it."
+
+
+def _source_refresh_commands(selections: tuple[_GraphSourceSelection, ...]) -> str:
+    """Join the exact `untaped ansible source refresh NAME` commands for selections."""
+    return " and ".join(
+        f"`untaped ansible source refresh {selection.label}`" for selection in selections
+    )
+
+
+def _within_freshness_ttl(
+    index: SqliteDependencyIndex,
+    selection: _GraphSourceSelection,
+    *,
+    ttl: int | None,
+) -> timedelta | None:
+    """Age of the selection's last scan when within the TTL, None otherwise."""
+    if ttl is None:
+        return None
+    status = index.status(selection.key)
+    if status is None:
+        return None
+    age = datetime.now(UTC) - status.scanned_at
+    if age.total_seconds() > ttl:
+        return None
+    return age
+
+
+def _human_age(age: timedelta) -> str:
+    seconds = max(0, int(age.total_seconds()))
+    if seconds < 60:
+        return pluralize(seconds, "second")
+    minutes = seconds // 60
+    if minutes < 60:
+        return pluralize(minutes, "minute")
+    hours = minutes // 60
+    if hours < 24:
+        return pluralize(hours, "hour")
+    return pluralize(hours // 24, "day")
 
 
 def _with_graph_warnings(graph: DependencyGraph, warnings: list[str]) -> DependencyGraph:

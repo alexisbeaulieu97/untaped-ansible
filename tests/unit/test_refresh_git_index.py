@@ -4,17 +4,24 @@ from __future__ import annotations
 
 import threading
 import time
+from collections.abc import Callable, Sequence
 from pathlib import Path
+from typing import Any
 
 import pytest
+from untaped.api import UntapedError
 
 from untaped_ansible.application.refresh_git_index import (
     RefreshGitSourceIndex,
-    _RefSelection,
     _repo_candidate,
-    _selected_refs,
 )
-from untaped_ansible.domain.payloads import CachedRef, GitRef
+from untaped_ansible.domain.payloads import (
+    CachedRef,
+    GitRef,
+    ProbedRepo,
+    ProbeReport,
+    RefreshProgressEvent,
+)
 from untaped_ansible.infrastructure.git_cache import GitCacheError
 from untaped_ansible.infrastructure.sqlite_index import SqliteDependencyIndex
 from untaped_ansible.settings import SourceDefinition
@@ -24,29 +31,39 @@ class FakeGitHub:
     def __init__(self) -> None:
         self.repository_calls: list[tuple[str, str]] = []
         self.org_calls: list[str] = []
+        self.team_calls: list[tuple[str, str]] = []
+        self.repo_default_branches: dict[str, str] = {}
+        self.org_repos: dict[str, list[str]] = {}
+        self.team_repos: dict[str, list[str]] = {}
+        self.org_error: Exception | None = None
 
     def get_repository(self, owner: str, repo: str) -> dict[str, object]:
         self.repository_calls.append((owner, repo))
+        full_name = f"{owner}/{repo}"
         return {
-            "full_name": f"{owner}/{repo}",
-            "default_branch": "main",
-            "clone_url": f"https://github.com/{owner}/{repo}.git",
-            "ssh_url": f"git@github.com:{owner}/{repo}.git",
+            "full_name": full_name,
+            "default_branch": self.repo_default_branches.get(full_name, "main"),
+            "clone_url": f"https://github.com/{full_name}.git",
+            "ssh_url": f"git@github.com:{full_name}.git",
         }
 
     def list_org_repos(self, org: str) -> list[dict[str, object]]:
         self.org_calls.append(org)
-        return [
-            {
-                "full_name": f"{org}/site",
-                "default_branch": "main",
-                "clone_url": f"https://github.com/{org}/site.git",
-                "ssh_url": f"git@github.com:{org}/site.git",
-            }
-        ]
+        if self.org_error is not None:
+            raise self.org_error
+        return [self._row(name) for name in self.org_repos.get(org, [f"{org}/site"])]
 
     def list_team_repos(self, org: str, team_slug: str) -> list[dict[str, object]]:
-        return []
+        self.team_calls.append((org, team_slug))
+        return [self._row(name) for name in self.team_repos.get(f"{org}/{team_slug}", [])]
+
+    def _row(self, full_name: str) -> dict[str, object]:
+        return {
+            "full_name": full_name,
+            "default_branch": "main",
+            "clone_url": f"https://github.com/{full_name}.git",
+            "ssh_url": f"git@github.com:{full_name}.git",
+        }
 
     def list_matching_refs(self, owner: str, repo: str, namespace: str) -> list[dict[str, object]]:
         raise AssertionError("git cache refresh must not use REST matching-refs")
@@ -65,16 +82,52 @@ class FakeGitHub:
         raise AssertionError("git cache refresh must not use REST content reads")
 
 
+class FakeRefProbe:
+    """Dict-backed RefProbe: refs and failures keyed by full repo name."""
+
+    def __init__(self) -> None:
+        self.refs: dict[str, list[GitRef]] = {}
+        self.default_branches: dict[str, str | None] = {}
+        self.failures: dict[str, str] = {}
+        self.rate_limit_remaining: int | None = None
+        self.calls: list[tuple[tuple[str, ...], tuple[str, ...]]] = []
+
+    def probe(
+        self,
+        repos: Sequence[str],
+        *,
+        kinds: Sequence[str],
+        on_progress: Callable[[int, int], None] | None = None,
+    ) -> ProbeReport:
+        self.calls.append((tuple(repos), tuple(kinds)))
+        probed: dict[str, ProbedRepo] = {}
+        failures: dict[str, str] = {}
+        for repo in repos:
+            if repo in self.failures:
+                failures[repo] = self.failures[repo]
+                continue
+            if repo not in self.refs:
+                failures[repo] = "repository not found or inaccessible on GitHub"
+                continue
+            probed[repo] = ProbedRepo(
+                default_branch=self.default_branches.get(repo, "main"),
+                refs=tuple(ref for ref in self.refs[repo] if ref.kind in kinds),
+            )
+        if on_progress is not None:
+            on_progress(len(repos), len(repos))
+        return ProbeReport(
+            repos=probed,
+            failures=failures,
+            rate_limit_remaining=self.rate_limit_remaining,
+        )
+
+
 class FakeGitCache:
     def __init__(self) -> None:
-        self.refs: dict[tuple[str, str], list[GitRef]] = {}
-        self.remote_refs: dict[str, list[GitRef]] = {}
         self.files: dict[tuple[str, str, str], str] = {}
         self.ensure_calls: list[tuple[str, Path, str | None]] = []
         self.fetches: list[tuple[str, tuple[str, ...], int, bool, str | None]] = []
         self.reads: list[tuple[str, str, str, str | None]] = []
-        self.list_ref_calls: list[tuple[str, str]] = []
-        self.list_remote_ref_calls: list[tuple[str, tuple[str, ...], str | None]] = []
         self.fail_fetches: set[str] = set()
 
     def ensure_bare(
@@ -86,30 +139,6 @@ class FakeGitCache:
     ) -> Path:
         self.ensure_calls.append((url, cache_dir, auth_header))
         return cache_dir / url.removesuffix(".git").rsplit("/", maxsplit=1)[-1]
-
-    def list_remote_refs(
-        self,
-        url: str,
-        *,
-        namespaces: list[str],
-        auth_header: str | None,
-    ) -> list[GitRef]:
-        self.list_remote_ref_calls.append((url, tuple(namespaces), auth_header))
-        if url in self.remote_refs:
-            refs = self.remote_refs[url]
-        else:
-            repo_name = url.removesuffix(".git").rsplit("/", maxsplit=1)[-1]
-            refs = [
-                ref
-                for (bare_name, _kind), values in self.refs.items()
-                if bare_name == repo_name
-                for ref in values
-            ]
-        return [
-            ref
-            for ref in refs
-            if any(_fake_namespace_matches(ref, namespace) for namespace in namespaces)
-        ]
 
     def fetch_refs(
         self,
@@ -124,10 +153,6 @@ class FakeGitCache:
             raise GitCacheError(f"git fetch failed for {bare_path.name}")
         self.fetches.append((bare_path.name, tuple(refspecs), depth, blob_filter, auth_header))
 
-    def list_refs(self, bare_path: Path, kind: str) -> list[GitRef]:
-        self.list_ref_calls.append((bare_path.name, kind))
-        return self.refs.get((bare_path.name, kind), [])
-
     def read_file(
         self,
         bare_path: Path,
@@ -138,17 +163,6 @@ class FakeGitCache:
     ) -> str | None:
         self.reads.append((bare_path.name, sha, path, auth_header))
         return self.files.get((bare_path.name, sha, path))
-
-
-def _fake_namespace_matches(ref: GitRef, namespace: str) -> bool:
-    kind, _, pattern = namespace.partition("/")
-    if kind != ref.kind:
-        return False
-    if not pattern:
-        return True
-    from fnmatch import fnmatch
-
-    return fnmatch(ref.name, pattern)
 
 
 class SlowGitCache(FakeGitCache):
@@ -226,25 +240,226 @@ class CountingRefScanIndex:
         return self._wrapped.commit_source_ref_refresh(source_key, **kwargs)
 
 
+def _make_refresh(
+    *,
+    github: FakeGitHub,
+    git: FakeGitCache,
+    probe: FakeRefProbe,
+    index: Any,
+    tmp_path: Path,
+    **overrides: Any,
+) -> RefreshGitSourceIndex:
+    kwargs: dict[str, Any] = {
+        "github": github,
+        "git": git,
+        "probe": probe,
+        "index": index,
+        "aliases": {},
+        "default_dependency_paths": ["roles/requirements.yml"],
+        "repo_cache_path": tmp_path / "repos",
+        "clone_protocol": "https",
+        "fetch_depth": 1,
+        "blob_filter": True,
+        "auth_header": None,
+    }
+    kwargs.update(overrides)
+    return RefreshGitSourceIndex(**kwargs)
+
+
+def test_pruning_is_scoped_to_succeeded_repos(tmp_path: Path) -> None:
+    """A failed repo keeps its cached refs; a succeeded repo prunes removed refs."""
+    github = FakeGitHub()
+    git = FakeGitCache()
+    probe = FakeRefProbe()
+    probe.refs["acme/a"] = [
+        GitRef(kind="heads", name="main", sha="sha-a-main"),
+        GitRef(kind="heads", name="extra", sha="sha-a-extra"),
+    ]
+    probe.refs["acme/b"] = [GitRef(kind="heads", name="main", sha="sha-b-main")]
+    git.files[("a", "sha-a-main", "roles/requirements.yml")] = (
+        "- src: https://github.com/acme/base\n  version: v1\n"
+    )
+    git.files[("a", "sha-a-extra", "roles/requirements.yml")] = (
+        "- src: https://github.com/acme/extra-base\n"
+    )
+    git.files[("b", "sha-b-main", "roles/requirements.yml")] = (
+        "- src: https://github.com/acme/base\n  version: v1\n"
+    )
+    index = SqliteDependencyIndex(tmp_path / "index.sqlite3")
+    refresh = _make_refresh(github=github, git=git, probe=probe, index=index, tmp_path=tmp_path)
+    source = SourceDefinition(name="prod", repos=["acme/a", "acme/b"])
+
+    first = refresh(source, source_key="source:prod")
+    assert first.failures == ()
+
+    probe.refs["acme/a"] = [GitRef(kind="heads", name="main", sha="sha-a-main")]
+    probe.failures["acme/b"] = "boom"
+    second = refresh(source, source_key="source:prod")
+
+    assert [(failure.repo, failure.reason) for failure in second.failures] == [("acme/b", "boom")]
+    # succeeded repo: the removed ref is pruned
+    assert index.ref_scans("source:prod", "acme/a", [("heads", "extra")]) == {}
+    assert not index.dependents("acme/extra-base", None, source_key="source:prod")
+    # failed repo: previously cached refs survive
+    assert index.ref_scans("source:prod", "acme/b", [("heads", "main")])
+    assert {
+        edge.source_repo for edge in index.dependents("acme/base", "v1", source_key="source:prod")
+    } == {"acme/a", "acme/b"}
+    # failed repo keeps its cached default-branch metadata too
+    assert CachedRef(name="main", kind="heads", default_branch="main") in set(
+        index.cached_ref_metadata("acme/b", source_key="source:prod")
+    )
+
+
+def test_probe_failure_skips_repo_without_git_work_and_records_failure(tmp_path: Path) -> None:
+    github = FakeGitHub()
+    git = FakeGitCache()
+    probe = FakeRefProbe()
+    probe.refs["acme/site"] = [GitRef(kind="heads", name="main", sha="sha-main")]
+    probe.failures["acme/gone"] = "repository not found or inaccessible on GitHub"
+    git.files[("site", "sha-main", "roles/requirements.yml")] = (
+        "- src: https://github.com/acme/base\n"
+    )
+    index = SqliteDependencyIndex(tmp_path / "index.sqlite3")
+
+    result = _make_refresh(github=github, git=git, probe=probe, index=index, tmp_path=tmp_path)(
+        SourceDefinition(name="prod", repos=["acme/gone", "acme/site"]),
+        source_key="source:prod",
+    )
+
+    assert result.repos == 2
+    assert result.refs == 1
+    assert [(failure.repo, failure.reason) for failure in result.failures] == [
+        ("acme/gone", "repository not found or inaccessible on GitHub")
+    ]
+    assert all("gone" not in url for url, _, _ in git.ensure_calls)
+    assert index.dependents("acme/base", None, source_key="source:prod")
+
+
+def test_fetch_failure_keeps_other_repos_and_previously_cached_refs(tmp_path: Path) -> None:
+    github = FakeGitHub()
+    git = FakeGitCache()
+    probe = FakeRefProbe()
+    probe.refs["acme/a"] = [GitRef(kind="heads", name="main", sha="sha-a")]
+    probe.refs["acme/b"] = [GitRef(kind="heads", name="main", sha="sha-b")]
+    git.files[("a", "sha-a", "roles/requirements.yml")] = (
+        "- src: https://github.com/acme/base\n  version: v1\n"
+    )
+    git.files[("b", "sha-b", "roles/requirements.yml")] = (
+        "- src: https://github.com/acme/base\n  version: v1\n"
+    )
+    index = SqliteDependencyIndex(tmp_path / "index.sqlite3")
+    refresh = _make_refresh(github=github, git=git, probe=probe, index=index, tmp_path=tmp_path)
+    source = SourceDefinition(name="prod", repos=["acme/a", "acme/b"])
+
+    refresh(source, source_key="source:prod")
+    probe.refs["acme/a"] = [GitRef(kind="heads", name="main", sha="sha-a2")]
+    probe.refs["acme/b"] = [GitRef(kind="heads", name="main", sha="sha-b2")]
+    git.files[("a", "sha-a2", "roles/requirements.yml")] = (
+        "- src: https://github.com/acme/base\n  version: v2\n"
+    )
+    git.files[("b", "sha-b2", "roles/requirements.yml")] = (
+        "- src: https://github.com/acme/base\n  version: v2\n"
+    )
+    git.fail_fetches.add("b")
+
+    result = refresh(source, source_key="source:prod")
+
+    assert [(failure.repo, failure.reason) for failure in result.failures] == [
+        ("acme/b", "git fetch failed for b")
+    ]
+    assert result.changed_refs == 1
+    # the succeeded repo advanced to v2
+    assert {
+        edge.source_repo for edge in index.dependents("acme/base", "v2", source_key="source:prod")
+    } == {"acme/a"}
+    # the failed repo keeps its previously cached v1 scan
+    assert {
+        edge.source_repo for edge in index.dependents("acme/base", "v1", source_key="source:prod")
+    } == {"acme/b"}
+
+
+def test_all_repos_failed_skips_commit_and_keeps_index_untouched(tmp_path: Path) -> None:
+    """When every repo fails (probe or fetch), the run must not look fresh."""
+    github = FakeGitHub()
+    git = FakeGitCache()
+    probe = FakeRefProbe()
+    probe.refs["acme/a"] = [GitRef(kind="heads", name="main", sha="sha-a")]
+    probe.refs["acme/b"] = [GitRef(kind="heads", name="main", sha="sha-b")]
+    git.files[("a", "sha-a", "roles/requirements.yml")] = (
+        "- src: https://github.com/acme/base\n  version: v1\n"
+    )
+    git.files[("b", "sha-b", "roles/requirements.yml")] = (
+        "- src: https://github.com/acme/base\n  version: v1\n"
+    )
+    index = SqliteDependencyIndex(tmp_path / "index.sqlite3")
+    refresh = _make_refresh(github=github, git=git, probe=probe, index=index, tmp_path=tmp_path)
+    source = SourceDefinition(name="prod", repos=["acme/a", "acme/b"])
+
+    refresh(source, source_key="source:prod")
+    before = index.status("source:prod")
+    assert before is not None
+    probe.failures["acme/a"] = "probe boom"
+    probe.refs["acme/b"] = [GitRef(kind="heads", name="main", sha="sha-b2")]
+    git.fail_fetches.add("b")
+
+    result = refresh(source, source_key="source:prod")
+
+    assert [(failure.repo, failure.reason) for failure in result.failures] == [
+        ("acme/a", "probe boom"),
+        ("acme/b", "git fetch failed for b"),
+    ]
+    after = index.status("source:prod")
+    assert after is not None
+    assert after.scanned_at == before.scanned_at
+    # all previously cached data survives untouched
+    assert index.ref_scans("source:prod", "acme/a", [("heads", "main")])
+    assert index.ref_scans("source:prod", "acme/b", [("heads", "main")])
+    assert {
+        edge.source_repo for edge in index.dependents("acme/base", "v1", source_key="source:prod")
+    } == {"acme/a", "acme/b"}
+
+
+def test_empty_source_refresh_still_commits(tmp_path: Path) -> None:
+    """Zero repos expanded is a successful (empty) refresh, not a failure."""
+    github = FakeGitHub()
+    git = FakeGitCache()
+    probe = FakeRefProbe()
+    probe.refs["acme/site"] = [GitRef(kind="heads", name="main", sha="sha-main")]
+    git.files[("site", "sha-main", "roles/requirements.yml")] = (
+        "- src: https://github.com/acme/base\n"
+    )
+    index = SqliteDependencyIndex(tmp_path / "index.sqlite3")
+    refresh = _make_refresh(github=github, git=git, probe=probe, index=index, tmp_path=tmp_path)
+    source = SourceDefinition(name="prod", orgs=["acme"])
+
+    refresh(source, source_key="source:prod")
+    github.org_repos["acme"] = []
+    result = refresh(source, source_key="source:prod")
+
+    assert result.repos == 0
+    assert result.failures == ()
+    # the commit ran: the now-unselected repo was pruned
+    assert index.ref_scans("source:prod", "acme/site", [("heads", "main")]) == {}
+    assert not index.dependents("acme/base", None, source_key="source:prod")
+
+
 def test_git_refresh_fetches_selected_refs_and_indexes_dependency_files(tmp_path: Path) -> None:
     github = FakeGitHub()
     git = FakeGitCache()
-    git.refs[("site", "heads")] = [GitRef(kind="heads", name="main", sha="sha-main")]
+    probe = FakeRefProbe()
+    probe.refs["acme/site"] = [GitRef(kind="heads", name="main", sha="sha-main")]
     git.files[("site", "sha-main", "roles/requirements.yml")] = (
         "- src: https://github.com/acme/base\n  version: v1\n"
     )
     index = SqliteDependencyIndex(tmp_path / "index.sqlite3")
 
-    result = RefreshGitSourceIndex(
+    result = _make_refresh(
         github=github,
         git=git,
+        probe=probe,
         index=index,
-        aliases={},
-        default_dependency_paths=["roles/requirements.yml"],
-        repo_cache_path=tmp_path / "repos",
-        clone_protocol="https",
-        fetch_depth=1,
-        blob_filter=True,
+        tmp_path=tmp_path,
         auth_header="AUTHORIZATION: bearer test",
         ref_scan_default="default_branch",
     )(SourceDefinition(name="prod", orgs=["acme"]), source_key="source:prod")
@@ -252,6 +467,7 @@ def test_git_refresh_fetches_selected_refs_and_indexes_dependency_files(tmp_path
     assert result.repos == 1
     assert result.refs == 1
     assert result.edges == 1
+    assert probe.calls == [(("acme/site",), ("heads",))]
     assert git.fetches == [
         (
             "site",
@@ -272,8 +488,11 @@ def test_git_refresh_fetches_selected_refs_and_indexes_dependency_files(tmp_path
 def test_git_refresh_defaults_to_all_heads_and_tags(tmp_path: Path) -> None:
     github = FakeGitHub()
     git = FakeGitCache()
-    git.refs[("site", "heads")] = [GitRef(kind="heads", name="master", sha="sha-master")]
-    git.refs[("site", "tags")] = [GitRef(kind="tags", name="v3", sha="sha-v3")]
+    probe = FakeRefProbe()
+    probe.refs["acme/site"] = [
+        GitRef(kind="heads", name="master", sha="sha-master"),
+        GitRef(kind="tags", name="v3", sha="sha-v3"),
+    ]
     git.files[("site", "sha-master", "roles/requirements.yml")] = (
         "- src: https://github.com/acme/base\n  version: v3\n"
     )
@@ -282,21 +501,17 @@ def test_git_refresh_defaults_to_all_heads_and_tags(tmp_path: Path) -> None:
     )
     index = SqliteDependencyIndex(tmp_path / "index.sqlite3")
 
-    result = RefreshGitSourceIndex(
+    result = _make_refresh(
         github=github,
         git=git,
+        probe=probe,
         index=index,
-        aliases={},
-        default_dependency_paths=["roles/requirements.yml"],
-        repo_cache_path=tmp_path / "repos",
-        clone_protocol="https",
-        fetch_depth=1,
-        blob_filter=True,
-        auth_header=None,
+        tmp_path=tmp_path,
         ref_scan_default="all",
     )(SourceDefinition(name="prod", orgs=["acme"]), source_key="source:prod")
 
     assert result.refs == 2
+    assert probe.calls == [(("acme/site",), ("heads", "tags"))]
     assert git.fetches == [
         (
             "site",
@@ -318,27 +533,164 @@ def test_git_refresh_defaults_to_all_heads_and_tags(tmp_path: Path) -> None:
     }
 
 
+def test_probe_kinds_follow_explicit_ref_kinds(tmp_path: Path) -> None:
+    github = FakeGitHub()
+    git = FakeGitCache()
+    probe = FakeRefProbe()
+    probe.refs["acme/site"] = [GitRef(kind="tags", name="v1", sha="sha-v1")]
+    index = SqliteDependencyIndex(tmp_path / "index.sqlite3")
+
+    _make_refresh(github=github, git=git, probe=probe, index=index, tmp_path=tmp_path)(
+        SourceDefinition(name="prod", orgs=["acme"], ref_kinds=["tags"]),
+        source_key="source:prod",
+    )
+
+    assert probe.calls == [(("acme/site",), ("tags",))]
+
+
+def test_default_branch_comes_from_probe_with_expansion_fallback(tmp_path: Path) -> None:
+    github = FakeGitHub()
+    git = FakeGitCache()
+    probe = FakeRefProbe()
+    probe.refs["acme/site"] = [GitRef(kind="heads", name="trunk", sha="sha-trunk")]
+    probe.default_branches["acme/site"] = "trunk"
+    probe.refs["acme/old"] = [GitRef(kind="heads", name="main", sha="sha-old")]
+    probe.default_branches["acme/old"] = None
+    github.org_repos["acme"] = ["acme/site", "acme/old"]
+    index = SqliteDependencyIndex(tmp_path / "index.sqlite3")
+
+    _make_refresh(github=github, git=git, probe=probe, index=index, tmp_path=tmp_path)(
+        SourceDefinition(name="prod", orgs=["acme"]),
+        source_key="source:prod",
+    )
+
+    assert set(index.cached_ref_metadata("acme/site", source_key="source:prod")) == {
+        CachedRef(name="trunk", kind="heads", default_branch="trunk"),
+    }
+    # probe did not know the default branch: expansion metadata wins
+    assert set(index.cached_ref_metadata("acme/old", source_key="source:prod")) == {
+        CachedRef(name="main", kind="heads", default_branch="main"),
+    }
+
+
+def test_expansion_dedupes_overlapping_selectors_with_explicit_repo_precedence(
+    tmp_path: Path,
+) -> None:
+    github = FakeGitHub()
+    github.repo_default_branches["acme/site"] = "trunk"
+    github.org_repos["acme"] = ["acme/site", "acme/lib"]
+    github.team_repos["acme/platform"] = ["acme/lib", "acme/tool"]
+    git = FakeGitCache()
+    probe = FakeRefProbe()
+    for repo in ("acme/site", "acme/lib", "acme/tool"):
+        probe.refs[repo] = [GitRef(kind="heads", name="main", sha=f"sha-{repo.split('/')[1]}")]
+    probe.default_branches["acme/site"] = None
+    index = SqliteDependencyIndex(tmp_path / "index.sqlite3")
+
+    result = _make_refresh(
+        github=github,
+        git=git,
+        probe=probe,
+        index=index,
+        tmp_path=tmp_path,
+        probe_concurrency=4,
+    )(
+        SourceDefinition(
+            name="prod",
+            repos=["acme/site"],
+            orgs=["acme"],
+            teams=["platform"],
+        ),
+        source_key="source:prod",
+    )
+
+    assert result.repos == 3
+    # repo list is deduped and deterministically sorted
+    assert probe.calls[0][0] == ("acme/lib", "acme/site", "acme/tool")
+    # explicit repo expansion metadata wins over the org listing
+    assert set(index.cached_ref_metadata("acme/site", source_key="source:prod")) == {
+        CachedRef(name="main", kind="heads", default_branch="trunk"),
+    }
+
+
+def test_expansion_failures_stay_fatal(tmp_path: Path) -> None:
+    github = FakeGitHub()
+    github.org_error = UntapedError("org not found: acme")
+    probe = FakeRefProbe()
+
+    refresh = _make_refresh(
+        github=github,
+        git=FakeGitCache(),
+        probe=probe,
+        index=SqliteDependencyIndex(tmp_path / "index.sqlite3"),
+        tmp_path=tmp_path,
+    )
+
+    with pytest.raises(UntapedError, match="org not found"):
+        refresh(SourceDefinition(name="prod", orgs=["acme"]), source_key="source:prod")
+    assert probe.calls == []
+
+
+def test_refresh_reports_progress_events_per_phase(tmp_path: Path) -> None:
+    github = FakeGitHub()
+    git = FakeGitCache()
+    probe = FakeRefProbe()
+    probe.refs["acme/a"] = [GitRef(kind="heads", name="main", sha="sha-a")]
+    probe.refs["acme/b"] = [GitRef(kind="heads", name="main", sha="sha-b")]
+    events: list[RefreshProgressEvent] = []
+
+    _make_refresh(
+        github=github,
+        git=git,
+        probe=probe,
+        index=SqliteDependencyIndex(tmp_path / "index.sqlite3"),
+        tmp_path=tmp_path,
+        on_progress=events.append,
+    )(SourceDefinition(name="prod", repos=["acme/a", "acme/b"]), source_key="source:prod")
+
+    expanding = [event for event in events if event.phase == "expanding"]
+    probing = [event for event in events if event.phase == "probing"]
+    fetching = [event for event in events if event.phase == "fetching"]
+    assert expanding and expanding[-1].done == expanding[-1].total == 2
+    assert probing == [RefreshProgressEvent(phase="probing", done=2, total=2)]
+    assert [event.done for event in fetching] == [1, 2]
+    assert fetching[-1].changed == 2
+
+
+def test_refresh_surfaces_probe_rate_limit(tmp_path: Path) -> None:
+    github = FakeGitHub()
+    probe = FakeRefProbe()
+    probe.refs["acme/site"] = [GitRef(kind="heads", name="main", sha="sha-main")]
+    probe.rate_limit_remaining = 240
+
+    result = _make_refresh(
+        github=github,
+        git=FakeGitCache(),
+        probe=probe,
+        index=SqliteDependencyIndex(tmp_path / "index.sqlite3"),
+        tmp_path=tmp_path,
+    )(SourceDefinition(name="prod", orgs=["acme"]), source_key="source:prod")
+
+    assert result.rate_limit_remaining == 240
+
+
 def test_git_refresh_processes_repositories_concurrently_and_reports_change_counts(
     tmp_path: Path,
 ) -> None:
     github = FakeGitHub()
     git = SlowGitCache()
-    git.refs[("a", "heads")] = [GitRef(kind="heads", name="main", sha="sha-a")]
-    git.refs[("b", "heads")] = [GitRef(kind="heads", name="main", sha="sha-b")]
+    probe = FakeRefProbe()
+    probe.refs["acme/a"] = [GitRef(kind="heads", name="main", sha="sha-a")]
+    probe.refs["acme/b"] = [GitRef(kind="heads", name="main", sha="sha-b")]
     git.files[("a", "sha-a", "roles/requirements.yml")] = "- src: https://github.com/acme/base-a\n"
     git.files[("b", "sha-b", "roles/requirements.yml")] = "- src: https://github.com/acme/base-b\n"
     index = SqliteDependencyIndex(tmp_path / "index.sqlite3")
-    refresh = RefreshGitSourceIndex(
+    refresh = _make_refresh(
         github=github,
         git=git,
+        probe=probe,
         index=index,
-        aliases={},
-        default_dependency_paths=["roles/requirements.yml"],
-        repo_cache_path=tmp_path / "repos",
-        clone_protocol="https",
-        fetch_depth=1,
-        blob_filter=True,
-        auth_header=None,
+        tmp_path=tmp_path,
         concurrency=2,
     )
     source = SourceDefinition(name="prod", repos=["acme/a", "acme/b", "acme/a"])
@@ -364,7 +716,8 @@ def test_git_refresh_processes_repositories_concurrently_and_reports_change_coun
 def test_git_refresh_reads_ref_metadata_in_one_batch_per_repo(tmp_path: Path) -> None:
     github = FakeGitHub()
     git = FakeGitCache()
-    git.refs[("site", "heads")] = [
+    probe = FakeRefProbe()
+    probe.refs["acme/site"] = [
         GitRef(kind="heads", name="main", sha="sha-main"),
         GitRef(kind="heads", name="release", sha="sha-release"),
     ]
@@ -376,17 +729,12 @@ def test_git_refresh_reads_ref_metadata_in_one_batch_per_repo(tmp_path: Path) ->
     )
     index = CountingRefScanIndex(SqliteDependencyIndex(tmp_path / "index.sqlite3"))
 
-    RefreshGitSourceIndex(
+    _make_refresh(
         github=github,
         git=git,
+        probe=probe,
         index=index,
-        aliases={},
-        default_dependency_paths=["roles/requirements.yml"],
-        repo_cache_path=tmp_path / "repos",
-        clone_protocol="https",
-        fetch_depth=1,
-        blob_filter=True,
-        auth_header=None,
+        tmp_path=tmp_path,
         ref_scan_default="default_branch",
     )(
         SourceDefinition(name="prod", orgs=["acme"], ref_patterns=["*"]),
@@ -407,20 +755,16 @@ def test_git_refresh_reads_sqlite_metadata_safely_while_fetching_concurrently(
 ) -> None:
     github = FakeGitHub()
     git = SlowGitCache()
-    git.refs[("a", "heads")] = [GitRef(kind="heads", name="main", sha="sha-a")]
-    git.refs[("b", "heads")] = [GitRef(kind="heads", name="main", sha="sha-b")]
+    probe = FakeRefProbe()
+    probe.refs["acme/a"] = [GitRef(kind="heads", name="main", sha="sha-a")]
+    probe.refs["acme/b"] = [GitRef(kind="heads", name="main", sha="sha-b")]
     index = SlowRefScanIndex(SqliteDependencyIndex(tmp_path / "index.sqlite3"))
-    refresh = RefreshGitSourceIndex(
+    refresh = _make_refresh(
         github=github,
         git=git,
+        probe=probe,
         index=index,
-        aliases={},
-        default_dependency_paths=["roles/requirements.yml"],
-        repo_cache_path=tmp_path / "repos",
-        clone_protocol="https",
-        fetch_depth=1,
-        blob_filter=True,
-        auth_header=None,
+        tmp_path=tmp_path,
         concurrency=2,
     )
 
@@ -428,38 +772,6 @@ def test_git_refresh_reads_sqlite_metadata_safely_while_fetching_concurrently(
 
     assert git.max_active_fetches > 1
     assert index.max_active_ref_scans > 1
-
-
-def test_selected_refs_lists_each_ref_kind_once() -> None:
-    git = FakeGitCache()
-    bare = Path("site")
-    git.refs[("site", "heads")] = [
-        GitRef(kind="heads", name="main", sha="sha-main"),
-        GitRef(kind="heads", name="release/1", sha="sha-release"),
-    ]
-
-    refs = _selected_refs(
-        git,
-        bare,
-        [
-            _RefSelection(
-                kind="heads",
-                patterns=("main",),
-                refspecs=("+refs/heads/main:refs/heads/main",),
-            ),
-            _RefSelection(
-                kind="heads",
-                patterns=("release/*",),
-                refspecs=("+refs/heads/release/*:refs/heads/release/*",),
-            ),
-        ],
-    )
-
-    assert [(ref.kind, ref.name) for ref in refs] == [
-        ("heads", "main"),
-        ("heads", "release/1"),
-    ]
-    assert git.list_ref_calls == [("site", "heads")]
 
 
 def test_repo_candidate_does_not_guess_main_when_default_branch_is_missing() -> None:
@@ -471,23 +783,13 @@ def test_repo_candidate_does_not_guess_main_when_default_branch_is_missing() -> 
 def test_git_refresh_reuses_unchanged_ref_metadata_without_rereading_files(tmp_path: Path) -> None:
     github = FakeGitHub()
     git = FakeGitCache()
-    git.refs[("site", "heads")] = [GitRef(kind="heads", name="main", sha="sha-main")]
+    probe = FakeRefProbe()
+    probe.refs["acme/site"] = [GitRef(kind="heads", name="main", sha="sha-main")]
     git.files[("site", "sha-main", "roles/requirements.yml")] = (
         "- src: https://github.com/acme/base\n  version: v1\n"
     )
     index = SqliteDependencyIndex(tmp_path / "index.sqlite3")
-    refresh = RefreshGitSourceIndex(
-        github=github,
-        git=git,
-        index=index,
-        aliases={},
-        default_dependency_paths=["roles/requirements.yml"],
-        repo_cache_path=tmp_path / "repos",
-        clone_protocol="https",
-        fetch_depth=1,
-        blob_filter=True,
-        auth_header=None,
-    )
+    refresh = _make_refresh(github=github, git=git, probe=probe, index=index, tmp_path=tmp_path)
 
     refresh(SourceDefinition(name="prod", orgs=["acme"]), source_key="source:prod")
     git.files[("site", "sha-main", "roles/requirements.yml")] = (
@@ -504,28 +806,17 @@ def test_git_refresh_reuses_unchanged_ref_metadata_without_rereading_files(tmp_p
 def test_git_refresh_skips_bare_cache_work_for_unchanged_remote_refs(tmp_path: Path) -> None:
     github = FakeGitHub()
     git = FakeGitCache()
-    git.refs[("site", "heads")] = [GitRef(kind="heads", name="main", sha="sha-main")]
+    probe = FakeRefProbe()
+    probe.refs["acme/site"] = [GitRef(kind="heads", name="main", sha="sha-main")]
     git.files[("site", "sha-main", "roles/requirements.yml")] = (
         "- src: https://github.com/acme/base\n  version: v1\n"
     )
     index = SqliteDependencyIndex(tmp_path / "index.sqlite3")
-    refresh = RefreshGitSourceIndex(
-        github=github,
-        git=git,
-        index=index,
-        aliases={},
-        default_dependency_paths=["roles/requirements.yml"],
-        repo_cache_path=tmp_path / "repos",
-        clone_protocol="https",
-        fetch_depth=1,
-        blob_filter=True,
-        auth_header=None,
-    )
+    refresh = _make_refresh(github=github, git=git, probe=probe, index=index, tmp_path=tmp_path)
 
     refresh(SourceDefinition(name="prod", orgs=["acme"]), source_key="source:prod")
     git.ensure_calls.clear()
     git.fetches.clear()
-    git.list_ref_calls.clear()
     git.reads.clear()
     git.files[("site", "sha-main", "roles/requirements.yml")] = (
         "- src: https://github.com/acme/changed\n"
@@ -536,7 +827,6 @@ def test_git_refresh_skips_bare_cache_work_for_unchanged_remote_refs(tmp_path: P
     assert second.unchanged_refs == 1
     assert git.ensure_calls == []
     assert git.fetches == []
-    assert git.list_ref_calls == []
     assert git.reads == []
     assert index.dependents("acme/base", "v1", source_key="source:prod")
     assert not index.dependents("acme/changed", None, source_key="source:prod")
@@ -547,7 +837,8 @@ def test_git_refresh_fetches_only_changed_refs_and_prunes_deleted_remote_refs(
 ) -> None:
     github = FakeGitHub()
     git = FakeGitCache()
-    git.refs[("site", "heads")] = [
+    probe = FakeRefProbe()
+    probe.refs["acme/site"] = [
         GitRef(kind="heads", name="main", sha="sha-main"),
         GitRef(kind="heads", name="release", sha="sha-release"),
     ]
@@ -558,24 +849,19 @@ def test_git_refresh_fetches_only_changed_refs_and_prunes_deleted_remote_refs(
         "- src: https://github.com/acme/release-base\n"
     )
     index = SqliteDependencyIndex(tmp_path / "index.sqlite3")
-    refresh = RefreshGitSourceIndex(
+    refresh = _make_refresh(
         github=github,
         git=git,
+        probe=probe,
         index=index,
-        aliases={},
-        default_dependency_paths=["roles/requirements.yml"],
-        repo_cache_path=tmp_path / "repos",
-        clone_protocol="https",
-        fetch_depth=1,
-        blob_filter=True,
-        auth_header=None,
+        tmp_path=tmp_path,
         ref_scan_default="default_branch",
     )
     source = SourceDefinition(name="prod", orgs=["acme"], ref_patterns=["*"])
 
     refresh(source, source_key="source:prod")
     git.fetches.clear()
-    git.refs[("site", "heads")] = [GitRef(kind="heads", name="main", sha="sha-main-2")]
+    probe.refs["acme/site"] = [GitRef(kind="heads", name="main", sha="sha-main-2")]
     git.files[("site", "sha-main-2", "roles/requirements.yml")] = (
         "- src: https://github.com/acme/base\n  version: v2\n"
     )
@@ -593,7 +879,8 @@ def test_git_refresh_reuses_parsed_dependencies_for_duplicate_remote_shas(
 ) -> None:
     github = FakeGitHub()
     git = FakeGitCache()
-    git.refs[("site", "heads")] = [
+    probe = FakeRefProbe()
+    probe.refs["acme/site"] = [
         GitRef(kind="heads", name="main", sha="sha-shared"),
         GitRef(kind="heads", name="release", sha="sha-shared"),
     ]
@@ -602,17 +889,12 @@ def test_git_refresh_reuses_parsed_dependencies_for_duplicate_remote_shas(
     )
     index = SqliteDependencyIndex(tmp_path / "index.sqlite3")
 
-    RefreshGitSourceIndex(
+    _make_refresh(
         github=github,
         git=git,
+        probe=probe,
         index=index,
-        aliases={},
-        default_dependency_paths=["roles/requirements.yml"],
-        repo_cache_path=tmp_path / "repos",
-        clone_protocol="https",
-        fetch_depth=1,
-        blob_filter=True,
-        auth_header=None,
+        tmp_path=tmp_path,
         ref_scan_default="default_branch",
     )(
         SourceDefinition(name="prod", orgs=["acme"], ref_patterns=["*"]),
@@ -628,33 +910,21 @@ def test_git_refresh_reuses_parsed_dependencies_for_duplicate_remote_shas(
 def test_git_refresh_reindexes_unchanged_ref_when_aliases_change(tmp_path: Path) -> None:
     github = FakeGitHub()
     git = FakeGitCache()
-    git.refs[("site", "heads")] = [GitRef(kind="heads", name="main", sha="sha-main")]
+    probe = FakeRefProbe()
+    probe.refs["acme/site"] = [GitRef(kind="heads", name="main", sha="sha-main")]
     git.files[("site", "sha-main", "roles/requirements.yml")] = "- common\n"
     index = SqliteDependencyIndex(tmp_path / "index.sqlite3")
 
-    RefreshGitSourceIndex(
+    _make_refresh(github=github, git=git, probe=probe, index=index, tmp_path=tmp_path)(
+        SourceDefinition(name="prod", orgs=["acme"]), source_key="source:prod"
+    )
+    _make_refresh(
         github=github,
         git=git,
+        probe=probe,
         index=index,
-        aliases={},
-        default_dependency_paths=["roles/requirements.yml"],
-        repo_cache_path=tmp_path / "repos",
-        clone_protocol="https",
-        fetch_depth=1,
-        blob_filter=True,
-        auth_header=None,
-    )(SourceDefinition(name="prod", orgs=["acme"]), source_key="source:prod")
-    RefreshGitSourceIndex(
-        github=github,
-        git=git,
-        index=index,
+        tmp_path=tmp_path,
         aliases={"common": "acme/common"},
-        default_dependency_paths=["roles/requirements.yml"],
-        repo_cache_path=tmp_path / "repos",
-        clone_protocol="https",
-        fetch_depth=1,
-        blob_filter=True,
-        auth_header=None,
     )(SourceDefinition(name="prod", orgs=["acme"]), source_key="source:prod")
 
     assert git.reads == [
@@ -665,65 +935,11 @@ def test_git_refresh_reindexes_unchanged_ref_when_aliases_change(tmp_path: Path)
     assert not index.dependencies("acme/site", "main", source_key="source:prod")[0].unresolved
 
 
-def test_failed_git_refresh_does_not_advance_source_status(tmp_path: Path) -> None:
-    github = FakeGitHub()
-    git = FakeGitCache()
-    git.refs[("a", "heads")] = [GitRef(kind="heads", name="main", sha="sha-a")]
-    git.refs[("b", "heads")] = [GitRef(kind="heads", name="main", sha="sha-b")]
-    git.files[("a", "sha-a", "roles/requirements.yml")] = (
-        "- src: https://github.com/acme/base\n  version: v1\n"
-    )
-    git.files[("b", "sha-b", "roles/requirements.yml")] = (
-        "- src: https://github.com/acme/base\n  version: v1\n"
-    )
-    index = SqliteDependencyIndex(tmp_path / "index.sqlite3")
-    refresh = RefreshGitSourceIndex(
-        github=github,
-        git=git,
-        index=index,
-        aliases={},
-        default_dependency_paths=["roles/requirements.yml"],
-        repo_cache_path=tmp_path / "repos",
-        clone_protocol="https",
-        fetch_depth=1,
-        blob_filter=True,
-        auth_header=None,
-    )
-    source = SourceDefinition(name="prod", repos=["acme/a", "acme/b"])
-
-    refresh(source, source_key="source:prod")
-    previous = index.status("source:prod")
-    assert previous is not None
-    git.refs[("a", "heads")] = [GitRef(kind="heads", name="main", sha="sha-a2")]
-    git.refs[("b", "heads")] = [GitRef(kind="heads", name="main", sha="sha-b2")]
-    git.files[("a", "sha-a2", "roles/requirements.yml")] = (
-        "- src: https://github.com/acme/base\n  version: v2\n"
-    )
-    git.files[("b", "sha-b2", "roles/requirements.yml")] = (
-        "- src: https://github.com/acme/base\n  version: v2\n"
-    )
-    git.fail_fetches.add("b")
-
-    with pytest.raises(GitCacheError, match="git fetch failed for b"):
-        refresh(source, source_key="source:prod")
-
-    current = index.status("source:prod")
-    assert current is not None
-    assert current.scanned_at == previous.scanned_at
-    assert not index.dependents("acme/base", "v2", source_key="source:prod")
-    v1_source_repos = {
-        edge.source_repo for edge in index.dependents("acme/base", "v1", source_key="source:prod")
-    }
-    assert v1_source_repos == {
-        "acme/a",
-        "acme/b",
-    }
-
-
 def test_git_refresh_reindexes_moved_tags_and_prunes_unselected_refs(tmp_path: Path) -> None:
     github = FakeGitHub()
     git = FakeGitCache()
-    git.refs[("site", "tags")] = [
+    probe = FakeRefProbe()
+    probe.refs["acme/site"] = [
         GitRef(kind="tags", name="v1", sha="sha-v1"),
         GitRef(kind="tags", name="v-old", sha="sha-old"),
     ]
@@ -734,17 +950,15 @@ def test_git_refresh_reindexes_moved_tags_and_prunes_unselected_refs(tmp_path: P
         "- src: https://github.com/acme/old\n"
     )
     index = SqliteDependencyIndex(tmp_path / "index.sqlite3")
-    refresh = RefreshGitSourceIndex(
+    refresh = _make_refresh(
         github=github,
         git=git,
+        probe=probe,
         index=index,
-        aliases={},
-        default_dependency_paths=["roles/requirements.yml"],
-        repo_cache_path=tmp_path / "repos",
+        tmp_path=tmp_path,
         clone_protocol="ssh",
         fetch_depth=0,
         blob_filter=False,
-        auth_header=None,
     )
     source = SourceDefinition(
         name="prod",
@@ -754,7 +968,7 @@ def test_git_refresh_reindexes_moved_tags_and_prunes_unselected_refs(tmp_path: P
     )
 
     refresh(source, source_key="source:prod")
-    git.refs[("site", "tags")] = [GitRef(kind="tags", name="v1", sha="sha-v2")]
+    probe.refs["acme/site"] = [GitRef(kind="tags", name="v1", sha="sha-v2")]
     git.files[("site", "sha-v2", "roles/requirements.yml")] = (
         "- src: https://github.com/acme/base\n  version: v2\n"
     )
@@ -775,15 +989,23 @@ def test_git_refresh_reindexes_moved_tags_and_prunes_unselected_refs(tmp_path: P
 
 def test_git_refresh_rejects_unknown_clone_protocol(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="clone_protocol"):
-        RefreshGitSourceIndex(
+        _make_refresh(
             github=FakeGitHub(),
             git=FakeGitCache(),
+            probe=FakeRefProbe(),
             index=SqliteDependencyIndex(tmp_path / "index.sqlite3"),
-            aliases={},
-            default_dependency_paths=["roles/requirements.yml"],
-            repo_cache_path=tmp_path / "repos",
+            tmp_path=tmp_path,
             clone_protocol="git",
-            fetch_depth=1,
-            blob_filter=True,
-            auth_header=None,
+        )
+
+
+def test_git_refresh_rejects_out_of_range_probe_concurrency(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="probe_concurrency"):
+        _make_refresh(
+            github=FakeGitHub(),
+            git=FakeGitCache(),
+            probe=FakeRefProbe(),
+            index=SqliteDependencyIndex(tmp_path / "index.sqlite3"),
+            tmp_path=tmp_path,
+            probe_concurrency=0,
         )

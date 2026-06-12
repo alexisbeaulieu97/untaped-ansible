@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class IndexedDependency(BaseModel):
@@ -31,6 +32,45 @@ class GitRef(BaseModel):
     kind: str
     name: str
     sha: str
+
+
+class ProbedRepo(BaseModel):
+    """Refs and default branch reported by the freshness probe for one repo."""
+
+    model_config = ConfigDict(frozen=True)
+
+    default_branch: str | None = None
+    refs: tuple[GitRef, ...] = ()
+
+
+class ProbeReport(BaseModel):
+    """Outcome of one batched ref freshness probe."""
+
+    model_config = ConfigDict(frozen=True)
+
+    repos: dict[str, ProbedRepo] = Field(default_factory=dict)
+    failures: dict[str, str] = Field(default_factory=dict)
+    rate_limit_remaining: int | None = None
+
+
+class RepoFailure(BaseModel):
+    """One source repository that failed during a refresh."""
+
+    model_config = ConfigDict(frozen=True)
+
+    repo: str
+    reason: str
+
+
+class RefreshProgressEvent(BaseModel):
+    """Live progress for one source refresh phase."""
+
+    model_config = ConfigDict(frozen=True)
+
+    phase: Literal["expanding", "probing", "fetching"]
+    done: int
+    total: int
+    changed: int | None = None
 
 
 class CachedRef(BaseModel):

@@ -4,6 +4,10 @@ from __future__ import annotations
 
 import sqlite3
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
+
+import pytest
+from untaped.api import UntapedError
 
 from untaped_ansible.domain.payloads import (
     CachedRef,
@@ -13,6 +17,7 @@ from untaped_ansible.domain.payloads import (
     SourceRepoMetadata,
 )
 from untaped_ansible.infrastructure.sqlite_index import SqliteDependencyIndex
+from untaped_ansible.infrastructure.sqlite_schema import SCHEMA_VERSION
 
 
 def _edge(
@@ -424,6 +429,116 @@ def test_pruning_keeps_same_ref_name_separate_by_ref_kind(tmp_path) -> None:
     assert index.dependents("acme/tag-base", None, source_key="source:prod")
 
 
+def test_fresh_index_stamps_current_schema_version(tmp_path) -> None:
+    db_path = tmp_path / "index.sqlite3"
+    index = SqliteDependencyIndex(db_path)
+
+    assert index.status("source:prod") is None
+
+    db = sqlite3.connect(db_path)
+    try:
+        assert db.execute("pragma user_version").fetchone()[0] == SCHEMA_VERSION
+    finally:
+        db.close()
+
+
+def _assert_outdated_schema_error(db_path: Path) -> None:
+    index = SqliteDependencyIndex(db_path)
+    with pytest.raises(UntapedError) as excinfo:
+        index.status("source:prod")
+    message = str(excinfo.value)
+    assert str(db_path) in message
+    assert "untaped ansible source refresh" in message
+
+
+def test_outdated_schema_version_raises_actionable_error(tmp_path) -> None:
+    db_path = tmp_path / "index.sqlite3"
+    db = sqlite3.connect(db_path)
+    try:
+        db.execute("pragma user_version = 1")
+        db.execute("create table source_runs (source_key text primary key)")
+        db.commit()
+    finally:
+        db.close()
+
+    _assert_outdated_schema_error(db_path)
+
+
+def test_versionless_db_with_tables_raises_actionable_error(tmp_path) -> None:
+    db_path = tmp_path / "index.sqlite3"
+    db = sqlite3.connect(db_path)
+    try:
+        db.execute("create table source_runs (source_key text primary key)")
+        db.commit()
+    finally:
+        db.close()
+
+    _assert_outdated_schema_error(db_path)
+
+
+def test_recommitting_unchanged_scan_reuses_snapshot_and_edges(tmp_path) -> None:
+    db_path = tmp_path / "index.sqlite3"
+    index = SqliteDependencyIndex(db_path)
+    now = datetime(2026, 6, 1, tzinfo=UTC)
+    scan = _scan()
+
+    _commit(index, scans=(scan,), scanned_at=now)
+    _commit(index, scans=(scan,), scanned_at=now)
+
+    db = sqlite3.connect(db_path)
+    try:
+        snapshot_count = db.execute("select count(*) from dependency_snapshots").fetchone()[0]
+        edge_count = db.execute("select count(*) from snapshot_edges").fetchone()[0]
+    finally:
+        db.close()
+    assert snapshot_count == 1
+    assert edge_count == 1
+    assert index.dependencies("acme/site", "main", source_key="source:prod") == list(
+        scan.dependencies
+    )
+
+
+def test_commit_resolves_snapshot_ids_across_multiple_lookup_chunks(tmp_path) -> None:
+    db_path = tmp_path / "index.sqlite3"
+    index = SqliteDependencyIndex(db_path)
+    now = datetime(2026, 6, 1, tzinfo=UTC)
+    # 401 distinct snapshot identities exceed the 200-identity lookup chunk
+    # size, so the pre-lookup in the second commit spans three chunks.
+    scans = tuple(
+        _scan(
+            source_ref=f"ref-{n:03d}",
+            source_sha=f"sha-{n:03d}",
+            dependencies=(_edge(source_ref=f"ref-{n:03d}", source_sha=f"sha-{n:03d}"),),
+        )
+        for n in range(401)
+    )
+
+    _commit(index, scans=scans, scanned_at=now)
+    # Recommit the same scans: every snapshot id must resolve via the chunked
+    # pre-lookup instead of inserting duplicates.
+    _commit(index, scans=scans, scanned_at=now)
+
+    db = sqlite3.connect(db_path)
+    try:
+        snapshot_count = db.execute("select count(*) from dependency_snapshots").fetchone()[0]
+        edge_count = db.execute("select count(*) from snapshot_edges").fetchone()[0]
+        orphan_scans = db.execute(
+            """
+            select count(*) from source_ref_scans
+            where snapshot_id not in (select id from dependency_snapshots)
+            """
+        ).fetchone()[0]
+    finally:
+        db.close()
+    assert snapshot_count == 401
+    assert edge_count == 401
+    assert orphan_scans == 0
+    status = index.status("source:prod")
+    assert status is not None
+    assert status.refs == 401
+    assert status.edges == 401
+
+
 def test_schema_creates_graph_read_indexes(tmp_path) -> None:
     db_path = tmp_path / "index.sqlite3"
     index = SqliteDependencyIndex(db_path)
@@ -467,3 +582,123 @@ def test_schema_creates_graph_read_indexes(tmp_path) -> None:
         "source_key",
         "snapshot_id",
     )
+
+
+def test_dependencies_batch_returns_every_requested_pair(tmp_path) -> None:
+    index = SqliteDependencyIndex(tmp_path / "index.sqlite3")
+    now = datetime(2026, 6, 1, tzinfo=UTC)
+    main_edge = _edge()
+    release_edge = _edge(
+        source_ref="release",
+        source_sha="sha-release",
+        dependency_repo="acme/extra",
+        dependency_name="extra",
+        dependency_version="v2",
+    )
+    _commit(
+        index,
+        scans=(
+            _scan(dependencies=(main_edge,)),
+            _scan(source_ref="release", source_sha="sha-release", dependencies=(release_edge,)),
+        ),
+        scanned_at=now,
+    )
+
+    batch = index.dependencies_batch(
+        [("acme/site", "main"), ("acme/site", None), ("acme/missing", "main")],
+        source_key="source:prod",
+    )
+
+    assert batch[("acme/site", "main")] == [main_edge]
+    assert batch[("acme/site", None)] == [main_edge, release_edge]
+    assert batch[("acme/missing", "main")] == []
+    assert batch[("acme/site", None)] == index.dependencies(
+        "acme/site", None, source_key="source:prod"
+    )
+
+
+def test_dependents_batch_matches_single_reads_and_includes_missing_pairs(tmp_path) -> None:
+    index = SqliteDependencyIndex(tmp_path / "index.sqlite3")
+    now = datetime(2026, 6, 1, tzinfo=UTC)
+    versioned = _edge()
+    unversioned = _edge(
+        source_repo="acme/deploy",
+        source_sha="sha-deploy",
+        dependency_version=None,
+    )
+    _commit(
+        index,
+        scans=(
+            _scan(dependencies=(versioned,)),
+            _scan(
+                source_repo="acme/deploy",
+                source_sha="sha-deploy",
+                clone_url="https://github.com/acme/deploy.git",
+                dependencies=(unversioned,),
+            ),
+        ),
+        scanned_at=now,
+    )
+
+    batch = index.dependents_batch(
+        [("acme/base", "v1"), ("acme/base", None), ("acme/base", "v2")],
+        source_key="source:prod",
+    )
+
+    assert batch[("acme/base", "v1")] == [versioned]
+    assert batch[("acme/base", None)] == [versioned, unversioned]
+    assert batch[("acme/base", "v2")] == []
+    assert batch[("acme/base", None)] == index.dependents(
+        "acme/base", None, source_key="source:prod"
+    )
+
+
+def test_dependencies_batch_spans_multiple_value_chunks(tmp_path) -> None:
+    index = SqliteDependencyIndex(tmp_path / "index.sqlite3")
+    now = datetime(2026, 6, 1, tzinfo=UTC)
+    # 401 pairs plus the None-ref pair exceed the 400-pair chunk size, so the
+    # batch read spans two VALUES chunks.
+    scans = tuple(
+        _scan(
+            source_ref=f"ref-{n:03d}",
+            source_sha=f"sha-{n:03d}",
+            dependencies=(_edge(source_ref=f"ref-{n:03d}", source_sha=f"sha-{n:03d}"),),
+        )
+        for n in range(401)
+    )
+    _commit(index, scans=scans, scanned_at=now)
+
+    pairs: list[tuple[str, str | None]] = [("acme/site", f"ref-{n:03d}") for n in range(401)]
+    batch = index.dependencies_batch([*pairs, ("acme/site", None)], source_key="source:prod")
+
+    assert all(len(batch[pair]) == 1 for pair in pairs)
+    assert len(batch[("acme/site", None)]) == 401
+
+
+def test_cached_ref_metadata_batch_includes_missing_repos(tmp_path) -> None:
+    index = SqliteDependencyIndex(tmp_path / "index.sqlite3")
+    now = datetime(2026, 6, 1, tzinfo=UTC)
+    _commit(
+        index,
+        scans=(
+            _scan(ref_kind="tags", source_ref="v2.0.0", source_sha="sha-v2", dependencies=()),
+            _scan(ref_kind="heads", source_ref="trunk", source_sha="sha-trunk", dependencies=()),
+        ),
+        repo_metadata=(
+            SourceRepoMetadata(
+                source_key="source:prod",
+                source_repo="acme/site",
+                default_branch="trunk",
+            ),
+        ),
+        scanned_at=now,
+    )
+
+    batch = index.cached_ref_metadata_batch(["acme/site", "acme/missing"], source_key="source:prod")
+
+    assert set(batch["acme/site"]) == {
+        CachedRef(name="v2.0.0", kind="tags", default_branch="trunk"),
+        CachedRef(name="trunk", kind="heads", default_branch="trunk"),
+    }
+    assert batch["acme/missing"] == ()
+    assert index.cached_ref_metadata_batch(["acme/site"], source_key=None) == {"acme/site": ()}

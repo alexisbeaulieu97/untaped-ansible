@@ -60,6 +60,10 @@ Use relationship flags in user terms:
 - `--both`: both directions; this is the default when no direction flag is
   passed.
 
+`--upstream`, `--downstream`, and `--both` are mutually exclusive, as are
+`--refresh`, `--cached`, and `--live`; combining flags from either group is
+a usage error caught at parse time.
+
 Tree output renders each direction as a nested traversal. Each populated
 direction starts with the target node for that direction, then continues to its
 children. When the graph target omits `--ref` and cached or live data contains
@@ -75,7 +79,10 @@ from GitHub when no source is configured. When `--source` or inline source
 selectors are present, graph checks the selected remote refs, updates changed
 repo/ref entries in SQLite, then reads from the cache; pass `--cached` to skip
 the remote freshness check, or `--live` to opt back into live GitHub reads for
-downstream traversal.
+downstream traversal. Set `ansible.freshness_ttl` (seconds; unset by default,
+and `0` means unset) to skip that pre-graph check for sources refreshed within
+the TTL; `--refresh` always forces a refresh and `--cached` always skips the
+check regardless of the TTL.
 
 Upstream graphs are source-backed because GitHub impact analysis needs a
 search boundary. Repeat `--source` to union multiple saved source caches in one
@@ -94,24 +101,30 @@ Later runs fetch/check the same ref set and reparse only refs whose SHA, tag
 target, or dependency path configuration changed. Use `--cached` for the
 offline/fast path when you do not want remote checks.
 
-Git-backed source freshness checks run with bounded per-repo concurrency:
-`ansible.git_fetch_concurrency` defaults to `8` and accepts `1..32`.
-`ansible graph` and `ansible source refresh` both accept `--concurrency N` as a
-per-run override. Repo, team, and org expansion still happens serially; SQLite
-writes are committed once after all repo work succeeds. Refresh progress is
+A refresh runs in three phases. Org, team, and repo expansion runs in
+parallel, bounded by `ansible.probe_concurrency` (default `8`, accepts
+`1..32`). One batched GraphQL probe then checks every repo's refs — there is
+no per-repo `git ls-remote`. Finally, Git fetches only the repos whose refs
+changed, with per-repo concurrency bounded by `ansible.git_fetch_concurrency`
+(default `8`, accepts `1..32`); `ansible graph` and `ansible source refresh`
+both accept `--concurrency N` as a per-run override. Refresh progress is
 reported on stderr with repo/ref counts, changed and unchanged refs, edge count,
 elapsed time, and the Git concurrency used.
+
+Per-repo failures do not abort a refresh: successful repos are committed,
+each failure is listed on stderr, and `source refresh` exits 1. When every
+repo fails, nothing is committed and the index is left untouched.
 
 Source refreshes scan all branches and all tags by default
 (`ansible.ref_scan_default: all`). Set
 `ansible.ref_scan_default: default_branch` when runtime matters more than broad
 upstream coverage. `--ref-pattern` narrows source refs, so
 `--ref-pattern v3` scans matching branches and tags unless `--ref-kind` is also
-provided. `--ref-kind tags` without a pattern scans all tags. More specific
-patterns such as `--ref-pattern 'release/*'` become narrow Git refspecs before
-local `fnmatch` filtering. The same inline selector set is cached under a
-deterministic fingerprint, so later identical commands reuse the same SQLite
-source key.
+provided. `--ref-kind tags` without a pattern scans all tags. Patterns such as
+`--ref-pattern 'release/*'` filter the probed refs client-side; refs that
+changed are then fetched with exact Git refspecs. The same inline selector set
+is cached under a deterministic fingerprint, so later identical commands reuse
+the same SQLite source key.
 
 Source-backed downstream traversal is strict about refs. If the graph needs
 `repo@v1` and the source cache only has `repo@main`, graph stops at that node
@@ -132,10 +145,11 @@ Use `ansible.git_clone_protocol: ssh` when normal SSH keys are preferred over
 HTTPS token auth. HTTPS mode passes the configured GitHub token to Git as a
 transient auth header and does not store it in cached remotes.
 
-The current source-cache cleanup is cache-schema-breaking. If an existing
-SQLite source index was created by an older plugin version, delete the file
-configured by `ansible.index_path`, then refresh saved sources again with
-`untaped ansible source refresh NAME`.
+The SQLite index enforces a schema version through `PRAGMA user_version`.
+There are no migrations: when an existing index was created by a different
+plugin version, commands fail with an error naming the exact
+`ansible.index_path` file to delete and the
+`untaped ansible source refresh NAME` command to run afterwards.
 
 `source status NAME` reports whether a configured source has never been
 refreshed, is stale, or is fresh. Unknown source names return an error so

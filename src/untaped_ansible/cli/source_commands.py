@@ -4,15 +4,12 @@ from __future__ import annotations
 
 import hashlib
 import json
-import time
-from base64 import b64encode
 from typing import Annotated
 
 from cyclopts import Parameter, validators
 from untaped.api import (
     ColumnsOption,
     FormatOption,
-    HttpSettings,
     ProfileOverrideOption,
     UntapedError,
     create_app,
@@ -21,13 +18,12 @@ from untaped.api import (
     render_rows,
     report_errors,
 )
-from untaped_github import GithubClient, GithubSettings
+from untaped_github import GithubSettings
 
-from untaped_ansible.application.refresh_git_index import RefreshGitSourceIndex
 from untaped_ansible.application.refresh_index import RefreshResult
+from untaped_ansible.cli._refresh import pluralize, run_source_refresh
 from untaped_ansible.infrastructure import (
     AliasRepository,
-    GitRepositoryCache,
     SourceRepository,
     SqliteDependencyIndex,
 )
@@ -62,7 +58,10 @@ def source_save_command(
         list[str] | None,
         Parameter(
             name="--team",
-            help="GitHub team slug with one --org, or ORG/SLUG.",
+            help=(
+                "GitHub team as ORG/SLUG; a bare SLUG is allowed when exactly one "
+                "--org is given and normalizes to ORG/SLUG."
+            ),
             consume_multiple=False,
         ),
     ] = None,
@@ -287,10 +286,11 @@ def source_refresh_command(
         settings = ctx.section("ansible", AnsibleSettings)
         aliases = AliasRepository().entries()
         git_concurrency = concurrency or settings.git_fetch_concurrency
-        started_at = time.perf_counter()
-        result = _refresh_source(
+        result = run_source_refresh(
             source,
             source_key=_saved_source_key(name),
+            action="refreshed",
+            label=f"source {name!r}",
             index=SqliteDependencyIndex(settings.index_path),
             aliases=aliases,
             settings=settings,
@@ -298,16 +298,17 @@ def source_refresh_command(
             http=ctx.http,
             concurrency=git_concurrency,
         )
-        echo(
-            _refresh_summary(
-                "refreshed",
-                f"source {name!r}",
-                result,
-                concurrency=git_concurrency,
-                elapsed=time.perf_counter() - started_at,
-            ),
-            err=True,
-        )
+        if result.failures:
+            for failure in result.failures:
+                echo(f"failed {failure.repo}: {failure.reason}", err=True)
+            raise UntapedError(_refresh_failure_message(result))
+
+
+def _refresh_failure_message(result: RefreshResult) -> str:
+    count = len(result.failures)
+    if count == result.repos:
+        return f"refresh failed for all {pluralize(count, 'repo')}; index left unchanged"
+    return f"refresh completed with {pluralize(count, 'repo failure')}; successes were saved"
 
 
 def _source_definition(
@@ -507,60 +508,6 @@ def _inline_source_key(source: SourceDefinition) -> str:
     payload = source.model_dump(exclude={"name"})
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     return f"inline:{hashlib.sha256(encoded).hexdigest()[:_FINGERPRINT_HEX_CHARS]}"
-
-
-def _refresh_source(
-    source: SourceDefinition,
-    *,
-    source_key: str,
-    index: SqliteDependencyIndex,
-    aliases: dict[str, str],
-    settings: AnsibleSettings,
-    github_settings: GithubSettings,
-    http: HttpSettings,
-    concurrency: int,
-) -> RefreshResult:
-    with GithubClient(github_settings, http=http) as github:
-        token = (
-            github_settings.token.get_secret_value().strip()
-            if github_settings.token is not None
-            else ""
-        )
-        result = RefreshGitSourceIndex(
-            github=github,
-            git=GitRepositoryCache(),
-            index=index,
-            aliases=aliases,
-            default_dependency_paths=settings.dependency_paths,
-            repo_cache_path=settings.repo_cache_path,
-            clone_protocol=settings.git_clone_protocol,
-            fetch_depth=settings.git_fetch_depth,
-            blob_filter=settings.git_blob_filter,
-            auth_header=_git_auth_header(token) if token else None,
-            concurrency=concurrency,
-            ref_scan_default=settings.ref_scan_default,
-        )(source, source_key=source_key)
-    return result
-
-
-def _refresh_summary(
-    action: str,
-    label: str,
-    result: RefreshResult,
-    *,
-    concurrency: int,
-    elapsed: float,
-) -> str:
-    message = (
-        f"{action} {label}: {result.repos} repos, {result.refs} refs, {result.edges} edges, "
-        f"{result.changed_refs} changed, {result.unchanged_refs} unchanged in {elapsed:.2f}s"
-    )
-    return f"{message} (concurrency {concurrency})"
-
-
-def _git_auth_header(token: str) -> str:
-    credential = b64encode(f"x-access-token:{token}".encode()).decode()
-    return f"AUTHORIZATION: basic {credential}"
 
 
 def _source_status_row(

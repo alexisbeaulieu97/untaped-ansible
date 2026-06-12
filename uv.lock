@@ -735,8 +735,8 @@ dev = [
 
 [[package]]
 name = "untaped-github"
-version = "0.2.0"
-source = { git = "https://github.com/alexisbeaulieu97/untaped-github#a8c185213cf10c5920eb4b967566f696d07821b8" }
+version = "0.3.0"
+source = { git = "https://github.com/alexisbeaulieu97/untaped-github#bb2ca78c883076bf9aaf82782ab52a3f2110876c" }
 dependencies = [
     { name = "cyclopts" },
     { name = "pydantic" },

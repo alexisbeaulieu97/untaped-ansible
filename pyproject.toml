@@ -12,7 +12,7 @@ dependencies = [
     "pydantic>=2.13.3",
     "pyyaml>=6.0.3",
     "untaped>=0.3.0",
-    "untaped-github>=0.2.0",
+    "untaped-github>=0.3.0",
 ]
 
 [project.entry-points."untaped.plugins"]
