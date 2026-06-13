@@ -1,6 +1,6 @@
 [project]
 name = "untaped-ansible"
-version = "0.1.0"
+version = "0.2.0"
 description = "Ansible dependency graph plugin for untaped."
 readme = "README.md"
 authors = [
