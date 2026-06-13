@@ -676,8 +676,8 @@ wheels = [
 
 [[package]]
 name = "untaped"
-version = "0.3.0"
-source = { git = "https://github.com/alexisbeaulieu97/untaped#a901836fef18b8c01e261f2f15085985e69d4131" }
+version = "0.4.0"
+source = { git = "https://github.com/alexisbeaulieu97/untaped#467ef862f455d9eb317ecea56a51e1cd671bb991" }
 dependencies = [
     { name = "cyclopts" },
     { name = "filelock" },
