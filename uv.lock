@@ -719,7 +719,7 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.13.3" },
     { name = "pyyaml", specifier = ">=6.0.3" },
     { name = "untaped", git = "https://github.com/alexisbeaulieu97/untaped" },
-    { name = "untaped-github", git = "file:///Users/alexisbeaulieu/Projects/untaped-dev/untaped-github?rev=c64967abd15277022a592f8d6cc3c7c1b9be15ca" },
+    { name = "untaped-github", git = "https://github.com/alexisbeaulieu97/untaped-github" },
 ]
 
 [package.metadata.requires-dev]
@@ -736,7 +736,7 @@ dev = [
 [[package]]
 name = "untaped-github"
 version = "0.3.0"
-source = { git = "file:///Users/alexisbeaulieu/Projects/untaped-dev/untaped-github?rev=c64967abd15277022a592f8d6cc3c7c1b9be15ca#c64967abd15277022a592f8d6cc3c7c1b9be15ca" }
+source = { git = "https://github.com/alexisbeaulieu97/untaped-github#bb2ca78c883076bf9aaf82782ab52a3f2110876c" }
 dependencies = [
     { name = "cyclopts" },
     { name = "pydantic" },
