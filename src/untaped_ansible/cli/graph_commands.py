@@ -10,7 +10,6 @@ from typing import Annotated, Literal
 
 from cyclopts import App, Group, Parameter, validators
 from untaped.api import (
-    ProfileOverrideOption,
     UntapedError,
     echo,
     plugin_context,
@@ -209,7 +208,6 @@ def graph_command(
         Path | None,
         Parameter(name="--output", help="Write graph data to a file."),
     ] = None,
-    profile: ProfileOverrideOption = None,
 ) -> None:
     """Graph Ansible dependency relationships for a role, repo, or playbook.
 
@@ -221,7 +219,7 @@ def graph_command(
     if refresh and not any((source, orgs, teams, source_repos, paths, ref_kinds, ref_patterns)):
         raise_usage("--refresh requires --source or inline source selectors")
     with report_errors():
-        ctx = plugin_context(profile)
+        ctx = plugin_context()
         settings = ctx.section("ansible", AnsibleSettings)
         aliases = AliasRepository().entries()
         target_repo_name = target_repo or _resolve_target_repo(target, aliases)

@@ -42,12 +42,15 @@ def _write_config(
     }
     if ansible_profile:
         ansible_section.update(ansible_profile)
-    profile = {"ansible": ansible_section}
+    # Flat layout: settings sections are top-level keys; the ansible state
+    # section (sources/aliases) shares the `ansible` key with disjoint fields.
+    data: dict[str, object] = {"ansible": ansible_section}
     if extra_profile:
-        profile.update(extra_profile)
-    data: dict[str, object] = {"profiles": {"default": profile}}
+        data.update(extra_profile)
     if top_level_ansible is not None:
-        data["ansible"] = top_level_ansible
+        merged = dict(ansible_section)
+        merged.update(top_level_ansible)
+        data["ansible"] = merged
     if top_level_ui is not None:
         data["ui"] = top_level_ui
     cfg.write_text(yaml.safe_dump(data, sort_keys=False))
