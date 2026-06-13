@@ -9,13 +9,16 @@ workflow, update this file in the same commit.
 `untaped-ansible` is an `untaped` plugin. It owns the `untaped ansible`
 command group for Ansible role/playbook dependency graphing, reverse-impact
 analysis, and local dependency cache data. `untaped-github` owns GitHub API
-access; `untaped` core owns the binary, plugin discovery, config/profile
-resolution, output helpers, HTTP/TLS primitives, and shared errors.
+access; `untaped` core owns the binary, plugin discovery, config loading,
+output helpers, HTTP/TLS primitives, and shared errors. Profile selection is
+contributed by `untaped-profile`.
 
 ## Hard Rules
 
-1. **Keep `AGENTS.md` up to date.** Architecture changes and new command
-   patterns must be documented here.
+1. **Keep `AGENTS.md` and the packaged skill up to date.** Architecture
+   changes, new command patterns, settings changes, and major graph/source
+   workflow changes must be documented here and in
+   `src/untaped_ansible/skills/untaped-ansible/SKILL.md`.
 2. **Prefer `uv` commands over manual dependency edits.** Use `uv add` and
    `uv add --group dev` when resolution permits; hand-edit tool config only.
 3. **Expose the plugin through the `untaped.plugins` entry point.**
