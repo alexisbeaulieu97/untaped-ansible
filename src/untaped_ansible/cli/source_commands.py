@@ -308,7 +308,7 @@ def source_refresh_command(
             github_settings=ctx.section("github", GithubSettings),
             http=ctx.http,
             concurrency=git_concurrency,
-            ui=ctx.ui(),
+            ui=ctx.ui(strict=False),
         )
         if result.failures:
             for failure in result.failures:

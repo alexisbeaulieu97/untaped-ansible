@@ -2009,6 +2009,40 @@ def test_source_refresh_scans_source_with_git_backend(tmp_path: Path, monkeypatc
     )
 
 
+def test_source_refresh_survives_invalid_ui_theme(tmp_path: Path, monkeypatch) -> None:
+    # The refresh progress UiContext is built strict=False, so a misconfigured
+    # theme degrades the spinner to the default theme instead of failing an
+    # otherwise-valid refresh on the data path.
+    cfg = _write_config(
+        tmp_path,
+        extra_profile={"github": {"token": "ghp_test"}},
+        top_level_ansible={"sources": [{"name": "prod", "repos": ["acme/site"]}]},
+        top_level_ui={"theme": "missing"},
+    )
+    monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
+
+    class FakeGitRefresh:
+        def __init__(self, **kwargs) -> None:
+            self._index = kwargs["index"]
+
+        def __call__(self, source, *, source_key: str) -> RefreshResult:
+            return RefreshResult(
+                source_key=source_key,
+                repos=1,
+                refs=1,
+                edges=1,
+                changed_refs=1,
+                unchanged_refs=0,
+            )
+
+    monkeypatch.setattr(_refresh, "RefreshGitSourceIndex", FakeGitRefresh)
+
+    result = CliInvoker().invoke(app, ["source", "refresh", "prod"])
+
+    assert result.exit_code == 0, result.output
+    assert "refreshed source 'prod':" in result.stderr
+
+
 def test_source_refresh_uses_basic_auth_for_git_backend(tmp_path: Path, monkeypatch) -> None:
     cfg = _write_config(
         tmp_path,

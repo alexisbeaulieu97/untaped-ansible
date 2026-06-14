@@ -275,7 +275,7 @@ def graph_command(
                     github_settings=github_settings,
                     http=ctx.http,
                     concurrency=git_concurrency,
-                    ui=ctx.ui(),
+                    ui=ctx.ui(strict=False),
                 )
                 if result.failures:
                     refresh_warnings.append(
