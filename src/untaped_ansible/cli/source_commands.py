@@ -213,6 +213,7 @@ def source_list_command(*, fmt: FormatOption = "table", columns: ColumnsOption =
             rows,
             fmt=fmt,
             columns=columns,
+            kind="ansible.source",
             empty="No sources configured. Add one with `untaped ansible source save <name>`.",
         )
         if rendered:
@@ -231,7 +232,7 @@ def source_show_command(
         source = SourceRepository().get(name)
         if source is None:
             raise UntapedError(f"unknown source: {name!r}")
-        echo(render_rows([_source_row(source)], fmt=fmt, columns=columns))
+        echo(render_rows([_source_row(source)], fmt=fmt, columns=columns, kind="ansible.source"))
 
 
 @app.command(name="remove")
@@ -276,6 +277,7 @@ def source_status_command(
             rows,
             fmt=fmt,
             columns=columns,
+            kind="ansible.source-status",
             empty="No sources scanned yet. Run `untaped ansible source refresh <name>`.",
         )
         if rendered:

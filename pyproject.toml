@@ -1,6 +1,6 @@
 [project]
 name = "untaped-ansible"
-version = "0.3.1"
+version = "0.3.2"
 description = "Ansible dependency graph plugin for untaped."
 readme = "README.md"
 authors = [
@@ -11,7 +11,7 @@ dependencies = [
     "cyclopts>=4.16.0,<5",
     "pydantic>=2.13.3",
     "pyyaml>=6.0.3",
-    "untaped>=0.5.0",
+    "untaped>=0.5.1",
     "untaped-github>=0.3.0",
 ]
 

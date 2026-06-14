@@ -24,7 +24,7 @@ contributed by `untaped-profile`.
 3. **Expose the plugin through the `untaped.plugins` entry point.**
    `ansible = "untaped_ansible.plugin:plugin"` is the public integration
    point. The plugin object must expose `id = "ansible"`, literal
-   `untaped_api_version = 3`, and `manifest()` returning a `PluginManifest`.
+   `untaped_api_version = 5`, and `manifest()` returning a `PluginManifest`.
    `plugin.py` must not import the CLI tree: the manifest's
    `CliSpec(import_path="untaped_ansible.cli:app")` defers that import until
    the `ansible` command is dispatched, and `untaped_ansible/__init__.py`
@@ -108,9 +108,23 @@ must emit aliases first, and source row commands must emit source names first
 unless the user explicitly passes `--columns`. Keep those contracts stable for
 shell pipelines.
 
+`--format pipe` is supported on every row-style command. It emits the core
+typed-pipe NDJSON envelope (one `{"untaped": "1", "kind": "<kind>", "record":
+{...}}` line per row) so downstream consumers can route records by `kind`
+without sniffing fields. Each producer tags its envelope with a namespaced
+`kind` hint:
+
+- `alias list` → `ansible.alias`
+- `source list` and `source show` → `ansible.source`
+- `source status` → `ansible.source-status`
+
+Any new row-style producer that calls `render_rows` must pass a matching
+`kind="ansible.<entity>"` (lowercase, kebab-case for multiword entities).
+
 `graph` output is not a UI collection. Tree, Mermaid, and JSON graph output
 are domain renderers over the graph model and must not be routed through the
-row-style renderer.
+row-style renderer. Consequently `graph` is NOT `--format pipe`-compatible: it
+bypasses `render_rows`, so it carries no typed-pipe envelope or `kind` tag.
 
 ## Domain Contracts
 

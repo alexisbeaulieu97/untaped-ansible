@@ -43,6 +43,7 @@ def alias_list_command(*, fmt: FormatOption = "table", columns: ColumnsOption = 
             rows,
             fmt=fmt,
             columns=columns,
+            kind="ansible.alias",
             empty="No dependency aliases configured. Map one with "
             "`untaped ansible alias add <name> <repo>`.",
         )

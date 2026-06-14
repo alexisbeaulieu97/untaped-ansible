@@ -676,8 +676,8 @@ wheels = [
 
 [[package]]
 name = "untaped"
-version = "0.5.0"
-source = { git = "https://github.com/alexisbeaulieu97/untaped#d2f19b4fd1b2b569506f36b0aa25e1b3859b9ba0" }
+version = "0.5.1"
+source = { git = "https://github.com/alexisbeaulieu97/untaped#ecac34c290c49206ac1a8c5b52b6417488cd207a" }
 dependencies = [
     { name = "cyclopts" },
     { name = "filelock" },
@@ -692,7 +692,7 @@ dependencies = [
 
 [[package]]
 name = "untaped-ansible"
-version = "0.3.1"
+version = "0.3.2"
 source = { editable = "." }
 dependencies = [
     { name = "cyclopts" },
