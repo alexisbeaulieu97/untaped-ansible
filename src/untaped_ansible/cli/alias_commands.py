@@ -39,7 +39,15 @@ def alias_list_command(*, fmt: FormatOption = "table", columns: ColumnsOption = 
             {"alias": alias, "repo": repo}
             for alias, repo in sorted(AliasRepository().entries().items())
         ]
-        echo(render_rows(rows, fmt=fmt, columns=columns))
+        rendered = render_rows(
+            rows,
+            fmt=fmt,
+            columns=columns,
+            empty="No dependency aliases configured. Map one with "
+            "`untaped ansible alias add <name> <repo>`.",
+        )
+        if rendered:
+            echo(rendered)
 
 
 @app.command(name="remove")

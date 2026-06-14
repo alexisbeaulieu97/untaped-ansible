@@ -12,9 +12,9 @@ from untaped_ansible.plugin import plugin
 from untaped_ansible.settings import AnsibleSettings, AnsibleState
 
 
-def test_plugin_declares_untaped_api_version_3() -> None:
+def test_plugin_declares_untaped_api_version_5() -> None:
     assert plugin.id == "ansible"
-    assert plugin.untaped_api_version == 3
+    assert plugin.untaped_api_version == 5
 
 
 def test_manifest_declares_lazy_cli_settings_and_skill() -> None:

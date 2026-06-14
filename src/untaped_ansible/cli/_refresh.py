@@ -6,12 +6,11 @@ import time
 from base64 import b64encode
 from collections.abc import Callable
 
-from untaped.api import HttpSettings, echo
+from untaped.api import HttpSettings, ProgressHandle, UiContext, echo
 from untaped_github import GithubClient, GithubSettings
 
 from untaped_ansible.application.refresh_git_index import RefreshGitSourceIndex
 from untaped_ansible.application.refresh_index import RefreshResult
-from untaped_ansible.cli._progress import StderrProgress
 from untaped_ansible.domain.payloads import RefreshProgressEvent
 from untaped_ansible.infrastructure import (
     GithubRefProbe,
@@ -35,11 +34,11 @@ def run_source_refresh(
     github_settings: GithubSettings,
     http: HttpSettings,
     concurrency: int,
+    ui: UiContext,
 ) -> RefreshResult:
     """Refresh one source with stderr progress, then echo summary and warnings."""
     started_at = time.perf_counter()
-    progress = StderrProgress()
-    try:
+    with ui.progress(f"Refreshing {label}") as progress:
         result = refresh_source(
             source,
             source_key=source_key,
@@ -51,8 +50,6 @@ def run_source_refresh(
             concurrency=concurrency,
             on_progress=progress_reporter(progress),
         )
-    finally:
-        progress.finish()
     echo(
         refresh_summary(
             action,
@@ -106,17 +103,16 @@ def refresh_source(
     return result
 
 
-def progress_reporter(progress: StderrProgress) -> Callable[[RefreshProgressEvent], None]:
-    """Adapt refresh progress events onto a stderr progress renderer."""
+def progress_reporter(handle: ProgressHandle) -> Callable[[RefreshProgressEvent], None]:
+    """Adapt refresh progress events onto a core UiContext progress handle."""
     last_phase: str | None = None
 
     def report(event: RefreshProgressEvent) -> None:
         nonlocal last_phase
-        if event.phase != last_phase:
-            last_phase = event.phase
-            progress.reset_throttle()
+        new_phase = event.phase != last_phase
+        last_phase = event.phase
         fraction = event.done / event.total if event.total else None
-        progress.update(_format_progress(event), fraction=fraction)
+        handle.update(_format_progress(event), fraction=fraction, new_phase=new_phase)
 
     return report
 
