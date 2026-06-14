@@ -209,7 +209,14 @@ def source_list_command(*, fmt: FormatOption = "table", columns: ColumnsOption =
     """List saved sources."""
     with report_errors():
         rows = [_source_row(source) for source in SourceRepository().entries()]
-        echo(render_rows(rows, fmt=fmt, columns=columns))
+        rendered = render_rows(
+            rows,
+            fmt=fmt,
+            columns=columns,
+            empty="No sources configured. Add one with `untaped ansible source save <name>`.",
+        )
+        if rendered:
+            echo(rendered)
 
 
 @app.command(name="show")
@@ -265,7 +272,14 @@ def source_status_command(
             )
             for source_name in names
         ]
-        echo(render_rows(rows, fmt=fmt, columns=columns))
+        rendered = render_rows(
+            rows,
+            fmt=fmt,
+            columns=columns,
+            empty="No sources scanned yet. Run `untaped ansible source refresh <name>`.",
+        )
+        if rendered:
+            echo(rendered)
 
 
 @app.command(name="refresh")
@@ -294,6 +308,7 @@ def source_refresh_command(
             github_settings=ctx.section("github", GithubSettings),
             http=ctx.http,
             concurrency=git_concurrency,
+            ui=ctx.ui(),
         )
         if result.failures:
             for failure in result.failures:

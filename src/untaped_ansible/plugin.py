@@ -12,7 +12,7 @@ from untaped_ansible.settings import AnsibleSettings, AnsibleState
 
 class AnsiblePlugin:
     id = "ansible"
-    untaped_api_version = 3
+    untaped_api_version = 5
 
     def manifest(self) -> PluginManifest:
         return PluginManifest(

@@ -385,6 +385,69 @@ def test_source_list_raw_ignores_invalid_global_theme(
     assert result.stdout.splitlines() == ["prod"]
 
 
+def test_alias_list_empty_table_guides_with_stderr_hint(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    cfg = _write_config(tmp_path)
+    monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
+    get_settings.cache_clear()
+
+    result = CliInvoker().invoke(app, ["alias", "list"])
+
+    assert result.exit_code == 0, result.output
+    # Empty human output stays off stdout; the guiding hint goes to stderr.
+    assert result.stdout == ""
+    assert "No dependency aliases configured" in result.stderr
+
+
+def test_source_list_empty_table_guides_with_stderr_hint(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    cfg = _write_config(tmp_path)
+    monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
+    get_settings.cache_clear()
+
+    result = CliInvoker().invoke(app, ["source", "list"])
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout == ""
+    assert "No sources configured" in result.stderr
+
+
+def test_source_status_empty_table_guides_with_stderr_hint(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    cfg = _write_config(tmp_path)
+    monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
+    get_settings.cache_clear()
+
+    result = CliInvoker().invoke(app, ["source", "status"])
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout == ""
+    assert "No sources scanned yet" in result.stderr
+
+
+def test_source_list_empty_json_stays_pipe_clean(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    cfg = _write_config(tmp_path)
+    monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
+    get_settings.cache_clear()
+
+    result = CliInvoker().invoke(app, ["source", "list", "--format", "json"])
+
+    assert result.exit_code == 0, result.output
+    # Structured formats are the pipe targets: empty is a valid [] document and
+    # must not carry the human hint on either stream.
+    assert result.stdout.strip() == "[]"
+    assert "No sources configured" not in result.stderr
+
+
 def test_source_edit_add_remove_and_clear_updates_config(
     tmp_path: Path,
     monkeypatch,
