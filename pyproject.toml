@@ -1,7 +1,7 @@
 [project]
 name = "untaped-ansible"
 version = "0.3.2"
-description = "Ansible dependency graph plugin for untaped."
+description = "Ansible dependency graph CLI built on the untaped SDK."
 readme = "README.md"
 authors = [
     { name = "Alexis Beaulieu", email = "alexisbeaulieu97@gmail.com" }
@@ -11,20 +11,23 @@ dependencies = [
     "cyclopts>=4.16.0,<5",
     "pydantic>=2.13.3",
     "pyyaml>=6.0.3",
-    "untaped>=0.5.1",
+    "untaped>=0.6",
     "untaped-github>=0.3.0",
 ]
 
-[project.entry-points."untaped.plugins"]
-ansible = "untaped_ansible.plugin:plugin"
+[project.scripts]
+untaped-ansible = "untaped_ansible.__main__:main"
 
 [build-system]
 requires = ["uv_build>=0.11.16,<0.12.0"]
 build-backend = "uv_build"
 
+# Pilot: resolve the SDK from the local sdk-only-phase0 branch (unpublished),
+# editable so SDK iterations reflect live. Dev-only — replaced by the
+# published `untaped>=1,<2` at release.
 [tool.uv.sources]
-untaped = { git = "https://github.com/alexisbeaulieu97/untaped" }
-untaped-github = { git = "https://github.com/alexisbeaulieu97/untaped-github" }
+untaped = { path = "../untaped", editable = true }
+untaped-github = { path = "../untaped-github", editable = true }
 
 [dependency-groups]
 dev = [

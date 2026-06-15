@@ -346,16 +346,16 @@ def test_refresh_hint_is_appended_to_stale_and_missing_ref_warnings() -> None:
             source_key="source:prod",
             direction="both",
             depth=3,
-            refresh_hint="Run `untaped ansible source refresh prod` to update it.",
+            refresh_hint="Run `untaped-ansible source refresh prod` to update it.",
         )
     )
 
     assert graph.warnings == (
         "source data is stale; refresh it before relying on upstream impact. "
-        "Run `untaped ansible source refresh prod` to update it.",
+        "Run `untaped-ansible source refresh prod` to update it.",
         "not expanding acme/b@v1 from cached source data: ref is not cached "
         "(available refs: main). Scan the matching ref/tag or use --live for downstream. "
-        "Run `untaped ansible source refresh prod` to update it.",
+        "Run `untaped-ansible source refresh prod` to update it.",
     )
 
 

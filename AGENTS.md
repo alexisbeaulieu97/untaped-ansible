@@ -1,17 +1,17 @@
 # AGENTS.md - `untaped-ansible`
 
-Single source of truth for this standalone plugin repo. If you change
+Single source of truth for this standalone CLI repo. If you change
 architecture, command behavior, settings behavior, or the development
 workflow, update this file in the same commit.
 
 ## Mission
 
-`untaped-ansible` is an `untaped` plugin. It owns the `untaped ansible`
-command group for Ansible role/playbook dependency graphing, reverse-impact
-analysis, and local dependency cache data. `untaped-github` owns GitHub API
-access; `untaped` core owns the binary, plugin discovery, config loading,
-output helpers, HTTP/TLS primitives, and shared errors. Profile selection is
-contributed by `untaped-profile`.
+`untaped-ansible` is a standalone CLI built on the `untaped` SDK. It owns the
+`untaped-ansible` command tree for Ansible role/playbook dependency graphing,
+reverse-impact analysis, and local dependency cache data. `untaped-github`
+owns GitHub API access (its public client API is consumed here for source
+refreshes); the `untaped` SDK provides config loading, output helpers,
+HTTP/TLS primitives, profile selection, and shared errors.
 
 ## Hard Rules
 
@@ -21,24 +21,33 @@ contributed by `untaped-profile`.
    `src/untaped_ansible/skills/untaped-ansible/SKILL.md`.
 2. **Prefer `uv` commands over manual dependency edits.** Use `uv add` and
    `uv add --group dev` when resolution permits; hand-edit tool config only.
-3. **Expose the plugin through the `untaped.plugins` entry point.**
-   `ansible = "untaped_ansible.plugin:plugin"` is the public integration
-   point. The plugin object must expose `id = "ansible"`, literal
-   `untaped_api_version = 5`, and `manifest()` returning a `PluginManifest`.
-   `plugin.py` must not import the CLI tree: the manifest's
-   `CliSpec(import_path="untaped_ansible.cli:app")` defers that import until
-   the `ansible` command is dispatched, and `untaped_ansible/__init__.py`
-   re-exports `app` lazily through a PEP 562 module `__getattr__` for the
-   same reason.
-4. **Import the plugin SDK from `untaped.api`.** Core helpers (`create_app`,
-   `report_errors`, `render_rows`, `plugin_context`, errors, options, …)
-   come from `untaped.api`, never from core internals. The only exception is
-   `untaped.config_file`, which the config repositories use for plugin-owned
-   state reads/writes; `untaped.testing` stays test-only. Command bodies
-   resolve settings once at the composition root via `plugin_context(profile)`
-   and read sections with `ctx.section("ansible", AnsibleSettings)`; helpers
-   like `cli/_refresh.py`'s `refresh_source` receive resolved GitHub/HTTP
-   settings as arguments instead of reading ambient config.
+3. **Expose the CLI through the `untaped-ansible` console script.**
+   `untaped-ansible = "untaped_ansible.__main__:main"` in `[project.scripts]`
+   is the public entry point. `main()` hands the Cyclopts `app` and a
+   `ToolSpec(command="untaped-ansible", section="ansible",
+   profile_model=AnsibleSettings, state_model=AnsibleState, skills=...)` to the
+   SDK's `run_tool`, which mounts the shared `config` / `profile` / `skills`
+   command groups and runs under the SDK error contract. The package
+   `__init__.py` re-exports `app` lazily (PEP 562 `__getattr__`) so importing
+   `untaped_ansible` never drags the whole CLI tree onto the import path before
+   it is needed.
+4. **Import the SDK from `untaped.api`.** Core helpers (`create_app`,
+   `report_errors`, `render_rows`, `get_config_section`, `plugin_context`,
+   errors, options, …) come from `untaped.api`, never from core internals. The
+   only exception is `untaped.config_file`, which the config repositories use
+   for tool-owned state reads/writes (`mutate_tool_state` / `read_tool_state`);
+   `untaped.testing` stays test-only. Command bodies read typed settings with
+   `get_config_section("ansible", AnsibleSettings)` for the tool's own section
+   and `get_config_section("github", GithubSettings)` for the foreign GitHub
+   section — `get_config_section` builds the one-off section model directly, so
+   the CLI app can be exercised in tests without going through `run_tool`, and
+   the unregistered `github` section still resolves under the shared config's
+   `extra="ignore"` contract. Use `plugin_context()` only for `ctx.http` /
+   `ctx.ui(...)`. Profile selection is owned by the built-in `--profile`
+   option, which works in any token position; commands declare no command-local
+   `--profile`. Helpers like `cli/_refresh.py`'s `refresh_source` receive
+   resolved GitHub/HTTP settings as arguments instead of reading ambient
+   config.
 5. **Use the 4-layer DDD layout.** `cli -> application -> domain`, with
    `infrastructure -> domain`; `application` and `infrastructure` must not
    import each other at runtime.
@@ -55,7 +64,7 @@ contributed by `untaped-profile`.
    optional default plus a manual help dance.
 10. **stdout is data only.** Prompts, progress, and status messages go to
     stderr via `echo(..., err=True)`.
-11. **GitHub behavior belongs in `untaped-github`.** If this plugin needs a
+11. **GitHub behavior belongs in `untaped-github`.** If this tool needs a
     missing GitHub operation, add an intentional public API there and test it.
     Do not reach into private internals or duplicate GitHub clients here.
 12. **Finish with verification.** Run `uv run ruff check --fix`,
@@ -66,8 +75,8 @@ contributed by `untaped-profile`.
 ```text
 src/untaped_ansible/
 ├── __init__.py           # lazy PEP 562 re-export of app
-├── plugin.py             # entry-point plugin object (manifest only, no CLI imports)
-├── settings.py           # plugin-owned config/state model
+├── __main__.py           # console-script entry point: run_tool(app, SPEC)
+├── settings.py           # tool-owned profile + state models
 ├── _concurrency.py       # bounded_map thread-pool helper shared by application and infrastructure
 ├── cli/                  # Cyclopts composition root plus concern-specific commands
 ├── application/          # use cases and ports
@@ -75,15 +84,18 @@ src/untaped_ansible/
 └── infrastructure/       # SQLite cache, local filesystem/git adapters
 ```
 
-The plugin manifest declares profile settings, top-level state, the lazily
-imported `ansible` Cyclopts command, and the packaged `untaped-ansible`
-agent skill. Keep that static skill asset current with major graph/source
-workflow changes.
+`__main__.py`'s `ToolSpec` declares the profile settings (`AnsibleSettings`),
+the disjoint tool-managed state (`AnsibleState`, holding `sources` and
+`aliases`), and the packaged `untaped-ansible` agent skill. Keep that static
+skill asset current with major graph/source workflow changes.
 
-Tests that invoke the Cyclopts app directly must run after the production
-plugin registration; `tests/conftest.py` discovers and registers installed
-plugins once so `plugin_context().section(...)` resolves registered config
-sections, and clears the settings cache around every test.
+Tests invoke the Cyclopts app directly. Command code reads its own `ansible`
+section and the foreign `github` section through `get_config_section`, which
+builds a one-off model for an unregistered section, so direct `app` invocations
+need no plugin/section registration; `tests/conftest.py` only clears the
+settings cache around every test. Entry-point/profile-state tests
+(`tests/unit/test_tool_entrypoint.py`) drive the wired app via
+`build_tool_app(app, SPEC)`.
 
 `cli/commands.py` is the Ansible Cyclopts composition root only. Keep graph
 execution in `cli/graph_commands.py`, source management in
@@ -149,7 +161,7 @@ bypasses `render_rows`, so it carries no typed-pipe envelope or `kind` tag.
 
 ## Cached Source Data
 
-The SQLite cache and bare Git repository cache are plugin-owned state. SQLite
+The SQLite cache and bare Git repository cache are tool-owned state. SQLite
 stores named and fingerprinted source scans, repo/ref scan metadata, per-source
 repo metadata such as exact default branch, resolved SHAs, graph edges,
 unresolved declarations, and timestamps. SHA is authoritative. Branch and tag
@@ -174,7 +186,7 @@ migration code. `sqlite_schema.SCHEMA_VERSION` is enforced through SQLite's
 version stamp, while any database whose `user_version` differs (including
 pre-versioning databases with tables but `user_version = 0`) makes
 `ensure_schema` raise an `UntapedError` telling the user to delete the file
-configured by `ansible.index_path` and re-run `untaped ansible source
+configured by `ansible.index_path` and re-run `untaped-ansible source
 refresh`. Bump `SCHEMA_VERSION` in the same commit as any schema change.
 
 Source-index payload DTOs such as `IndexedDependency`, `GitRef`, `RefScan`,
@@ -238,7 +250,7 @@ every check (unchanged).
 
 Stale-data and missing-cached-ref graph warnings carry the exact fix command.
 The application layer stays free of CLI strings: the CLI composes
-`GraphRequest.refresh_hint` (`untaped ansible source refresh NAME` for saved
+`GraphRequest.refresh_hint` (`untaped-ansible source refresh NAME` for saved
 sources; re-run with `--refresh` for inline sources) and `BuildGraph` appends
 it to those warnings.
 
@@ -326,5 +338,5 @@ uv run pytest
 uv run mypy
 uv run ruff check --fix
 uv run ruff format
-uv run untaped ansible --help
+uv run untaped-ansible --help
 ```

@@ -1,50 +1,48 @@
 # untaped-ansible
 
-`untaped-ansible` is the Ansible dependency graph plugin for
-[`untaped`](https://github.com/alexisbeaulieu97/untaped). It adds the
-`untaped ansible` command group for role/playbook dependency graphs,
-upstream impact analysis, and Git-backed source caches.
+`untaped-ansible` is a standalone Ansible dependency graph CLI built on the
+[`untaped`](https://github.com/alexisbeaulieu97/untaped) SDK. It provides
+role/playbook dependency graphs, upstream impact analysis, and Git-backed
+source caches, plus the shared `config`, `profile`, and `skills` command
+groups every untaped tool ships.
 
 ## Install
 
-Install `untaped`, `untaped-github`, and this plugin from git. This
-plugin requires `untaped-github>=0.2.0`, which provides the public
-GitHub client API used by source refreshes.
-
 ```bash
-uv tool install "git+https://github.com/alexisbeaulieu97/untaped.git@v0.1.4" \
-  --with "untaped-github @ git+https://github.com/alexisbeaulieu97/untaped-github.git@v0.2.0" \
-  --with "untaped-ansible @ git+https://github.com/alexisbeaulieu97/untaped-ansible.git@v0.1.0" \
-  --no-sources \
-  --force
+uv tool install untaped-ansible
 ```
 
-Configure GitHub auth through `untaped-github`:
+`untaped-ansible` reads GitHub credentials from the shared `github` config
+section (provided by `untaped-github`, which it depends on for the public
+GitHub client API used by source refreshes):
 
 ```bash
-untaped config set github.token ghp_xxx
+untaped-ansible config set github.token ghp_xxx
 ```
 
-This plugin also contributes the `untaped-ansible` agent skill. After the
-plugin is installed, use the core
-[`untaped` agent skill docs](https://github.com/alexisbeaulieu97/untaped/blob/main/docs/skills.md)
-to install it for Codex or Claude.
+`untaped-ansible` also ships the `untaped-ansible` agent skill, installed
+via its `skills` command group:
+
+```bash
+untaped-ansible skills install
+```
 
 ## Commands
 
 ```text
-untaped ansible graph TARGET --downstream
-untaped ansible graph TARGET --org acme --team platform --upstream
-untaped ansible graph TARGET --source platform --upstream --cached
-untaped ansible graph TARGET --source platform --source ops --upstream --cached
-untaped ansible graph TARGET --source platform --upstream
-untaped ansible graph TARGET --source platform --downstream --live
-untaped ansible graph TARGET --source platform --both --concurrency 12
-untaped ansible graph TARGET --source platform --both --format mermaid --output deps.mmd
-untaped ansible source save platform --org acme --team platform
-untaped ansible source refresh platform --concurrency 12
-untaped ansible source status platform
-untaped ansible alias add common acme/common
+untaped-ansible graph TARGET --downstream
+untaped-ansible graph TARGET --org acme --team platform --upstream
+untaped-ansible graph TARGET --source platform --upstream --cached
+untaped-ansible graph TARGET --source platform --source ops --upstream --cached
+untaped-ansible graph TARGET --source platform --upstream
+untaped-ansible graph TARGET --source platform --downstream --live
+untaped-ansible graph TARGET --source platform --both --concurrency 12
+untaped-ansible graph TARGET --source platform --both --format mermaid --output deps.mmd
+untaped-ansible source save platform --org acme --team platform
+untaped-ansible source refresh platform --concurrency 12
+untaped-ansible source status platform
+untaped-ansible alias add common acme/common
+untaped-ansible config|profile|skills ...
 ```
 
 `graph` uses `tree` output by default and also supports `mermaid` and
@@ -90,7 +88,7 @@ graph. Each saved source is refreshed under its own cache key unless `--cached`
 is passed. Use inline selectors for one-off work:
 
 ```bash
-untaped ansible graph acme/base --org acme --team platform --upstream
+untaped-ansible graph acme/base --org acme --team platform --upstream
 ```
 
 Git-backed source indexing is the default. The first source-backed run creates
@@ -136,9 +134,9 @@ when you explicitly want downstream dependencies read from GitHub.
 Save a reusable source for repeated work or CI:
 
 ```bash
-untaped ansible source save platform --org acme --team platform
-untaped ansible source refresh platform
-untaped ansible graph acme/base --source platform --upstream
+untaped-ansible source save platform --org acme --team platform
+untaped-ansible source refresh platform
+untaped-ansible graph acme/base --source platform --upstream
 ```
 
 Use `ansible.git_clone_protocol: ssh` when normal SSH keys are preferred over
@@ -147,9 +145,9 @@ transient auth header and does not store it in cached remotes.
 
 The SQLite index enforces a schema version through `PRAGMA user_version`.
 There are no migrations: when an existing index was created by a different
-plugin version, commands fail with an error naming the exact
+tool version, commands fail with an error naming the exact
 `ansible.index_path` file to delete and the
-`untaped ansible source refresh NAME` command to run afterwards.
+`untaped-ansible source refresh NAME` command to run afterwards.
 
 `source status NAME` reports whether a configured source has never been
 refreshed, is stale, or is fresh. Unknown source names return an error so
@@ -167,7 +165,7 @@ uv run pytest
 uv run mypy
 uv run ruff check --fix
 uv run ruff format
-uv run untaped ansible --help
+uv run untaped-ansible --help
 ```
 
 See [AGENTS.md](./AGENTS.md) for architecture rules and dependency graph

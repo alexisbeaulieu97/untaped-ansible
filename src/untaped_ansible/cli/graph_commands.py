@@ -12,6 +12,7 @@ from cyclopts import App, Group, Parameter, validators
 from untaped.api import (
     UntapedError,
     echo,
+    get_config_section,
     plugin_context,
     raise_usage,
     report_errors,
@@ -60,9 +61,9 @@ _GRAPH_HELP = (
     "Inline source selectors (--org, --team, --repo, --path, --ref-kind, "
     "--ref-pattern) are cached under a deterministic fingerprint key, so "
     "repeated identical invocations reuse the same scan. "
-    "Examples: untaped ansible graph acme/base --org acme --team platform "
-    "--upstream --refresh; untaped ansible graph acme/app --source prod "
-    "--both --cached; untaped ansible graph ./roles/web --target-repo acme/web "
+    "Examples: untaped-ansible graph acme/base --org acme --team platform "
+    "--upstream --refresh; untaped-ansible graph acme/app --source prod "
+    "--both --cached; untaped-ansible graph ./roles/web --target-repo acme/web "
     "--downstream."
 )
 
@@ -212,15 +213,15 @@ def graph_command(
     """Graph Ansible dependency relationships for a role, repo, or playbook.
 
     Examples:
-      untaped ansible graph acme/base --org acme --team platform --upstream --refresh
-      untaped ansible graph acme/app --source prod --both --cached
-      untaped ansible graph ./roles/web --target-repo acme/web --downstream
+      untaped-ansible graph acme/base --org acme --team platform --upstream --refresh
+      untaped-ansible graph acme/app --source prod --both --cached
+      untaped-ansible graph ./roles/web --target-repo acme/web --downstream
     """
     if refresh and not any((source, orgs, teams, source_repos, paths, ref_kinds, ref_patterns)):
         raise_usage("--refresh requires --source or inline source selectors")
     with report_errors():
         ctx = plugin_context()
-        settings = ctx.section("ansible", AnsibleSettings)
+        settings = get_config_section("ansible", AnsibleSettings)
         aliases = AliasRepository().entries()
         target_repo_name = target_repo or _resolve_target_repo(target, aliases)
         if target_repo_name is None:
@@ -248,7 +249,7 @@ def graph_command(
         )
         refresh_warnings: list[str] = []
         if should_refresh_source:
-            github_settings = ctx.section("github", GithubSettings)
+            github_settings = get_config_section("github", GithubSettings)
             for selection in graph_source.selections:
                 if not refresh:
                     fresh_age = _within_freshness_ttl(
@@ -323,7 +324,7 @@ def graph_command(
                 source_key=graph_source.key,
                 live=live,
             ):
-                github_settings = ctx.section("github", GithubSettings)
+                github_settings = get_config_section("github", GithubSettings)
                 with GithubClient(github_settings, http=ctx.http) as github:
                     index = GithubDependencyIndex(
                         github=github,
@@ -551,13 +552,13 @@ def _missing_source_index_message(
             return (
                 f"no cached source data found for sources {labels}. Run: {refresh_commands}. "
                 f"Or re-run graph with: "
-                f"`untaped ansible graph {target} {source_flags} --upstream --refresh`."
+                f"`untaped-ansible graph {target} {source_flags} --upstream --refresh`."
             )
         label = missing[0].label
         return (
             f"no cached source data found for source {label!r}. Run: {refresh_commands}. "
             f"Or re-run graph with: "
-            f"`untaped ansible graph {target} --source {label} --upstream --refresh`."
+            f"`untaped-ansible graph {target} --source {label} --upstream --refresh`."
         )
     return (
         "no cached source data found for inline source. Re-run this graph command with "
@@ -676,9 +677,9 @@ def _refresh_hint(source_state: _GraphSource) -> str | None:
 
 
 def _source_refresh_commands(selections: tuple[_GraphSourceSelection, ...]) -> str:
-    """Join the exact `untaped ansible source refresh NAME` commands for selections."""
+    """Join the exact `untaped-ansible source refresh NAME` commands for selections."""
     return " and ".join(
-        f"`untaped ansible source refresh {selection.label}`" for selection in selections
+        f"`untaped-ansible source refresh {selection.label}`" for selection in selections
     )
 
 

@@ -13,6 +13,7 @@ from untaped.api import (
     UntapedError,
     create_app,
     echo,
+    get_config_section,
     plugin_context,
     render_rows,
     report_errors,
@@ -103,7 +104,7 @@ def source_save_command(
         source_repo = SourceRepository()
         previous = source_repo.get(name)
         source_repo.upsert(source)
-        settings = plugin_context().section("ansible", AnsibleSettings)
+        settings = get_config_section("ansible", AnsibleSettings)
         if previous != source:
             SqliteDependencyIndex(settings.index_path).clear(_saved_source_key(name))
         echo(f"saved source {name!r}", err=True)
@@ -199,7 +200,7 @@ def source_edit_command(
             echo(f"source {name!r} unchanged", err=True)
             return
         source_repo.upsert(edited)
-        settings = plugin_context().section("ansible", AnsibleSettings)
+        settings = get_config_section("ansible", AnsibleSettings)
         SqliteDependencyIndex(settings.index_path).clear(_saved_source_key(name))
         echo(f"updated source {name!r}: {', '.join(changes)}", err=True)
 
@@ -214,7 +215,7 @@ def source_list_command(*, fmt: FormatOption = "table", columns: ColumnsOption =
             fmt=fmt,
             columns=columns,
             kind="ansible.source",
-            empty="No sources configured. Add one with `untaped ansible source save <name>`.",
+            empty="No sources configured. Add one with `untaped-ansible source save <name>`.",
         )
         if rendered:
             echo(rendered)
@@ -242,7 +243,7 @@ def source_remove_command(name: Annotated[str, Parameter(help="Source name.")]) 
         removed = SourceRepository().remove(name)
         if not removed:
             raise UntapedError(f"unknown source: {name!r}")
-        settings = plugin_context().section("ansible", AnsibleSettings)
+        settings = get_config_section("ansible", AnsibleSettings)
         SqliteDependencyIndex(settings.index_path).clear(_saved_source_key(name))
         echo(f"removed source {name!r}", err=True)
 
@@ -256,8 +257,7 @@ def source_status_command(
 ) -> None:
     """Show cached source data status."""
     with report_errors():
-        ctx = plugin_context()
-        settings = ctx.section("ansible", AnsibleSettings)
+        settings = get_config_section("ansible", AnsibleSettings)
         index = SqliteDependencyIndex(settings.index_path)
         source_repo = SourceRepository()
         configured = {source.name: source for source in source_repo.entries()}
@@ -278,7 +278,7 @@ def source_status_command(
             fmt=fmt,
             columns=columns,
             kind="ansible.source-status",
-            empty="No sources scanned yet. Run `untaped ansible source refresh <name>`.",
+            empty="No sources scanned yet. Run `untaped-ansible source refresh <name>`.",
         )
         if rendered:
             echo(rendered)
@@ -296,7 +296,7 @@ def source_refresh_command(
         source = SourceRepository().get(name)
         if source is None:
             raise UntapedError(f"unknown source: {name!r}")
-        settings = ctx.section("ansible", AnsibleSettings)
+        settings = get_config_section("ansible", AnsibleSettings)
         aliases = AliasRepository().entries()
         git_concurrency = concurrency or settings.git_fetch_concurrency
         result = run_source_refresh(
@@ -307,7 +307,7 @@ def source_refresh_command(
             index=SqliteDependencyIndex(settings.index_path),
             aliases=aliases,
             settings=settings,
-            github_settings=ctx.section("github", GithubSettings),
+            github_settings=get_config_section("github", GithubSettings),
             http=ctx.http,
             concurrency=git_concurrency,
             ui=ctx.ui(strict=False),
