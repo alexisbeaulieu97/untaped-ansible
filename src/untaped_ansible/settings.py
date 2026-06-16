@@ -1,4 +1,4 @@
-"""Settings and state models contributed by the Ansible plugin."""
+"""Settings and state models for the Ansible tool."""
 
 from __future__ import annotations
 
@@ -66,7 +66,7 @@ class AnsibleSettings(BaseModel):
 
 
 class AnsibleState(BaseModel):
-    """Top-level Ansible plugin app state."""
+    """Top-level Ansible tool app state."""
 
     sources: list[SourceDefinition] = Field(default_factory=list)
     aliases: dict[str, str] = Field(default_factory=dict)

@@ -1,4 +1,4 @@
-"""Typed-pipe (`--format pipe`) envelope tests for the Ansible plugin.
+"""Typed-pipe (`--format pipe`) envelope tests for the Ansible tool.
 
 Each row-producing command must tag its `--format pipe` output with a
 namespaced `kind` hint so downstream consumers can route records without

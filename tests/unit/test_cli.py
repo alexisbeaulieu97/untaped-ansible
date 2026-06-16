@@ -1,4 +1,4 @@
-"""CLI tests for the Ansible plugin."""
+"""CLI tests for the Ansible tool."""
 
 from __future__ import annotations
 

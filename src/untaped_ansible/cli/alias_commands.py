@@ -1,4 +1,4 @@
-"""Alias management commands for the Ansible plugin."""
+"""Alias management commands for the Ansible tool."""
 
 from __future__ import annotations
 

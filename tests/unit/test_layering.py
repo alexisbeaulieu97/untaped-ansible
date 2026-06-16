@@ -1,4 +1,4 @@
-"""Architecture guard tests for the Ansible plugin's DDD layers."""
+"""Architecture guard tests for the Ansible tool's DDD layers."""
 
 from __future__ import annotations
 
