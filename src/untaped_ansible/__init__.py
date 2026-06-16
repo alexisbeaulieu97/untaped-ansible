@@ -1,4 +1,4 @@
-"""untaped-ansible: Ansible dependency graphing plugin."""
+"""untaped-ansible: Ansible dependency graph CLI built on the untaped SDK."""
 
 from typing import TYPE_CHECKING
 
@@ -11,12 +11,10 @@ __all__ = ["app"]
 def __getattr__(name: str) -> App:
     """Lazily re-export the Cyclopts app (PEP 562).
 
-    Plugin discovery imports this package; the CLI tree must only load when
-    the ``ansible`` command is actually dispatched or ``app`` is accessed.
+    Deferring the CLI import keeps the command tree off the import path until
+    ``app`` is actually accessed.
     """
     if name == "app":
-        # Deferring this import is the point: eager CLI imports would defeat
-        # the manifest's lazy CliSpec(import_path=...).
         from untaped_ansible.cli import app  # noqa: PLC0415
 
         return app

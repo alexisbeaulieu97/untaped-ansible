@@ -916,8 +916,8 @@ def test_graph_source_upstream_requires_refresh_when_index_missing(
 
     assert result.exit_code == 1
     assert "no cached source data found for source 'platform'" in result.output
-    assert "untaped ansible source refresh platform" in result.output
-    assert "untaped ansible graph acme/base --source platform --upstream --refresh" in result.output
+    assert "untaped-ansible source refresh platform" in result.output
+    assert "untaped-ansible graph acme/base --source platform --upstream --refresh" in result.output
 
 
 def test_graph_repeated_sources_union_cached_upstream(
@@ -1345,7 +1345,7 @@ def test_graph_cached_missing_ref_lists_available_refs_in_display_order(
 
     assert result.exit_code == 0, result.output
     assert ("available refs: trunk, docs, feature/2, v2.0.0, v1.0.0") in result.stdout
-    assert "Run `untaped ansible source refresh platform` to update it." in result.stdout
+    assert "Run `untaped-ansible source refresh platform` to update it." in result.stdout
 
 
 def test_graph_both_renders_downstream_and_warns_when_upstream_unavailable(
@@ -1887,7 +1887,7 @@ def test_graph_help_teaches_clean_source_first_workflow() -> None:
     assert "deterministic fingerprint key" in output
     assert "Examples:" in output
     assert (
-        "untaped ansible graph acme/base --org acme --team platform --upstream --refresh" in output
+        "untaped-ansible graph acme/base --org acme --team platform --upstream --refresh" in output
     )
     assert "--scope" not in output
     assert "--direction" not in output
@@ -2641,7 +2641,7 @@ def test_graph_stale_warning_includes_exact_refresh_command(
 
     assert result.exit_code == 0, result.output
     assert "source data is stale" in result.stdout
-    assert "Run `untaped ansible source refresh platform` to update it." in result.stdout
+    assert "Run `untaped-ansible source refresh platform` to update it." in result.stdout
 
 
 def test_source_save_expands_bare_team_slug_with_single_org(tmp_path: Path, monkeypatch) -> None:

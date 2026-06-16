@@ -448,7 +448,7 @@ def _assert_outdated_schema_error(db_path: Path) -> None:
         index.status("source:prod")
     message = str(excinfo.value)
     assert str(db_path) in message
-    assert "untaped ansible source refresh" in message
+    assert "untaped-ansible source refresh" in message
 
 
 def test_outdated_schema_version_raises_actionable_error(tmp_path) -> None:

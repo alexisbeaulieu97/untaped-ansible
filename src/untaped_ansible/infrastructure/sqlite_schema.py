@@ -96,7 +96,7 @@ def ensure_schema(db: sqlite3.Connection, path: Path) -> None:
     if version != 0 or _has_tables(db):
         raise UntapedError(
             f"index schema is outdated; delete {path} and re-run "
-            "'untaped ansible source refresh <name>'"
+            "'untaped-ansible source refresh <name>'"
         )
     # Table creation and the version stamp must be one atomic unit: a crash
     # between them would leave a version-0 database that already has tables,
