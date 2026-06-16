@@ -32,7 +32,7 @@ HTTP/TLS primitives, profile selection, and shared errors.
    `untaped_ansible` never drags the whole CLI tree onto the import path before
    it is needed.
 4. **Import the SDK from `untaped.api`.** Core helpers (`create_app`,
-   `report_errors`, `render_rows`, `get_config_section`, `plugin_context`,
+   `report_errors`, `render_rows`, `get_config_section`, `app_context`,
    errors, options, …) come from `untaped.api`, never from core internals. The
    only exception is `untaped.config_file`, which the config repositories use
    for tool-owned state reads/writes (`mutate_tool_state` / `read_tool_state`);
@@ -42,7 +42,7 @@ HTTP/TLS primitives, profile selection, and shared errors.
    section — `get_config_section` builds the one-off section model directly, so
    the CLI app can be exercised in tests without going through `run_tool`, and
    the unregistered `github` section still resolves under the shared config's
-   `extra="ignore"` contract. Use `plugin_context()` only for `ctx.http` /
+   `extra="ignore"` contract. Use `app_context()` only for `ctx.http` /
    `ctx.ui(...)`. Profile selection is owned by the built-in `--profile`
    option, which works in any token position; commands declare no command-local
    `--profile`. Helpers like `cli/_refresh.py`'s `refresh_source` receive

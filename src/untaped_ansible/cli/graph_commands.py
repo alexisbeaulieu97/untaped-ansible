@@ -11,9 +11,9 @@ from typing import Annotated, Literal
 from cyclopts import App, Group, Parameter, validators
 from untaped.api import (
     UntapedError,
+    app_context,
     echo,
     get_config_section,
-    plugin_context,
     raise_usage,
     report_errors,
 )
@@ -220,7 +220,7 @@ def graph_command(
     if refresh and not any((source, orgs, teams, source_repos, paths, ref_kinds, ref_patterns)):
         raise_usage("--refresh requires --source or inline source selectors")
     with report_errors():
-        ctx = plugin_context()
+        ctx = app_context()
         settings = get_config_section("ansible", AnsibleSettings)
         aliases = AliasRepository().entries()
         target_repo_name = target_repo or _resolve_target_repo(target, aliases)

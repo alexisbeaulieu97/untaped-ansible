@@ -11,10 +11,10 @@ from untaped.api import (
     ColumnsOption,
     FormatOption,
     UntapedError,
+    app_context,
     create_app,
     echo,
     get_config_section,
-    plugin_context,
     render_rows,
     report_errors,
 )
@@ -292,7 +292,7 @@ def source_refresh_command(
 ) -> None:
     """Refresh a saved source from GitHub."""
     with report_errors():
-        ctx = plugin_context()
+        ctx = app_context()
         source = SourceRepository().get(name)
         if source is None:
             raise UntapedError(f"unknown source: {name!r}")
