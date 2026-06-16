@@ -1,4 +1,4 @@
-"""Graph command and graph-specific CLI helpers for the Ansible plugin."""
+"""Graph command and graph-specific CLI helpers for the Ansible tool."""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""Tests for Ansible plugin settings defaults."""
+"""Tests for Ansible tool settings defaults."""
 
 from __future__ import annotations
 
