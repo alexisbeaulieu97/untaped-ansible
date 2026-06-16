@@ -70,9 +70,7 @@ def test_spec_declares_profile_and_state(_isolate: Path) -> None:
 
 
 def test_state_round_trips_through_the_alias_list_command(_isolate: Path) -> None:
-    _isolate.write_text(
-        "ansible:\n  aliases:\n    foo: owner/repo\n", encoding="utf-8"
-    )
+    _isolate.write_text("ansible:\n  aliases:\n    foo: owner/repo\n", encoding="utf-8")
     get_settings.cache_clear()
     # The repository reads the top-level `ansible` state section directly.
     assert AliasRepository().entries() == {"foo": "owner/repo"}
