@@ -36,23 +36,25 @@ def _write_config(
     top_level_ui: dict[str, object] | None = None,
 ) -> Path:
     cfg = tmp_path / "config.yml"
-    ansible_section: dict[str, object] = {
+    # SDK v2.0.0 profiles layout: user-tunable PROFILE sections (the ansible
+    # profile fields, the cross-tool `github` section, `ui`) live under
+    # `profiles.default.<section>`. The ansible STATE section (sources/aliases)
+    # stays top-level under the `ansible` key.
+    ansible_profile_section: dict[str, object] = {
         "index_path": str(index_path or tmp_path / "index.sqlite3"),
         "stale_after": 86400,
     }
     if ansible_profile:
-        ansible_section.update(ansible_profile)
-    # Flat layout: settings sections are top-level keys; the ansible state
-    # section (sources/aliases) shares the `ansible` key with disjoint fields.
-    data: dict[str, object] = {"ansible": ansible_section}
+        ansible_profile_section.update(ansible_profile)
+    default_profile: dict[str, object] = {"ansible": ansible_profile_section}
     if extra_profile:
-        data.update(extra_profile)
-    if top_level_ansible is not None:
-        merged = dict(ansible_section)
-        merged.update(top_level_ansible)
-        data["ansible"] = merged
+        default_profile.update(extra_profile)
     if top_level_ui is not None:
-        data["ui"] = top_level_ui
+        default_profile["ui"] = top_level_ui
+    data: dict[str, object] = {"profiles": {"default": default_profile}}
+    if top_level_ansible is not None:
+        # State (sources/aliases) is a disjoint top-level `ansible` section.
+        data["ansible"] = dict(top_level_ansible)
     cfg.write_text(yaml.safe_dump(data, sort_keys=False))
     return cfg
 
@@ -1395,8 +1397,8 @@ def test_graph_downstream_with_source_uses_cached_data_without_live_reads(
         tmp_path,
         index_path=index_path,
         extra_profile={"github": {"token": "ghp_test"}},
+        ansible_profile={"stale_after": 60},
         top_level_ansible={
-            "stale_after": 60,
             "sources": [{"name": "platform", "repos": ["acme/site"]}],
         },
     )
@@ -1925,8 +1927,8 @@ def test_source_status_classifies_missing_unindexed_and_stale_sources(
     cfg = _write_config(
         tmp_path,
         index_path=index_path,
+        ansible_profile={"stale_after": 60},
         top_level_ansible={
-            "stale_after": 60,
             "sources": [
                 {"name": "unindexed", "repos": ["acme/site"]},
                 {"name": "stale", "repos": ["acme/base"]},

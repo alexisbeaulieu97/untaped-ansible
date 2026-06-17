@@ -23,13 +23,17 @@ def _write_config(
     top_level_ansible: dict[str, object] | None = None,
 ) -> Path:
     cfg = tmp_path / "config.yml"
-    ansible_section: dict[str, object] = {
+    # SDK v2.0.0 profiles layout: the ansible PROFILE fields live under
+    # `profiles.default.ansible`; the ansible STATE (sources/aliases) stays
+    # top-level under `ansible`.
+    ansible_profile_section: dict[str, object] = {
         "index_path": str(tmp_path / "index.sqlite3"),
         "stale_after": 86400,
     }
+    data: dict[str, object] = {"profiles": {"default": {"ansible": ansible_profile_section}}}
     if top_level_ansible is not None:
-        ansible_section.update(top_level_ansible)
-    cfg.write_text(yaml.safe_dump({"ansible": ansible_section}, sort_keys=False))
+        data["ansible"] = dict(top_level_ansible)
+    cfg.write_text(yaml.safe_dump(data, sort_keys=False))
     return cfg
 
 

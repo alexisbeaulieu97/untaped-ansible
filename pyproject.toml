@@ -1,6 +1,6 @@
 [project]
 name = "untaped-ansible"
-version = "0.4.0"
+version = "0.5.0"
 description = "Ansible dependency graph CLI built on the untaped SDK."
 readme = "README.md"
 authors = [
@@ -11,8 +11,8 @@ dependencies = [
     "cyclopts>=4.16.0,<5",
     "pydantic>=2.13.3",
     "pyyaml>=6.0.3",
-    "untaped @ git+https://github.com/alexisbeaulieu97/untaped.git@v1.0.0",
-    "untaped-github @ git+https://github.com/alexisbeaulieu97/untaped-github.git@v0.6.0",
+    "untaped @ git+https://github.com/alexisbeaulieu97/untaped.git@v2.0.0",
+    "untaped-github @ git+https://github.com/alexisbeaulieu97/untaped-github.git@v0.7.0",
 ]
 
 [project.scripts]
