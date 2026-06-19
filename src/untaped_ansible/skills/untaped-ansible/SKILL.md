@@ -26,6 +26,7 @@ Use this skill when the user wants an agent to operate `untaped-ansible` for Ans
 - Inline source selectors are cached under a deterministic fingerprint key, so repeating the identical graph command reuses the scan.
 - `ansible.freshness_ttl` (seconds, opt-in; default unset = always check) lets graph skip the remote freshness check per source selection whose last scan is within the TTL, with one stderr info line per skipped selection. `--refresh` always probes; `--cached` always skips all checks.
 - Row-style commands (`alias list`, `source list`, `source show`, `source status`) accept `--format pipe` for typed NDJSON: `untaped-ansible source list --format pipe` emits one `{"untaped":"1","kind":"ansible.source","record":{...}}` line per row (kinds: `ansible.alias`, `ansible.source`, `ansible.source-status`). `graph` does not support `--format pipe`.
+- `source show` is a single entity: under `--format table` it renders a vertical key:value detail view, and under `--format json` it emits a bare object (`{…}`, not a one-element `[{…}]`). The collection commands (`source list`/`status`, `alias list`) still render tables and JSON arrays.
 
 ## Agent Guidance
 
