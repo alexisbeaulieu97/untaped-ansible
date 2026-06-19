@@ -330,17 +330,23 @@ def test_source_save_show_remove_updates_config(tmp_path: Path, monkeypatch) -> 
 
     result = runner.invoke(app, ["source", "show", "prod", "--format", "json"])
     assert result.exit_code == 0, result.output
-    assert json.loads(result.stdout) == [
-        {
-            "name": "prod",
-            "orgs": ["acme"],
-            "teams": ["acme/platform"],
-            "repos": ["acme/site"],
-            "dependency_paths": ["deploy/requirements.yml"],
-            "ref_kinds": ["heads"],
-            "ref_patterns": ["release/*"],
-        }
-    ]
+    # A single source renders as a bare object {…} via emit (not [{…}]).
+    assert json.loads(result.stdout) == {
+        "name": "prod",
+        "orgs": ["acme"],
+        "teams": ["acme/platform"],
+        "repos": ["acme/site"],
+        "dependency_paths": ["deploy/requirements.yml"],
+        "ref_kinds": ["heads"],
+        "ref_patterns": ["release/*"],
+    }
+
+    # A single source renders as a vertical detail view under the default
+    # config — not a boxed one-row table.
+    result = runner.invoke(app, ["source", "show", "prod", "--format", "table"])
+    assert result.exit_code == 0, result.output
+    assert "name: prod" in result.stdout
+    assert not any(ch in result.stdout for ch in "╭╮╰╯┌┐└┘│─")
 
     result = runner.invoke(app, ["source", "remove", "prod"])
     assert result.exit_code == 0, result.output

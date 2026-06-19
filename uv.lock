@@ -676,8 +676,8 @@ wheels = [
 
 [[package]]
 name = "untaped"
-version = "2.0.0"
-source = { git = "https://github.com/alexisbeaulieu97/untaped.git?rev=v2.0.0#57b9b57bd21f67e3a0f6f0f809ff6c9b0d533299" }
+version = "2.2.0"
+source = { git = "https://github.com/alexisbeaulieu97/untaped.git?rev=v2.2.0#ae573b76736ab5e62246415a0910ffb409e003fb" }
 dependencies = [
     { name = "cyclopts" },
     { name = "filelock" },
@@ -692,7 +692,7 @@ dependencies = [
 
 [[package]]
 name = "untaped-ansible"
-version = "0.5.0"
+version = "0.6.0"
 source = { editable = "." }
 dependencies = [
     { name = "cyclopts" },
@@ -718,8 +718,8 @@ requires-dist = [
     { name = "cyclopts", specifier = ">=4.16.0,<5" },
     { name = "pydantic", specifier = ">=2.13.3" },
     { name = "pyyaml", specifier = ">=6.0.3" },
-    { name = "untaped", git = "https://github.com/alexisbeaulieu97/untaped.git?rev=v2.0.0" },
-    { name = "untaped-github", git = "https://github.com/alexisbeaulieu97/untaped-github.git?rev=v0.7.0" },
+    { name = "untaped", git = "https://github.com/alexisbeaulieu97/untaped.git?rev=v2.2.0" },
+    { name = "untaped-github", git = "https://github.com/alexisbeaulieu97/untaped-github.git?rev=v0.8.0" },
 ]
 
 [package.metadata.requires-dev]
@@ -735,8 +735,8 @@ dev = [
 
 [[package]]
 name = "untaped-github"
-version = "0.7.0"
-source = { git = "https://github.com/alexisbeaulieu97/untaped-github.git?rev=v0.7.0#81b04619d0ec3e7dce8abb83a408cc2424abccd2" }
+version = "0.8.0"
+source = { git = "https://github.com/alexisbeaulieu97/untaped-github.git?rev=v0.8.0#efbe48f76f30d2f1a04400d81a5ddf663316943d" }
 dependencies = [
     { name = "cyclopts" },
     { name = "pydantic" },

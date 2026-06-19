@@ -14,6 +14,7 @@ from untaped.api import (
     app_context,
     create_app,
     echo,
+    emit,
     get_config_section,
     render_rows,
     report_errors,
@@ -233,7 +234,7 @@ def source_show_command(
         source = SourceRepository().get(name)
         if source is None:
             raise UntapedError(f"unknown source: {name!r}")
-        echo(render_rows([_source_row(source)], fmt=fmt, columns=columns, kind="ansible.source"))
+        emit(_source_row(source), fmt=fmt, columns=columns, kind="ansible.source")
 
 
 @app.command(name="remove")
