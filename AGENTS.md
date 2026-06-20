@@ -109,11 +109,11 @@ instead of reaching into each other's helpers.
 ## CLI Output Contracts
 
 Alias and source commands that emit row-style collections render through
-`untaped.render_rows`. For `--format table`, row collections honor the global
-`ui:` settings and registered theme plugins. For `--format json`, `yaml`, and
-`raw`, row collections bypass configured themes with a plain `UiContext()` so
-missing or invalid global themes cannot break structured or pipe-oriented
-output.
+`untaped.render_rows`. For `--format table`, row collections honor the
+per-profile `ui:` settings and SDK built-in themes. For `--format json`,
+`yaml`, and `raw`, row collections bypass configured themes with a plain
+`UiContext()` so missing or invalid configured themes cannot break structured
+or pipe-oriented output.
 
 The first key in each raw row remains load-bearing: `alias list --format raw`
 must emit aliases first, and source row commands must emit source names first
