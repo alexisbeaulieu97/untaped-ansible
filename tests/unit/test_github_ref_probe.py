@@ -7,7 +7,13 @@ from collections.abc import Sequence
 
 import pytest
 from untaped.api import HttpError, UntapedError
-from untaped_github import BatchRepoRefsResult, GithubGraphqlError, RepoRef, RepoRefs
+from untaped_github import (
+    BatchRepoRefsFailure,
+    BatchRepoRefsResult,
+    GithubGraphqlError,
+    RepoRef,
+    RepoRefs,
+)
 
 from untaped_ansible.domain.payloads import GitRef
 from untaped_ansible.infrastructure.github_ref_probe import GithubRefProbe
@@ -20,6 +26,7 @@ class FakeBatchClient:
         self.refs: dict[str, list[RepoRef]] = {}
         self.default_branches: dict[str, str | None] = {}
         self.missing: set[str] = set()
+        self.transient_failures: dict[str, str] = {}
         self.errors: dict[str, Exception] = {}
         self.rate_limits: list[int | None] = []
         self.calls: list[tuple[tuple[str, ...], tuple[str, ...], int]] = []
@@ -38,10 +45,22 @@ class FakeBatchClient:
             rate_limit = self.rate_limits.pop(0) if self.rate_limits else None
         found: list[RepoRefs] = []
         missing: list[str] = []
+        failures: list[BatchRepoRefsFailure] = []
         for repo in repos:
             error = self.errors.get(repo)
             if error is not None:
                 raise error
+            if repo in self.transient_failures:
+                failures.append(
+                    BatchRepoRefsFailure(
+                        full_name=repo,
+                        reason=self.transient_failures[repo],
+                        kind="server_error",
+                        status_code=502,
+                        url="https://api.github.com/graphql",
+                    )
+                )
+                continue
             if repo in self.missing:
                 missing.append(repo)
                 continue
@@ -55,6 +74,7 @@ class FakeBatchClient:
         return BatchRepoRefsResult(
             repos=tuple(found),
             missing=tuple(missing),
+            failures=tuple(failures),
             rate_limit_remaining=rate_limit,
         )
 
@@ -69,10 +89,22 @@ class FakeBatchClient:
             rate_limit = self.rate_limits.pop(0) if self.rate_limits else None
         found: list[RepoRefs] = []
         missing: list[str] = []
+        failures: list[BatchRepoRefsFailure] = []
         for repo in repos:
             error = self.errors.get(repo)
             if error is not None:
                 raise error
+            if repo in self.transient_failures:
+                failures.append(
+                    BatchRepoRefsFailure(
+                        full_name=repo,
+                        reason=self.transient_failures[repo],
+                        kind="server_error",
+                        status_code=502,
+                        url="https://api.github.com/graphql",
+                    )
+                )
+                continue
             if repo in self.missing:
                 missing.append(repo)
                 continue
@@ -90,6 +122,7 @@ class FakeBatchClient:
         return BatchRepoRefsResult(
             repos=tuple(found),
             missing=tuple(missing),
+            failures=tuple(failures),
             rate_limit_remaining=rate_limit,
         )
 
@@ -204,6 +237,39 @@ def test_probe_marks_failed_chunks_without_aborting_others() -> None:
     assert "acme/boom" in report.failures
     assert "502" in report.failures["acme/boom"]
     assert report.failures["acme/boom"].startswith("ref probe failed: ")
+
+
+def test_probe_marks_github_transient_failures_without_losing_successes() -> None:
+    client = FakeBatchClient()
+    client.refs["acme/ok"] = [RepoRef(kind="heads", name="main", sha="sha-ok")]
+    client.transient_failures["acme/flaky"] = "HTTP 502 for https://api.github.com/graphql"
+
+    report = GithubRefProbe(client, concurrency=1).probe(
+        ["acme/ok", "acme/flaky"],
+        kinds=("heads",),
+    )
+
+    assert set(report.repos) == {"acme/ok"}
+    assert report.failures == {
+        "acme/flaky": "transient ref probe failed: HTTP 502 for https://api.github.com/graphql"
+    }
+
+
+def test_probe_marks_default_branch_github_transient_failures() -> None:
+    client = FakeBatchClient()
+    client.default_branches["acme/ok"] = "main"
+    client.transient_failures["acme/flaky"] = "HTTP 502 for https://api.github.com/graphql"
+
+    report = GithubRefProbe(client, concurrency=1).probe(
+        ["acme/ok", "acme/flaky"],
+        kinds=("heads", "tags"),
+        mode="default_branch",
+    )
+
+    assert set(report.repos) == {"acme/ok"}
+    assert report.failures == {
+        "acme/flaky": "transient ref probe failed: HTTP 502 for https://api.github.com/graphql"
+    }
 
 
 def test_probe_marks_untaped_error_chunks_as_failures() -> None:

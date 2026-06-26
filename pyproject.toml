@@ -1,6 +1,6 @@
 [project]
 name = "untaped-ansible"
-version = "0.8.0"
+version = "0.9.0"
 description = "Ansible dependency graph CLI built on the untaped SDK."
 readme = "README.md"
 authors = [
@@ -12,7 +12,7 @@ dependencies = [
     "pydantic>=2.13.3",
     "pyyaml>=6.0.3",
     "untaped",
-    "untaped-github>=0.11.1",
+    "untaped-github>=0.12.0",
 ]
 
 [project.scripts]
@@ -111,4 +111,4 @@ exclude_also = [
 
 [tool.uv.sources]
 untaped = { git = "https://github.com/alexisbeaulieu97/untaped.git", rev = "v2.2.0" }
-untaped-github = { git = "https://github.com/alexisbeaulieu97/untaped-github.git", rev = "v0.11.1" }
+untaped-github = { git = "https://github.com/alexisbeaulieu97/untaped-github.git", rev = "v0.12.0" }

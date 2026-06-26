@@ -126,6 +126,9 @@ per-repo missing/inaccessible rather than a global SSO or token-scope failure.
 Per-repo failures do not abort a refresh: successful repos are committed,
 each failure is listed on stderr, and `source refresh` exits 1. When every
 repo fails, nothing is committed and the index is left untouched.
+Transient GraphQL ref-probe failures print an additional hint to rerun the
+same `source refresh` command; unchanged repos skip Git fetch and dependency
+scan work on the rerun.
 
 If the GraphQL budget drops below `ansible.source_refresh_rate_limit_floor`
 (default `500`) during a large refresh, successful repos are committed,

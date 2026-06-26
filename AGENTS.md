@@ -297,6 +297,9 @@ Source refresh is git-only for data transport. A refresh runs three phases:
    `rate_limit_remaining`, and `rate_limit_reset_at`; the CLI warns on stderr
    when remaining drops below `ansible.source_refresh_rate_limit_floor`
    (default 500). Do not reintroduce `git ls-remote` ref checks.
+   `BatchRepoRefsResult.failures` rows from `untaped-github` are transient
+   per-repo probe failures and should be surfaced as `transient ref probe
+   failed: ...`, not as global GraphQL access failures.
    Global `/graphql` access failures classified by
    `untaped_github.GithubGraphqlError` (rate limit, secondary rate
    limit, auth, forbidden, or unknown request-level failures) must
@@ -323,7 +326,9 @@ instead of aborting the run, and pruning is scoped to succeeded repos during
 partial commits: failed and untouched repos keep their previously cached refs
 and repo metadata. After the summary, `source refresh` echoes each
 `failed <repo>: <reason>` to stderr and exits 1
-(`refresh completed with N repo failure(s); successes were saved`); the graph
+(`refresh completed with N repo failure(s); successes were saved`). Transient
+ref probe failures also print a hint that a normal rerun is safe and unchanged
+repos skip Git fetch/dependency scan work. The graph
 refresh path instead prepends a graph warning and proceeds with possibly stale
 data for the failed repos.
 
