@@ -1,6 +1,6 @@
 [project]
 name = "untaped-ansible"
-version = "0.6.1"
+version = "0.6.2"
 description = "Ansible dependency graph CLI built on the untaped SDK."
 readme = "README.md"
 authors = [
@@ -111,4 +111,4 @@ exclude_also = [
 
 [tool.uv.sources]
 untaped = { git = "https://github.com/alexisbeaulieu97/untaped.git", rev = "v2.2.0" }
-untaped-github = { git = "https://github.com/alexisbeaulieu97/untaped-github.git", rev = "v0.9.2" }
+untaped-github = { git = "https://github.com/alexisbeaulieu97/untaped-github.git", rev = "v0.10.0" }
