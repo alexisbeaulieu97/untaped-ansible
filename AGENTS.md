@@ -164,7 +164,8 @@ bypasses `render_rows`, so it carries no typed-pipe envelope or `kind` tag.
 The SQLite cache and bare Git repository cache are tool-owned state. SQLite
 stores named and fingerprinted source scans, repo/ref scan metadata, per-source
 repo metadata such as exact default branch, resolved SHAs, graph edges,
-unresolved declarations, and timestamps. SHA is authoritative. Branch and tag
+unresolved declarations, resumable source-refresh progress, and timestamps.
+SHA is authoritative. Branch and tag
 names are resolved during source refresh and cached with freshness metadata.
 Ref scans point at dependency snapshots keyed by source repo, SHA, dependency
 path fingerprint, and alias fingerprint so multiple refs at the same commit can
@@ -215,14 +216,15 @@ tree/content fetches don't batch) and delegates its other batch reads to the
 wrapped index.
 
 `graph` is the primary user command. Downstream dependency reads do not require
-a source or cached data. When a source is configured, downstream graphing
-checks selected remote refs and prefers the refreshed cache; `--cached` skips
-that check and uses SQLite as-is, while `--live` is the explicit opt-in for live
-GitHub downstream reads. Upstream impact requires a saved or inline source with
-refreshed data: `both` degrades to downstream output with an actionable warning
-when upstream data is unavailable, while `upstream` fails early with the same
-guidance. `graph --refresh` still exists as an explicit refresh request, but
-source-backed graphing refreshes by default unless `--cached` is passed.
+a source or cached data. When a source is configured, source-backed graphing is
+cache-first: it reads only completed SQLite source data unless `--refresh` is
+passed. `--cached` is accepted as an explicit cache-only mode, while `--live`
+is the explicit opt-in for live GitHub downstream reads. Upstream impact
+requires a saved or inline source with refreshed data; any source-backed graph
+selection whose completed baseline is missing fails early with the exact
+refresh command instead of rendering partial upstream output. `graph --refresh`
+is the explicit source-refresh request and the only graph path that touches
+GitHub source inventory/probe APIs.
 Cached downstream traversal is strict about refs. If a dependency points at
 `repo@v1` and only `repo@main` is cached, traversal must warn and stop there
 instead of falling back to another cached ref.
@@ -237,16 +239,11 @@ before the command body runs. The cross-flag rule "`--refresh` requires `--sourc
 selectors" cannot be a group validator; it is the first statement of the
 command body so it fails (exit 2) before any settings or index construction.
 
-The default source-freshness check has an opt-in TTL: `ansible.freshness_ttl`
-(seconds, `ge=0`, default unset = always check). When set, the graph command
-skips the probe/refresh for any source selection whose last successful scan
-(`scanned_at` via index status) is within the TTL, emitting one stderr info
-line per skipped selection (`source '<label>' refreshed <age> ago (within
-freshness_ttl of <ttl>s); skipping check — pass --refresh to force`). The TTL
-is evaluated per selection, so a multi-source graph may skip fresh selections
-while probing stale ones. `freshness_ttl: 0` is equivalent to unset (always
-check). `--refresh` always probes regardless of TTL; `--cached` always skips
-every check (unchanged).
+`ansible.freshness_ttl` is deprecated. Graph no longer performs implicit
+freshness probes, so the setting does not affect graph defaults. Keep accepting
+it for existing profiles, but do not add new behavior that depends on it; users
+must pass `--refresh` or run `untaped-ansible source refresh NAME` when they
+want remote data checked.
 
 Stale-data and missing-cached-ref graph warnings carry the exact fix command.
 The application layer stays free of CLI strings: the CLI composes
@@ -258,9 +255,9 @@ Saved sources are configured under `ansible.sources`. `graph --source NAME` is
 repeatable; repeated saved sources are additive and graph reads union their
 existing `source:NAME` caches without creating a synthetic persisted source.
 Inline graph selectors (`--org`, `--team`, `--repo`, `--path`, `--ref-kind`,
-`--ref-pattern`) are cached under deterministic internal source keys so repeated
-commands can reuse the same scan. Do not reintroduce user-facing `scope`,
-`index`, or `--direction` workflow concepts.
+`--ref-pattern`, `--ref-scan-default`) are cached under deterministic internal
+source keys so repeated commands can reuse the same scan. Do not reintroduce
+user-facing `scope`, `index`, or `--direction` workflow concepts.
 
 Saved source edits are patch-style list mutations. `source edit NAME` adds,
 removes, or clears source selector lists without requiring the user to restate
@@ -270,27 +267,30 @@ leave stale selectors behind.
 
 Source refresh defaults to all branches and all tags through
 `ansible.ref_scan_default: all`. Users who need the older lower-cost behavior
-can set `ansible.ref_scan_default: default_branch`, which scans only each
-repo's default branch under `refs/heads/`. `--ref-pattern` narrows source refs
-across branches and tags unless paired with `--ref-kind`; `--ref-kind tags`
+can set `ansible.ref_scan_default: default_branch`, or
+`--ref-scan-default default_branch` on an individual saved or inline source,
+which scans only each repo's default branch under `refs/heads/` using
+`GithubClient.batch_default_branch_refs(...)`. `--ref-pattern` narrows source
+refs across branches and tags unless paired with `--ref-kind`; any explicit
+ref kind or pattern uses the all-ref GraphQL probe path. `--ref-kind tags`
 without a pattern scans all tags.
 
 Source refresh is git-only for data transport. A refresh runs three phases:
 
 1. **Expansion** resolves explicit repos, orgs, and teams into a deduped,
-   sorted repo list through a thread pool bounded by
-   `ansible.probe_concurrency`. Explicit repos win over org/team listings.
-   Expansion failures are fatal: an unknown org/team/repo is a source
-   misconfiguration, not a per-repo failure.
-2. **Freshness probe** is GraphQL-only: one `RefProbe.probe()` call
-   (`infrastructure/github_ref_probe.py` wrapping
-   `GithubClient.batch_repo_refs`) covers every repo with the union of
-   needed ref kinds, driving ~50-repo aliased chunks concurrently under
-   `ansible.probe_concurrency`. The probe also supplies each repo's exact
-   default branch (expansion metadata is the fallback) and the minimum
-   GraphQL `rate_limit_remaining` across chunks; the CLI warns on stderr
-   when that drops below 500. Do not reintroduce `git ls-remote` ref
-   checks.
+   sorted repo list through `untaped-github`'s public
+   `ResolveRepositoryInventory` API. Explicit repos win over org/team
+   listings. Expansion failures are fatal: an unknown org/team/repo is a
+   source misconfiguration, not a per-repo failure.
+2. **Freshness probe** is GraphQL-only and runs in repo-level batches so large
+   sources can pause and resume. `GithubRefProbe` wraps
+   `GithubClient.batch_repo_refs(...)` for all-ref scans and
+   `GithubClient.batch_default_branch_refs(...)` for default-branch-only
+   scans. The probe also supplies each repo's exact default branch (expansion
+   metadata is the fallback), cumulative `rate_limit_cost`, the minimum
+   GraphQL `rate_limit_remaining`, and `rate_limit_reset_at`; the CLI warns on
+   stderr when remaining drops below 500. Do not reintroduce `git ls-remote`
+   ref checks.
    Global `/graphql` access failures classified by
    `untaped_github.GithubGraphqlError` (rate limit, secondary rate
    limit, auth, forbidden, or unknown request-level failures) must
@@ -305,25 +305,35 @@ Source refresh is git-only for data transport. A refresh runs three phases:
 3. **Fetch/parse** keeps bare repositories under `ansible.repo_cache_path`,
    fetches only changed or missing refs (bounded by
    `ansible.git_fetch_concurrency` / `--concurrency`), reads dependency
-   files with Git object plumbing, and commits SQLite ref scans per
-   `(source_key, repo, ref_kind, ref_name)` in one atomic transaction.
+   files with Git object plumbing, and commits each processed repo batch
+   without updating the source-wide completed baseline until the expanded repo
+   queue is exhausted.
 
 Refresh is resilient to per-repo failures. Probe misses (missing or
 inaccessible repos) and per-repo fetch/parse errors (`GitCacheError`,
 `UntapedError`) are recorded as `RefreshResult.failures`
-instead of aborting the run, and pruning is scoped to succeeded repos: a
-failed repo's previously cached refs and repo metadata must survive the
-commit (`commit_source_ref_refresh(..., failed_repos=...)`). After the
-summary, `source refresh` echoes each `failed <repo>: <reason>` to stderr
-and exits 1 (`refresh completed with N repo failure(s); successes were
-saved`); the graph refresh path instead prepends a graph warning and
-proceeds with possibly stale data for the failed repos.
+instead of aborting the run, and pruning is scoped to succeeded repos during
+partial commits: failed and untouched repos keep their previously cached refs
+and repo metadata. After the summary, `source refresh` echoes each
+`failed <repo>: <reason>` to stderr and exits 1
+(`refresh completed with N repo failure(s); successes were saved`); the graph
+refresh path instead prepends a graph warning and proceeds with possibly stale
+data for the failed repos.
 
-When every expanded repo fails, there is nothing trustworthy to commit: the
-index commit is skipped entirely so cached data and `scanned_at` stay
-untouched and the run does not look fresh — staleness remains visible in
-`source status`. An empty expansion (zero repos) is a successful refresh,
-not a failure, and still commits (pruning now-unselected repos).
+Large refreshes are resumable. SQLite stores `source_refresh_progress` rows
+for the active source fingerprint. If the GraphQL budget drops below the
+built-in floor while repos remain, processed repos are committed, untouched
+repos/refs are preserved, the source-wide completed baseline timestamp is not
+updated, and the command exits 1 with a resume hint. Re-running the same source
+refresh skips completed progress rows and continues with the remaining repos.
+Only a budget-stop-free exhausted queue updates `source_runs`, prunes removed
+repos/refs, and clears refresh progress.
+
+When every expanded repo fails, there is nothing trustworthy to mark complete:
+cached data and `scanned_at` stay untouched and the run does not look fresh —
+staleness remains visible in `source status`. An empty expansion (zero repos)
+is a successful refresh, not a failure, and still completes (pruning
+now-unselected repos).
 
 The application layer stays UI-free: `RefreshGitSourceIndex` emits
 `RefreshProgressEvent` payloads (phase `expanding`/`probing`/`fetching`

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from configparser import ConfigParser
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -22,6 +21,7 @@ from untaped_github import GithubClient, GithubSettings
 import untaped_ansible.cli.source_commands as source_commands
 from untaped_ansible.application import BuildGraph, GraphRequest
 from untaped_ansible.application.ports import DependencyIndex
+from untaped_ansible.application.refresh_index import RefreshResult
 from untaped_ansible.cli._refresh import pluralize, run_source_refresh
 from untaped_ansible.domain.graph import DependencyGraph
 from untaped_ansible.domain.identity import IdentityResolver
@@ -59,7 +59,7 @@ def register_graph_command(app: App) -> None:
 _GRAPH_HELP = (
     "Graph Ansible dependency relationships for a role, repo, or playbook. "
     "Inline source selectors (--org, --team, --repo, --path, --ref-kind, "
-    "--ref-pattern) are cached under a deterministic fingerprint key, so "
+    "--ref-pattern, --ref-scan-default) are cached under a deterministic fingerprint key, so "
     "repeated identical invocations reuse the same scan. "
     "Examples: untaped-ansible graph acme/base --org acme --team platform "
     "--upstream --refresh; untaped-ansible graph acme/app --source prod "
@@ -204,6 +204,13 @@ def graph_command(
             consume_multiple=False,
         ),
     ] = None,
+    ref_scan_default: Annotated[
+        Literal["all", "default_branch"] | None,
+        Parameter(
+            name="--ref-scan-default",
+            help="Inline source scan strategy: all refs or only each repo's default branch.",
+        ),
+    ] = None,
     fmt: GraphFormatOption = "tree",
     output: Annotated[
         Path | None,
@@ -217,7 +224,9 @@ def graph_command(
       untaped-ansible graph acme/app --source prod --both --cached
       untaped-ansible graph ./roles/web --target-repo acme/web --downstream
     """
-    if refresh and not any((source, orgs, teams, source_repos, paths, ref_kinds, ref_patterns)):
+    if refresh and not any(
+        (source, orgs, teams, source_repos, paths, ref_kinds, ref_patterns, ref_scan_default)
+    ):
         raise_usage("--refresh requires --source or inline source selectors")
     with report_errors():
         ctx = app_context()
@@ -237,34 +246,15 @@ def graph_command(
             paths=paths,
             ref_kinds=ref_kinds,
             ref_patterns=ref_patterns,
+            ref_scan_default=ref_scan_default,
         )
         sqlite_index = SqliteDependencyIndex(settings.index_path)
         index: DependencyIndex = _dependency_index_for_graph_source(sqlite_index, graph_source)
-        should_refresh_source = _should_refresh_source(
-            source_state=graph_source,
-            direction=direction,
-            cached=cached,
-            live=live,
-            refresh=refresh,
-        )
+        should_refresh_source = refresh
         refresh_warnings: list[str] = []
         if should_refresh_source:
             github_settings = get_config_section("github", GithubSettings)
             for selection in graph_source.selections:
-                if not refresh:
-                    fresh_age = _within_freshness_ttl(
-                        sqlite_index,
-                        selection,
-                        ttl=settings.freshness_ttl,
-                    )
-                    if fresh_age is not None:
-                        echo(
-                            f"source '{selection.label}' refreshed {_human_age(fresh_age)} ago "
-                            f"(within freshness_ttl of {settings.freshness_ttl}s); "
-                            "skipping check — pass --refresh to force",
-                            err=True,
-                        )
-                        continue
                 result = run_source_refresh(
                     selection.definition,
                     source_key=selection.key,
@@ -278,6 +268,8 @@ def graph_command(
                     concurrency=git_concurrency,
                     ui=ctx.ui(strict=False),
                 )
+                if not result.completed:
+                    raise UntapedError(_refresh_pause_message(result, selection))
                 if result.failures:
                     refresh_warnings.append(
                         f"refresh of {selection.label} had "
@@ -290,7 +282,6 @@ def graph_command(
             source_state=graph_source,
             index=sqlite_index,
             direction=direction,
-            cached=cached,
         )
         refresh_hint = _refresh_hint(graph_source)
 
@@ -404,13 +395,14 @@ def _graph_source(
     paths: list[str] | None,
     ref_kinds: list[str] | None,
     ref_patterns: list[str] | None,
+    ref_scan_default: Literal["all", "default_branch"] | None,
 ) -> _GraphSource:
-    has_inline = any((orgs, teams, repos, paths, ref_kinds, ref_patterns))
+    has_inline = any((orgs, teams, repos, paths, ref_kinds, ref_patterns, ref_scan_default))
     selected_source_names = _dedupe_preserve_order(source_names or [])
     if selected_source_names and has_inline:
         raise_usage(
             "--source cannot be combined with --org, --team, --repo, --path, "
-            "--ref-kind, or --ref-pattern"
+            "--ref-kind, --ref-pattern, or --ref-scan-default"
         )
     if selected_source_names:
         source_repository = SourceRepository()
@@ -441,6 +433,7 @@ def _graph_source(
             paths=paths,
             ref_kinds=ref_kinds,
             ref_patterns=ref_patterns,
+            ref_scan_default=ref_scan_default,
         )
         key = source_commands._inline_source_key(source)
         return _GraphSource(
@@ -487,28 +480,12 @@ def _dependency_index_for_graph_source(
     )
 
 
-def _should_refresh_source(
-    *,
-    source_state: _GraphSource,
-    direction: GraphDirection,
-    cached: bool,
-    live: bool,
-    refresh: bool,
-) -> bool:
-    if refresh:
-        return True
-    if cached or not source_state.selections:
-        return False
-    return not (live and direction == "deps")
-
-
 def _effective_direction(
     *,
     target: str,
     source_state: _GraphSource,
     index: SqliteDependencyIndex,
     direction: GraphDirection,
-    cached: bool,
 ) -> tuple[GraphDirection, list[str]]:
     if not source_state.selections:
         if direction == "deps":
@@ -525,16 +502,11 @@ def _effective_direction(
     missing = tuple(
         selection for selection in source_state.selections if index.status(selection.key) is None
     )
-    if cached and source_state.saved and missing:
+    if missing:
         raise UntapedError(_missing_source_index_message(target, source_state, missing))
     if direction == "deps":
         return direction, []
-    if not missing:
-        return direction, []
-    message = _missing_source_index_message(target, source_state, missing)
-    if direction == "impact":
-        raise UntapedError(message)
-    return "deps", [f"upstream omitted: {message}"]
+    return direction, []
 
 
 def _missing_source_index_message(
@@ -683,35 +655,11 @@ def _source_refresh_commands(selections: tuple[_GraphSourceSelection, ...]) -> s
     )
 
 
-def _within_freshness_ttl(
-    index: SqliteDependencyIndex,
-    selection: _GraphSourceSelection,
-    *,
-    ttl: int | None,
-) -> timedelta | None:
-    """Age of the selection's last scan when within the TTL, None otherwise."""
-    if ttl is None:
-        return None
-    status = index.status(selection.key)
-    if status is None:
-        return None
-    age = datetime.now(UTC) - status.scanned_at
-    if age.total_seconds() > ttl:
-        return None
-    return age
-
-
-def _human_age(age: timedelta) -> str:
-    seconds = max(0, int(age.total_seconds()))
-    if seconds < 60:
-        return pluralize(seconds, "second")
-    minutes = seconds // 60
-    if minutes < 60:
-        return pluralize(minutes, "minute")
-    hours = minutes // 60
-    if hours < 24:
-        return pluralize(hours, "hour")
-    return pluralize(hours // 24, "day")
+def _refresh_pause_message(result: RefreshResult, selection: _GraphSourceSelection) -> str:
+    reason = result.pause_reason or "source refresh paused before completion"
+    if selection.key.startswith("source:"):
+        return f"{reason}; resume with `untaped-ansible source refresh {selection.label}`"
+    return f"{reason}; re-run this graph command with `--refresh` to resume"
 
 
 def _with_graph_warnings(graph: DependencyGraph, warnings: list[str]) -> DependencyGraph:

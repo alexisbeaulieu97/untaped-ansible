@@ -97,9 +97,10 @@ class FakeRefProbe:
         repos: Sequence[str],
         *,
         kinds: Sequence[str],
+        mode: str = "all",
         on_progress: Callable[[int, int], None] | None = None,
     ) -> ProbeReport:
-        self.calls.append((tuple(repos), tuple(kinds)))
+        self.calls.append((tuple(repos), tuple(kinds), mode))
         probed: dict[str, ProbedRepo] = {}
         failures: dict[str, str] = {}
         for repo in repos:
@@ -222,6 +223,21 @@ class SlowRefScanIndex:
     def commit_source_ref_refresh(self, source_key: str, **kwargs):
         return self._wrapped.commit_source_ref_refresh(source_key, **kwargs)
 
+    def commit_source_ref_partial_refresh(self, source_key: str, **kwargs):
+        return self._wrapped.commit_source_ref_partial_refresh(source_key, **kwargs)
+
+    def complete_source_ref_refresh(self, source_key: str, **kwargs):
+        return self._wrapped.complete_source_ref_refresh(source_key, **kwargs)
+
+    def refresh_progress(self, source_key: str, source_fingerprint: str):
+        return self._wrapped.refresh_progress(source_key, source_fingerprint)
+
+    def mark_refresh_progress(self, source_key: str, source_fingerprint: str, statuses):
+        return self._wrapped.mark_refresh_progress(source_key, source_fingerprint, statuses)
+
+    def clear_refresh_progress(self, source_key: str):
+        return self._wrapped.clear_refresh_progress(source_key)
+
 
 class CountingRefScanIndex:
     def __init__(self, wrapped: SqliteDependencyIndex) -> None:
@@ -238,6 +254,21 @@ class CountingRefScanIndex:
 
     def commit_source_ref_refresh(self, source_key: str, **kwargs):
         return self._wrapped.commit_source_ref_refresh(source_key, **kwargs)
+
+    def commit_source_ref_partial_refresh(self, source_key: str, **kwargs):
+        return self._wrapped.commit_source_ref_partial_refresh(source_key, **kwargs)
+
+    def complete_source_ref_refresh(self, source_key: str, **kwargs):
+        return self._wrapped.complete_source_ref_refresh(source_key, **kwargs)
+
+    def refresh_progress(self, source_key: str, source_fingerprint: str):
+        return self._wrapped.refresh_progress(source_key, source_fingerprint)
+
+    def mark_refresh_progress(self, source_key: str, source_fingerprint: str, statuses):
+        return self._wrapped.mark_refresh_progress(source_key, source_fingerprint, statuses)
+
+    def clear_refresh_progress(self, source_key: str):
+        return self._wrapped.clear_refresh_progress(source_key)
 
 
 def _make_refresh(
@@ -467,7 +498,7 @@ def test_git_refresh_fetches_selected_refs_and_indexes_dependency_files(tmp_path
     assert result.repos == 1
     assert result.refs == 1
     assert result.edges == 1
-    assert probe.calls == [(("acme/site",), ("heads",))]
+    assert probe.calls == [(("acme/site",), ("heads",), "default_branch")]
     assert git.fetches == [
         (
             "site",
@@ -511,7 +542,7 @@ def test_git_refresh_defaults_to_all_heads_and_tags(tmp_path: Path) -> None:
     )(SourceDefinition(name="prod", orgs=["acme"]), source_key="source:prod")
 
     assert result.refs == 2
-    assert probe.calls == [(("acme/site",), ("heads", "tags"))]
+    assert probe.calls == [(("acme/site",), ("heads", "tags"), "all")]
     assert git.fetches == [
         (
             "site",
@@ -545,7 +576,61 @@ def test_probe_kinds_follow_explicit_ref_kinds(tmp_path: Path) -> None:
         source_key="source:prod",
     )
 
-    assert probe.calls == [(("acme/site",), ("tags",))]
+    assert probe.calls == [(("acme/site",), ("tags",), "all")]
+
+
+def test_source_ref_scan_default_overrides_global_default(tmp_path: Path) -> None:
+    github = FakeGitHub()
+    git = FakeGitCache()
+    probe = FakeRefProbe()
+    probe.refs["acme/site"] = [
+        GitRef(kind="heads", name="main", sha="sha-main"),
+        GitRef(kind="tags", name="v1", sha="sha-v1"),
+    ]
+    index = SqliteDependencyIndex(tmp_path / "index.sqlite3")
+
+    _make_refresh(
+        github=github,
+        git=git,
+        probe=probe,
+        index=index,
+        tmp_path=tmp_path,
+        ref_scan_default="all",
+    )(
+        SourceDefinition(
+            name="prod",
+            orgs=["acme"],
+            ref_scan_default="default_branch",
+        ),
+        source_key="source:prod",
+    )
+
+    assert probe.calls == [(("acme/site",), ("heads",), "default_branch")]
+
+
+def test_default_branch_probe_is_not_used_with_explicit_ref_patterns(tmp_path: Path) -> None:
+    github = FakeGitHub()
+    git = FakeGitCache()
+    probe = FakeRefProbe()
+    probe.refs["acme/site"] = [
+        GitRef(kind="heads", name="main", sha="sha-main"),
+        GitRef(kind="heads", name="release", sha="sha-release"),
+    ]
+    index = SqliteDependencyIndex(tmp_path / "index.sqlite3")
+
+    _make_refresh(
+        github=github,
+        git=git,
+        probe=probe,
+        index=index,
+        tmp_path=tmp_path,
+        ref_scan_default="default_branch",
+    )(
+        SourceDefinition(name="prod", orgs=["acme"], ref_patterns=["release"]),
+        source_key="source:prod",
+    )
+
+    assert probe.calls == [(("acme/site",), ("heads", "tags"), "all")]
 
 
 def test_default_branch_comes_from_probe_with_expansion_fallback(tmp_path: Path) -> None:
@@ -672,6 +757,97 @@ def test_refresh_surfaces_probe_rate_limit(tmp_path: Path) -> None:
     )(SourceDefinition(name="prod", orgs=["acme"]), source_key="source:prod")
 
     assert result.rate_limit_remaining == 240
+
+
+def test_refresh_pauses_on_low_graphql_budget_and_resumes_remaining_repos(
+    tmp_path: Path,
+) -> None:
+    github = FakeGitHub()
+    git = FakeGitCache()
+    probe = FakeRefProbe()
+    probe.refs["acme/a"] = [GitRef(kind="heads", name="main", sha="sha-a")]
+    probe.refs["acme/b"] = [GitRef(kind="heads", name="main", sha="sha-b")]
+    git.files[("a", "sha-a", "roles/requirements.yml")] = "- src: https://github.com/acme/base-a\n"
+    git.files[("b", "sha-b", "roles/requirements.yml")] = "- src: https://github.com/acme/base-b\n"
+    index = SqliteDependencyIndex(tmp_path / "index.sqlite3")
+    refresh = _make_refresh(
+        github=github,
+        git=git,
+        probe=probe,
+        index=index,
+        tmp_path=tmp_path,
+        repo_batch_size=1,
+        rate_limit_floor=500,
+    )
+    source = SourceDefinition(name="prod", repos=["acme/a", "acme/b"])
+    probe.rate_limit_remaining = 200
+
+    first = refresh(source, source_key="source:prod")
+
+    assert first.completed is False
+    assert first.pause_reason == "GitHub GraphQL rate limit is low: 200 points remaining"
+    assert first.failures == ()
+    assert index.status("source:prod") is None
+    assert index.ref_scans("source:prod", "acme/a", [("heads", "main")])
+    assert index.ref_scans("source:prod", "acme/b", [("heads", "main")]) == {}
+
+    probe.rate_limit_remaining = 1200
+    second = refresh(source, source_key="source:prod")
+
+    assert second.completed is True
+    assert second.failures == ()
+    assert second.refs == 2
+    assert probe.calls == [
+        (("acme/a",), ("heads", "tags"), "all"),
+        (("acme/b",), ("heads", "tags"), "all"),
+    ]
+    status = index.status("source:prod")
+    assert status is not None
+    assert status.repos == 2
+    assert status.refs == 2
+
+
+def test_partial_refresh_prunes_removed_repos_only_after_completion(tmp_path: Path) -> None:
+    github = FakeGitHub()
+    git = FakeGitCache()
+    probe = FakeRefProbe()
+    probe.refs["acme/a"] = [GitRef(kind="heads", name="main", sha="sha-a")]
+    probe.refs["acme/b"] = [GitRef(kind="heads", name="main", sha="sha-b")]
+    probe.refs["acme/c"] = [GitRef(kind="heads", name="main", sha="sha-c")]
+    git.files[("a", "sha-a", "roles/requirements.yml")] = "- src: https://github.com/acme/base-a\n"
+    git.files[("b", "sha-b", "roles/requirements.yml")] = "- src: https://github.com/acme/base-b\n"
+    git.files[("c", "sha-c", "roles/requirements.yml")] = "- src: https://github.com/acme/base-c\n"
+    index = SqliteDependencyIndex(tmp_path / "index.sqlite3")
+    refresh = _make_refresh(
+        github=github,
+        git=git,
+        probe=probe,
+        index=index,
+        tmp_path=tmp_path,
+        repo_batch_size=1,
+        rate_limit_floor=500,
+    )
+    refresh(SourceDefinition(name="prod", repos=["acme/a", "acme/b"]), source_key="source:prod")
+
+    probe.rate_limit_remaining = 200
+    partial = refresh(
+        SourceDefinition(name="prod", repos=["acme/a", "acme/c"]),
+        source_key="source:prod",
+    )
+
+    assert partial.completed is False
+    assert index.ref_scans("source:prod", "acme/b", [("heads", "main")])
+    assert index.dependents("acme/base-b", None, source_key="source:prod")
+
+    probe.rate_limit_remaining = 1200
+    completed = refresh(
+        SourceDefinition(name="prod", repos=["acme/a", "acme/c"]),
+        source_key="source:prod",
+    )
+
+    assert completed.completed is True
+    assert index.ref_scans("source:prod", "acme/b", [("heads", "main")]) == {}
+    assert not index.dependents("acme/base-b", None, source_key="source:prod")
 
 
 def test_git_refresh_processes_repositories_concurrently_and_reports_change_counts(

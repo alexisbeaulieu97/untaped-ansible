@@ -1078,7 +1078,16 @@ def test_graph_repeated_sources_refresh_each_saved_source(
 
     result = CliInvoker().invoke(
         app,
-        ["graph", "acme/base", "--source", "platform", "--source", "ops", "--upstream"],
+        [
+            "graph",
+            "acme/base",
+            "--source",
+            "platform",
+            "--source",
+            "ops",
+            "--upstream",
+            "--refresh",
+        ],
     )
 
     assert result.exit_code == 0, result.output
@@ -1557,6 +1566,22 @@ def test_graph_refresh_without_source_fails_fast_with_usage_error() -> None:
     assert "--refresh requires --source or inline source selectors" in result.output
 
 
+def test_graph_refresh_accepts_ref_scan_default_as_inline_selector(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    cfg = _write_config(tmp_path)
+    monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
+
+    result = CliInvoker().invoke(
+        app,
+        ["graph", "acme/site", "--refresh", "--ref-scan-default", "default_branch"],
+    )
+
+    assert result.exit_code == 1
+    assert "source requires --org, --team, or --repo" in result.output
+
+
 def test_graph_source_conflicts_with_inline_selectors(tmp_path: Path, monkeypatch) -> None:
     cfg = _write_config(
         tmp_path,
@@ -1572,6 +1597,34 @@ def test_graph_source_conflicts_with_inline_selectors(tmp_path: Path, monkeypatc
 
     assert result.exit_code == 2
     assert "--source cannot be combined with --org, --team, --repo, --path" in output
+
+
+def test_graph_source_conflicts_with_ref_scan_default_selector(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    cfg = _write_config(
+        tmp_path,
+        top_level_ansible={"sources": [{"name": "platform", "orgs": ["acme"]}]},
+    )
+    monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
+
+    result = CliInvoker().invoke(
+        app,
+        [
+            "graph",
+            "acme/site",
+            "--source",
+            "platform",
+            "--ref-scan-default",
+            "default_branch",
+        ],
+    )
+    output = " ".join(result.output.replace("│", " ").split())
+
+    assert result.exit_code == 2
+    assert "--source cannot be combined with" in output
+    assert "--ref-scan-default" in output
 
 
 def test_source_save_validates_search_boundary_repo_and_ref_kind(
@@ -2139,57 +2192,36 @@ def test_source_refresh_allows_git_concurrency_override(tmp_path: Path, monkeypa
     assert "concurrency 5" in result.stderr
 
 
-def test_graph_with_source_refreshes_by_default_with_git_backend(
+def test_graph_with_source_uses_cache_by_default_with_git_backend(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
     index_path = tmp_path / "index.sqlite3"
+    _seed_index(
+        SqliteDependencyIndex(index_path),
+        "source:platform",
+        (
+            IndexedDependency(
+                source_repo="acme/site",
+                source_ref="main",
+                dependency_repo="acme/base",
+                dependency_name="base",
+                dependency_version=None,
+                source_path="roles/requirements.yml",
+            ),
+        ),
+    )
     cfg = _write_config(
         tmp_path,
         index_path=index_path,
         top_level_ansible={"sources": [{"name": "platform", "repos": ["acme/site"]}]},
     )
     monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
-    calls: list[int] = []
 
-    def fake_refresh(
-        source,
-        *,
-        source_key: str,
-        index: SqliteDependencyIndex,
-        aliases: dict[str, str],
-        settings,
-        github_settings,
-        http,
-        concurrency: int,
-        on_progress=None,
-    ) -> RefreshResult:
-        del source, aliases, settings
-        calls.append(concurrency)
-        _seed_index(
-            index,
-            source_key,
-            (
-                IndexedDependency(
-                    source_repo="acme/site",
-                    source_ref="main",
-                    dependency_repo="acme/base",
-                    dependency_name="base",
-                    dependency_version=None,
-                    source_path="roles/requirements.yml",
-                ),
-            ),
-        )
-        return RefreshResult(
-            source_key=source_key,
-            repos=1,
-            refs=1,
-            edges=1,
-            changed_refs=1,
-            unchanged_refs=0,
-        )
+    def fail_refresh(*args, **kwargs) -> RefreshResult:
+        raise AssertionError("graph must not refresh source data unless --refresh is passed")
 
-    monkeypatch.setattr(_refresh, "refresh_source", fake_refresh)
+    monkeypatch.setattr(_refresh, "refresh_source", fail_refresh)
 
     result = CliInvoker().invoke(
         app,
@@ -2197,10 +2229,30 @@ def test_graph_with_source_refreshes_by_default_with_git_backend(
     )
 
     assert result.exit_code == 0, result.output
-    assert calls == [4]
     assert "    +-- acme/site@main" in result.stdout
-    assert "1 changed, 0 unchanged" in result.stderr
-    assert "concurrency 4" in result.stderr
+    assert "changed" not in result.stderr
+
+
+def test_graph_with_source_missing_cache_fails_by_default(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    cfg = _write_config(
+        tmp_path,
+        index_path=tmp_path / "index.sqlite3",
+        top_level_ansible={"sources": [{"name": "platform", "repos": ["acme/site"]}]},
+    )
+    monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
+
+    result = CliInvoker().invoke(
+        app,
+        ["graph", "acme/base", "--source", "platform", "--both"],
+    )
+
+    assert result.exit_code == 1
+    assert result.stdout == ""
+    assert "no cached source data found for source 'platform'" in result.stderr
+    assert "untaped-ansible source refresh platform" in result.stderr
 
 
 def test_graph_inline_upstream_with_ref_renders_all_matching_source_refs(
@@ -2265,6 +2317,7 @@ def test_graph_inline_upstream_with_ref_renders_all_matching_source_refs(
             "--team",
             "platform",
             "--upstream",
+            "--refresh",
         ],
     )
 
@@ -2337,6 +2390,7 @@ def test_graph_inline_source_preserves_repeated_selectors(
             "--ref-pattern",
             "v*",
             "--upstream",
+            "--refresh",
         ],
     )
 
@@ -2349,6 +2403,52 @@ def test_graph_inline_source_preserves_repeated_selectors(
         "ref_kinds": ["heads", "tags"],
         "ref_patterns": ["main", "v*"],
     }
+
+
+def test_graph_inline_source_passes_ref_scan_default_to_refresh(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    index_path = tmp_path / "index.sqlite3"
+    cfg = _write_config(tmp_path, index_path=index_path)
+    monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
+    captured: dict[str, object] = {}
+
+    def fake_refresh(
+        source,
+        *,
+        source_key: str,
+        index: SqliteDependencyIndex,
+        aliases: dict[str, str],
+        settings,
+        github_settings,
+        http,
+        concurrency: int,
+        on_progress=None,
+    ) -> RefreshResult:
+        del aliases, settings, github_settings, http, concurrency, on_progress
+        captured["ref_scan_default"] = source.ref_scan_default
+        _seed_index(index, source_key)
+        return RefreshResult(source_key=source_key, repos=0, refs=0, edges=0)
+
+    monkeypatch.setattr(_refresh, "refresh_source", fake_refresh)
+
+    result = CliInvoker().invoke(
+        app,
+        [
+            "graph",
+            "acme/base",
+            "--repo",
+            "acme/site",
+            "--ref-scan-default",
+            "default_branch",
+            "--upstream",
+            "--refresh",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured == {"ref_scan_default": "default_branch"}
 
 
 def test_graph_cached_skips_source_refresh(tmp_path: Path, monkeypatch) -> None:
@@ -2434,7 +2534,7 @@ def _counting_refresh(calls: list[str]):
     return fake_refresh
 
 
-def test_graph_freshness_ttl_skips_remote_check_for_fresh_source(
+def test_graph_cache_first_ignores_freshness_ttl_for_fresh_source(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -2462,14 +2562,10 @@ def test_graph_freshness_ttl_skips_remote_check_for_fresh_source(
 
     assert result.exit_code == 0, result.output
     assert "    +-- acme/site@main" in result.stdout
-    assert "source 'platform' refreshed " in result.stderr
-    assert (
-        "ago (within freshness_ttl of 3600s); skipping check — pass --refresh to force"
-        in result.stderr
-    )
+    assert result.stderr == ""
 
 
-def test_graph_freshness_ttl_skip_message_reports_age_in_hours(
+def test_graph_cache_first_does_not_print_freshness_ttl_skip_message(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -2496,13 +2592,10 @@ def test_graph_freshness_ttl_skip_message_reports_age_in_hours(
         assert len(mock.calls) == 0
 
     assert result.exit_code == 0, result.output
-    assert (
-        "source 'platform' refreshed 3 hours ago (within freshness_ttl of 14400s); "
-        "skipping check — pass --refresh to force" in result.stderr
-    )
+    assert result.stderr == ""
 
 
-def test_graph_freshness_ttl_probes_source_that_was_never_scanned(
+def test_graph_cache_first_missing_source_fails_even_with_freshness_ttl(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -2522,9 +2615,9 @@ def test_graph_freshness_ttl_probes_source_that_was_never_scanned(
         ["graph", "acme/base", "--source", "platform", "--upstream"],
     )
 
-    assert result.exit_code == 0, result.output
-    assert calls == ["platform"]
-    assert "skipping check" not in result.stderr
+    assert result.exit_code == 1
+    assert calls == []
+    assert "no cached source data found for source 'platform'" in result.stderr
 
 
 def test_graph_freshness_ttl_with_refresh_flag_still_probes(
@@ -2558,7 +2651,7 @@ def test_graph_freshness_ttl_with_refresh_flag_still_probes(
     assert "skipping check" not in result.stderr
 
 
-def test_graph_freshness_ttl_still_probes_stale_source(
+def test_graph_cache_first_uses_stale_source_without_freshness_probe(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -2585,11 +2678,12 @@ def test_graph_freshness_ttl_still_probes_stale_source(
     )
 
     assert result.exit_code == 0, result.output
-    assert calls == ["platform"]
-    assert "skipping check" not in result.stderr
+    assert calls == []
+    assert "    +-- acme/site@main" in result.stdout
+    assert result.stderr == ""
 
 
-def test_graph_freshness_ttl_is_per_selection_for_mixed_sources(
+def test_graph_cache_first_ignores_freshness_ttl_for_mixed_sources(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -2637,9 +2731,8 @@ def test_graph_freshness_ttl_is_per_selection_for_mixed_sources(
     )
 
     assert result.exit_code == 0, result.output
-    assert calls == ["ops"]
-    assert "source 'platform' refreshed" in result.stderr
-    assert "source 'ops' refreshed" not in result.stderr
+    assert calls == []
+    assert result.stderr == ""
     assert "    +-- acme/site@main" in result.stdout
     assert "    +-- acme/deploy@main" in result.stdout
 
@@ -2686,6 +2779,29 @@ def test_source_save_expands_bare_team_slug_with_single_org(tmp_path: Path, monk
     assert yaml.safe_load(cfg.read_text())["ansible"]["sources"][0]["teams"] == ["acme/platform"]
 
 
+def test_source_save_records_ref_scan_default(tmp_path: Path, monkeypatch) -> None:
+    cfg = _write_config(tmp_path)
+    monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
+
+    result = CliInvoker().invoke(
+        app,
+        [
+            "source",
+            "save",
+            "prod",
+            "--repo",
+            "acme/site",
+            "--ref-scan-default",
+            "default_branch",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert yaml.safe_load(cfg.read_text())["ansible"]["sources"][0]["ref_scan_default"] == (
+        "default_branch"
+    )
+
+
 def test_source_refresh_partial_failure_exits_nonzero_and_saves_successes(
     tmp_path: Path,
     monkeypatch,
@@ -2713,6 +2829,53 @@ def test_source_refresh_partial_failure_exits_nonzero_and_saves_successes(
     assert SqliteDependencyIndex(index_path).ref_scans(
         "source:prod", "acme/ok", [("heads", "main")]
     )
+
+
+def test_source_refresh_budget_pause_exits_nonzero_without_repo_failures(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    cfg = _write_config(
+        tmp_path,
+        index_path=tmp_path / "index.sqlite3",
+        extra_profile={"github": {"token": "ghp_test"}},
+        top_level_ansible={"sources": [{"name": "prod", "repos": ["acme/a", "acme/b"]}]},
+    )
+    monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
+
+    def fake_refresh(
+        source,
+        *,
+        source_key: str,
+        index: SqliteDependencyIndex,
+        aliases: dict[str, str],
+        settings,
+        github_settings,
+        http,
+        concurrency: int,
+        on_progress=None,
+    ) -> RefreshResult:
+        del source, index, aliases, settings, github_settings, http, concurrency, on_progress
+        return RefreshResult(
+            source_key=source_key,
+            completed=False,
+            pause_reason="GitHub GraphQL rate limit is low: 200 points remaining",
+            repos=2,
+            refs=1,
+            edges=1,
+            changed_refs=1,
+            rate_limit_remaining=200,
+        )
+
+    monkeypatch.setattr(_refresh, "refresh_source", fake_refresh)
+
+    result = CliInvoker().invoke(app, ["source", "refresh", "prod"])
+
+    assert result.exit_code == 1
+    assert result.stdout == ""
+    assert "failed acme/" not in result.stderr
+    assert "GitHub GraphQL rate limit is low: 200 points remaining" in result.stderr
+    assert "resume with `untaped-ansible source refresh prod`" in result.stderr
 
 
 def test_source_refresh_all_failures_exits_nonzero_and_leaves_index_unchanged(
@@ -2883,6 +3046,61 @@ def test_graph_refresh_with_partial_failures_warns_and_proceeds(
         in result.stdout
     )
     assert "    +-- acme/site@main" in result.stdout
+
+
+def test_graph_refresh_budget_pause_exits_without_rendering_stale_graph(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    index_path = tmp_path / "index.sqlite3"
+    _seed_index(
+        SqliteDependencyIndex(index_path),
+        "source:platform",
+        (_fresh_platform_dependency(),),
+        scanned_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    cfg = _write_config(
+        tmp_path,
+        index_path=index_path,
+        top_level_ansible={"sources": [{"name": "platform", "repos": ["acme/site"]}]},
+    )
+    monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
+
+    def fake_refresh(
+        source,
+        *,
+        source_key: str,
+        index: SqliteDependencyIndex,
+        aliases: dict[str, str],
+        settings,
+        github_settings,
+        http,
+        concurrency: int,
+        on_progress=None,
+    ) -> RefreshResult:
+        del source, index, aliases, settings, github_settings, http, concurrency, on_progress
+        return RefreshResult(
+            source_key=source_key,
+            completed=False,
+            pause_reason="GitHub GraphQL rate limit is low: 200 points remaining",
+            repos=2,
+            refs=1,
+            edges=1,
+            changed_refs=1,
+            rate_limit_remaining=200,
+        )
+
+    monkeypatch.setattr(_refresh, "refresh_source", fake_refresh)
+
+    result = CliInvoker().invoke(
+        app,
+        ["graph", "acme/base", "--source", "platform", "--upstream", "--refresh"],
+    )
+
+    assert result.exit_code == 1
+    assert result.stdout == ""
+    assert "GitHub GraphQL rate limit is low: 200 points remaining" in result.stderr
+    assert "acme/site@main" not in result.stdout
 
 
 def test_graph_refresh_global_graphql_error_exits_without_rendering_stale_graph(

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Literal, Protocol
 
 from untaped.api import HttpError, UntapedError
 from untaped_github import GithubGraphqlError
@@ -27,6 +27,13 @@ class _BatchRepoRefsClient(Protocol):
         *,
         kinds: Sequence[str] = ("heads", "tags"),
         chunk_size: int = 50,
+    ) -> BatchRepoRefsResult: ...
+
+    def batch_default_branch_refs(
+        self,
+        repos: Sequence[str],
+        *,
+        chunk_size: int = 200,
     ) -> BatchRepoRefsResult: ...
 
 
@@ -59,8 +66,11 @@ class GithubRefProbe:
         repos: Sequence[str],
         *,
         kinds: Sequence[str],
+        mode: Literal["all", "default_branch"] = "all",
         on_progress: Callable[[int, int], None] | None = None,
     ) -> ProbeReport:
+        if mode not in {"all", "default_branch"}:
+            raise ValueError("mode must be 'all' or 'default_branch'")
         total = len(repos)
         chunks = [
             tuple(repos[start : start + self._chunk_size])
@@ -68,11 +78,13 @@ class GithubRefProbe:
         ]
         probed: dict[str, ProbedRepo] = {}
         failures: dict[str, str] = {}
+        rate_limit_cost: int | None = None
         rate_limit_remaining: int | None = None
+        rate_limit_reset_at = None
         done = 0
 
         def merge(chunk: tuple[str, ...], outcome: BatchRepoRefsResult | str) -> None:
-            nonlocal rate_limit_remaining
+            nonlocal rate_limit_cost, rate_limit_remaining, rate_limit_reset_at
             if isinstance(outcome, str):
                 failures.update(dict.fromkeys(chunk, outcome))
                 return
@@ -90,9 +102,15 @@ class GithubRefProbe:
                     if rate_limit_remaining is None
                     else min(rate_limit_remaining, outcome.rate_limit_remaining)
                 )
+            cost = getattr(outcome, "rate_limit_cost", None)
+            if cost is not None:
+                rate_limit_cost = cost if rate_limit_cost is None else rate_limit_cost + cost
+            reset_at = getattr(outcome, "rate_limit_reset_at", None)
+            if reset_at is not None:
+                rate_limit_reset_at = reset_at
 
         def probe_chunk(chunk: tuple[str, ...]) -> BatchRepoRefsResult | str:
-            return self._probe_chunk(chunk, kinds)
+            return self._probe_chunk(chunk, kinds, mode=mode)
 
         def record(chunk: tuple[str, ...], outcome: BatchRepoRefsResult | str) -> None:
             nonlocal done
@@ -103,15 +121,23 @@ class GithubRefProbe:
 
         bounded_map(probe_chunk, chunks, concurrency=self._concurrency, on_each=record)
         return ProbeReport(
-            repos=probed, failures=failures, rate_limit_remaining=rate_limit_remaining
+            repos=probed,
+            failures=failures,
+            rate_limit_cost=rate_limit_cost,
+            rate_limit_remaining=rate_limit_remaining,
+            rate_limit_reset_at=rate_limit_reset_at,
         )
 
     def _probe_chunk(
         self,
         chunk: tuple[str, ...],
         kinds: Sequence[str],
+        *,
+        mode: Literal["all", "default_branch"],
     ) -> BatchRepoRefsResult | str:
         try:
+            if mode == "default_branch":
+                return self._github.batch_default_branch_refs(chunk, chunk_size=len(chunk))
             return self._github.batch_repo_refs(chunk, kinds=kinds, chunk_size=len(chunk))
         except GithubGraphqlError:
             # Must precede the broad UntapedError catch: this is a global

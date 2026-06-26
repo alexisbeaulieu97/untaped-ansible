@@ -21,6 +21,19 @@ def test_source_definition_defaults_to_no_explicit_ref_filters() -> None:
 
     assert source.ref_kinds == []
     assert source.ref_patterns == []
+    assert source.ref_scan_default is None
+
+
+def test_source_definition_allows_per_source_ref_scan_default() -> None:
+    source = SourceDefinition(
+        name="prod",
+        repos=["acme/site"],
+        ref_scan_default="default_branch",
+    )
+
+    assert source.ref_scan_default == "default_branch"
+    with pytest.raises(ValidationError, match="ref_scan_default"):
+        SourceDefinition(name="prod", repos=["acme/site"], ref_scan_default="main")
 
 
 def test_source_definition_allows_tag_scans_without_ref_pattern() -> None:

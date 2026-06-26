@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from datetime import datetime
-from typing import Protocol
+from typing import Any, Literal, Protocol
 
 from untaped_ansible.domain import payloads
 
@@ -95,6 +95,50 @@ class IncrementalDependencyIndexWriter(Protocol):
         to ``keep``."""
         ...
 
+    def commit_source_ref_partial_refresh(
+        self,
+        source_key: str,
+        *,
+        scans: tuple[payloads.RefScan, ...],
+        touches: tuple[payloads.RefScanTouch, ...],
+        keep: set[tuple[str, str, str]],
+        repo_metadata: tuple[payloads.SourceRepoMetadata, ...] = (),
+        processed_repos: frozenset[str] = frozenset(),
+    ) -> None:
+        """Commit processed repos without updating the source-wide completion timestamp."""
+        ...
+
+    def complete_source_ref_refresh(
+        self,
+        source_key: str,
+        *,
+        source_repos: frozenset[str],
+        scanned_at: datetime,
+    ) -> None:
+        """Mark a source refresh complete and prune repos no longer selected."""
+        ...
+
+    def refresh_progress(
+        self,
+        source_key: str,
+        source_fingerprint: str,
+    ) -> dict[str, str]:
+        """Return processed repo statuses for a resumable refresh fingerprint."""
+        ...
+
+    def mark_refresh_progress(
+        self,
+        source_key: str,
+        source_fingerprint: str,
+        statuses: dict[str, str],
+    ) -> None:
+        """Persist processed repo statuses for a resumable refresh fingerprint."""
+        ...
+
+    def clear_refresh_progress(self, source_key: str) -> None:
+        """Clear resumable refresh state for a source."""
+        ...
+
 
 class RefProbe(Protocol):
     """Batched remote ref freshness probe for many repositories."""
@@ -104,6 +148,7 @@ class RefProbe(Protocol):
         repos: Sequence[str],
         *,
         kinds: Sequence[str],
+        mode: Literal["all", "default_branch"] = "all",
         on_progress: Callable[[int, int], None] | None = None,
     ) -> payloads.ProbeReport: ...
 
@@ -111,11 +156,11 @@ class RefProbe(Protocol):
 class GitHubDependencyReader(Protocol):
     """GitHub operations needed by dependency index refresh."""
 
-    def get_repository(self, owner: str, repo: str) -> dict[str, object]: ...
+    def get_repository(self, owner: str, repo: str) -> dict[str, Any]: ...
 
-    def list_org_repos(self, org: str) -> Iterable[dict[str, object]]: ...
+    def list_org_repos(self, org: str) -> Iterator[dict[str, Any]]: ...
 
-    def list_team_repos(self, org: str, team_slug: str) -> Iterable[dict[str, object]]: ...
+    def list_team_repos(self, org: str, team_slug: str) -> Iterator[dict[str, Any]]: ...
 
     def list_matching_refs(
         self, owner: str, repo: str, namespace: str

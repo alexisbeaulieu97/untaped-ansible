@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Literal, Self
 
 from pydantic import BaseModel, Field, model_validator
+from untaped_github import normalize_team_scopes
 
 DEFAULT_DEPENDENCY_PATHS = (
     "roles/requirements.yml",
@@ -29,6 +30,7 @@ class SourceDefinition(BaseModel):
     dependency_paths: list[str] = Field(default_factory=list)
     ref_kinds: list[str] = Field(default_factory=list)
     ref_patterns: list[str] = Field(default_factory=list)
+    ref_scan_default: Literal["all", "default_branch"] | None = None
 
     @model_validator(mode="after")
     def _validate_source(self) -> Self:
@@ -74,16 +76,7 @@ class AnsibleState(BaseModel):
 
 def normalize_team_refs(teams: list[str], orgs: list[str]) -> list[str]:
     """Expand bare team slugs when the source has one unambiguous org."""
-    normalized: list[str] = []
-    for team in teams:
-        if "/" in team:
-            normalized.append(team)
-            continue
-        if len(orgs) == 1:
-            normalized.append(f"{orgs[0]}/{team}")
-            continue
-        raise ValueError(f"team {team!r} must be ORG/SLUG unless the source has exactly one org")
-    return normalized
+    return [f"{scope.org}/{scope.slug}" for scope in normalize_team_scopes(teams, orgs=tuple(orgs))]
 
 
 def _dedupe_sorted(values: list[str]) -> list[str]:

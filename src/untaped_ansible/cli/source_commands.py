@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import Annotated
+from typing import Annotated, Literal
 
 from cyclopts import Parameter, validators
 from untaped.api import (
@@ -38,6 +38,13 @@ ConcurrencyOption = Annotated[
         name="--concurrency",
         validator=validators.Number(gte=1, lte=32),
         help="Git-backed source refresh concurrency; defaults to ansible.git_fetch_concurrency.",
+    ),
+]
+RefScanDefaultOption = Annotated[
+    Literal["all", "default_branch"] | None,
+    Parameter(
+        name="--ref-scan-default",
+        help="Source scan strategy: all refs or only each repo's default branch.",
     ),
 ]
 
@@ -90,6 +97,7 @@ def source_save_command(
             consume_multiple=False,
         ),
     ] = None,
+    ref_scan_default: RefScanDefaultOption = None,
 ) -> None:
     """Save a reusable GitHub source."""
     with report_errors():
@@ -101,6 +109,7 @@ def source_save_command(
             paths=paths,
             ref_kinds=ref_kinds,
             ref_patterns=ref_patterns,
+            ref_scan_default=ref_scan_default,
         )
         source_repo = SourceRepository()
         previous = source_repo.get(name)
@@ -169,6 +178,11 @@ def source_edit_command(
         Parameter(name="--remove-ref-pattern", consume_multiple=False),
     ] = None,
     clear_ref_patterns: Annotated[bool, Parameter(name="--clear-ref-pattern")] = False,
+    ref_scan_default: RefScanDefaultOption = None,
+    clear_ref_scan_default: Annotated[
+        bool,
+        Parameter(name="--clear-ref-scan-default"),
+    ] = False,
 ) -> None:
     """Patch a saved GitHub source definition."""
     with report_errors():
@@ -196,6 +210,8 @@ def source_edit_command(
             add_ref_patterns=add_ref_patterns,
             remove_ref_patterns=remove_ref_patterns,
             clear_ref_patterns=clear_ref_patterns,
+            ref_scan_default=ref_scan_default,
+            clear_ref_scan_default=clear_ref_scan_default,
         )
         if previous == edited:
             echo(f"source {name!r} unchanged", err=True)
@@ -316,7 +332,15 @@ def source_refresh_command(
         if result.failures:
             for failure in result.failures:
                 echo(f"failed {failure.repo}: {failure.reason}", err=True)
+        if not result.completed:
+            raise UntapedError(_refresh_pause_message(result, name))
+        if result.failures:
             raise UntapedError(_refresh_failure_message(result))
+
+
+def _refresh_pause_message(result: RefreshResult, name: str) -> str:
+    reason = result.pause_reason or "source refresh paused before completion"
+    return f"{reason}; resume with `untaped-ansible source refresh {name}`"
 
 
 def _refresh_failure_message(result: RefreshResult) -> str:
@@ -335,6 +359,7 @@ def _source_definition(
     paths: list[str] | None,
     ref_kinds: list[str] | None,
     ref_patterns: list[str] | None,
+    ref_scan_default: Literal["all", "default_branch"] | None = None,
 ) -> SourceDefinition:
     try:
         return SourceDefinition(
@@ -345,6 +370,7 @@ def _source_definition(
             dependency_paths=paths or [],
             ref_kinds=ref_kinds or [],
             ref_patterns=ref_patterns or [],
+            ref_scan_default=ref_scan_default,
         )
     except ValueError as exc:
         raise UntapedError(str(exc)) from exc
@@ -371,6 +397,8 @@ def _edit_source_definition(
     add_ref_patterns: list[str] | None,
     remove_ref_patterns: list[str] | None,
     clear_ref_patterns: bool,
+    ref_scan_default: Literal["all", "default_branch"] | None,
+    clear_ref_scan_default: bool,
 ) -> tuple[SourceDefinition, list[str]]:
     if not _source_edit_requested(
         add_orgs,
@@ -391,8 +419,12 @@ def _edit_source_definition(
         add_ref_patterns,
         remove_ref_patterns,
         clear_ref_patterns,
+        ref_scan_default,
+        clear_ref_scan_default,
     ):
         raise UntapedError("source edit requires at least one mutation flag")
+    if ref_scan_default is not None and clear_ref_scan_default:
+        raise UntapedError("--ref-scan-default cannot be combined with --clear-ref-scan-default")
 
     changes: list[str] = []
     orgs = _apply_source_list_edit(
@@ -449,6 +481,13 @@ def _edit_source_definition(
         clear=clear_ref_patterns,
         changes=changes,
     )
+    edited_ref_scan_default = source.ref_scan_default
+    if clear_ref_scan_default and edited_ref_scan_default is not None:
+        edited_ref_scan_default = None
+        changes.append("cleared ref-scan-default")
+    if ref_scan_default is not None and edited_ref_scan_default != ref_scan_default:
+        edited_ref_scan_default = ref_scan_default
+        changes.append(f"set ref-scan-default {ref_scan_default}")
     try:
         edited = SourceDefinition(
             name=source.name,
@@ -458,6 +497,7 @@ def _edit_source_definition(
             dependency_paths=dependency_paths,
             ref_kinds=ref_kinds,
             ref_patterns=ref_patterns,
+            ref_scan_default=edited_ref_scan_default,
         )
     except ValueError as exc:
         raise UntapedError(str(exc)) from exc
@@ -512,7 +552,7 @@ def _normalized_team_edit_values(values: list[str] | None, orgs: list[str]) -> l
 
 
 def _source_row(source: SourceDefinition) -> dict[str, object]:
-    return source.model_dump()
+    return source.model_dump(exclude_none=True)
 
 
 def _saved_source_key(name: str) -> str:
@@ -520,7 +560,7 @@ def _saved_source_key(name: str) -> str:
 
 
 def _inline_source_key(source: SourceDefinition) -> str:
-    payload = source.model_dump(exclude={"name"})
+    payload = source.model_dump(exclude={"name"}, exclude_none=True)
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     return f"inline:{hashlib.sha256(encoded).hexdigest()[:_FINGERPRINT_HEX_CHARS]}"
 
