@@ -31,6 +31,7 @@ from untaped_ansible.infrastructure import (
 from untaped_ansible.settings import AnsibleSettings, SourceDefinition, normalize_team_refs
 
 _FINGERPRINT_HEX_CHARS = 16
+_TRANSIENT_REF_PROBE_FAILURE_MARKER = "transient ref probe failed:"
 
 ConcurrencyOption = Annotated[
     int | None,
@@ -332,6 +333,8 @@ def source_refresh_command(
         if result.failures:
             for failure in result.failures:
                 echo(f"failed {failure.repo}: {failure.reason}", err=True)
+            if _has_transient_ref_probe_failure(result):
+                echo(_transient_ref_probe_rerun_hint(name), err=True)
         if not result.completed:
             raise UntapedError(_refresh_pause_message(result, name))
         if result.failures:
@@ -348,6 +351,17 @@ def _refresh_failure_message(result: RefreshResult) -> str:
     if count == result.repos:
         return f"refresh failed for all {pluralize(count, 'repo')}; index left unchanged"
     return f"refresh completed with {pluralize(count, 'repo failure')}; successes were saved"
+
+
+def _has_transient_ref_probe_failure(result: RefreshResult) -> bool:
+    return any(_TRANSIENT_REF_PROBE_FAILURE_MARKER in failure.reason for failure in result.failures)
+
+
+def _transient_ref_probe_rerun_hint(name: str) -> str:
+    return (
+        f"hint: rerun `untaped-ansible source refresh {name}`; unchanged repos skip Git fetch "
+        "and dependency scan work"
+    )
 
 
 def _source_definition(

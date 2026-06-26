@@ -2841,6 +2841,58 @@ def test_source_refresh_partial_failure_exits_nonzero_and_saves_successes(
     )
 
 
+def test_source_refresh_transient_probe_failure_prints_safe_rerun_hint(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    cfg = _write_config(
+        tmp_path,
+        index_path=tmp_path / "index.sqlite3",
+        extra_profile={"github": {"token": "ghp_test"}},
+        top_level_ansible={"sources": [{"name": "prod", "repos": ["acme/ok", "acme/flaky"]}]},
+    )
+    monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
+
+    def fake_refresh(
+        source,
+        *,
+        source_key: str,
+        index: SqliteDependencyIndex,
+        aliases: dict[str, str],
+        settings,
+        github_settings,
+        http,
+        concurrency: int,
+        on_progress=None,
+    ) -> RefreshResult:
+        del source, index, aliases, settings, github_settings, http, concurrency, on_progress
+        return RefreshResult(
+            source_key=source_key,
+            repos=2,
+            refs=1,
+            edges=0,
+            changed_refs=0,
+            unchanged_refs=1,
+            failures=(
+                RepoFailure(
+                    repo="acme/flaky",
+                    reason="transient ref probe failed: HTTP 502 for https://api.github.com/graphql",
+                ),
+            ),
+        )
+
+    monkeypatch.setattr(_refresh, "refresh_source", fake_refresh)
+
+    result = CliInvoker().invoke(app, ["source", "refresh", "prod"])
+
+    assert result.exit_code == 1
+    assert "failed acme/flaky: transient ref probe failed: HTTP 502" in result.stderr
+    assert (
+        "hint: rerun `untaped-ansible source refresh prod`; unchanged repos skip Git fetch "
+        "and dependency scan work"
+    ) in result.stderr
+
+
 def test_source_refresh_budget_pause_exits_nonzero_without_repo_failures(
     tmp_path: Path,
     monkeypatch,

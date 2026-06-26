@@ -17,6 +17,7 @@ if TYPE_CHECKING:
 ALL_REFS_GRAPHQL_CHUNK_SIZE = 50
 DEFAULT_BRANCH_GRAPHQL_CHUNK_SIZE = 100
 _MISSING_REASON = "repository not found or inaccessible on GitHub"
+_TRANSIENT_FAILURE_PREFIX = "transient ref probe failed: "
 
 
 class _BatchRepoRefsClient(Protocol):
@@ -101,6 +102,8 @@ class GithubRefProbe:
                     ),
                 )
             failures.update(dict.fromkeys(outcome.missing, _MISSING_REASON))
+            for failure in outcome.failures:
+                failures[failure.full_name] = _format_transient_failure(failure.reason)
             if outcome.rate_limit_remaining is not None:
                 rate_limit_remaining = (
                     outcome.rate_limit_remaining
@@ -152,3 +155,8 @@ class GithubRefProbe:
             # Provenance prefix: distinguishes probe transport failures from
             # git-fetch failures in `failed <repo>: <reason>` stderr listings.
             return f"ref probe failed: {str(exc) or type(exc).__name__}"
+
+
+def _format_transient_failure(reason: str) -> str:
+    detail = reason.strip() or "unknown transient GitHub GraphQL failure"
+    return f"{_TRANSIENT_FAILURE_PREFIX}{detail}"
