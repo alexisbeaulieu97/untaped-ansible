@@ -28,10 +28,10 @@ from untaped_ansible.infrastructure import (
     SourceRepository,
     SqliteDependencyIndex,
 )
+from untaped_ansible.infrastructure.github_ref_probe import is_transient_ref_probe_failure
 from untaped_ansible.settings import AnsibleSettings, SourceDefinition, normalize_team_refs
 
 _FINGERPRINT_HEX_CHARS = 16
-_TRANSIENT_REF_PROBE_FAILURE_MARKER = "transient ref probe failed:"
 
 ConcurrencyOption = Annotated[
     int | None,
@@ -354,7 +354,7 @@ def _refresh_failure_message(result: RefreshResult) -> str:
 
 
 def _has_transient_ref_probe_failure(result: RefreshResult) -> bool:
-    return any(_TRANSIENT_REF_PROBE_FAILURE_MARKER in failure.reason for failure in result.failures)
+    return any(is_transient_ref_probe_failure(failure.reason) for failure in result.failures)
 
 
 def _transient_ref_probe_rerun_hint(name: str) -> str:
