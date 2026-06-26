@@ -23,6 +23,7 @@ class FakeBatchClient:
         self.errors: dict[str, Exception] = {}
         self.rate_limits: list[int | None] = []
         self.calls: list[tuple[tuple[str, ...], tuple[str, ...], int]] = []
+        self.default_branch_calls: list[tuple[tuple[str, ...], int]] = []
         self._lock = threading.Lock()
 
     def batch_repo_refs(
@@ -49,6 +50,41 @@ class FakeBatchClient:
                     full_name=repo,
                     default_branch=self.default_branches.get(repo, "main"),
                     refs=tuple(ref for ref in self.refs.get(repo, []) if ref.kind in kinds),
+                )
+            )
+        return BatchRepoRefsResult(
+            repos=tuple(found),
+            missing=tuple(missing),
+            rate_limit_remaining=rate_limit,
+        )
+
+    def batch_default_branch_refs(
+        self,
+        repos: Sequence[str],
+        *,
+        chunk_size: int = 200,
+    ) -> BatchRepoRefsResult:
+        with self._lock:
+            self.default_branch_calls.append((tuple(repos), chunk_size))
+            rate_limit = self.rate_limits.pop(0) if self.rate_limits else None
+        found: list[RepoRefs] = []
+        missing: list[str] = []
+        for repo in repos:
+            error = self.errors.get(repo)
+            if error is not None:
+                raise error
+            if repo in self.missing:
+                missing.append(repo)
+                continue
+            branch = self.default_branches.get(repo, "main")
+            refs = ()
+            if branch is not None:
+                refs = (RepoRef(kind="heads", name=branch, sha=f"sha-{repo}-{branch}"),)
+            found.append(
+                RepoRefs(
+                    full_name=repo,
+                    default_branch=branch,
+                    refs=refs,
                 )
             )
         return BatchRepoRefsResult(
@@ -106,6 +142,24 @@ def test_probe_takes_min_rate_limit_across_chunks() -> None:
     report = GithubRefProbe(client, concurrency=1, chunk_size=1).probe(repos, kinds=("heads",))
 
     assert report.rate_limit_remaining == 4500
+
+
+def test_probe_can_use_default_branch_ref_query() -> None:
+    client = FakeBatchClient()
+    client.default_branches["acme/site"] = "trunk"
+
+    report = GithubRefProbe(client).probe(
+        ["acme/site"],
+        kinds=("heads", "tags"),
+        mode="default_branch",
+    )
+
+    assert report.repos["acme/site"].default_branch == "trunk"
+    assert report.repos["acme/site"].refs == (
+        GitRef(kind="heads", name="trunk", sha="sha-acme/site-trunk"),
+    )
+    assert client.calls == []
+    assert client.default_branch_calls == [(("acme/site",), 1)]
 
 
 def test_probe_marks_failed_chunks_without_aborting_others() -> None:

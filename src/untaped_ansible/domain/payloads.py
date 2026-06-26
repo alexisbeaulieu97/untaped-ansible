@@ -50,7 +50,9 @@ class ProbeReport(BaseModel):
 
     repos: dict[str, ProbedRepo] = Field(default_factory=dict)
     failures: dict[str, str] = Field(default_factory=dict)
+    rate_limit_cost: int | None = None
     rate_limit_remaining: int | None = None
+    rate_limit_reset_at: datetime | None = None
 
 
 class RepoFailure(BaseModel):

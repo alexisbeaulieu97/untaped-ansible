@@ -101,6 +101,98 @@ class SqliteDependencyIndex:
             _refresh_source_run_from_ref_scans(db, source_key, scanned_at=scanned_at)
             _delete_orphan_snapshots(db)
 
+    def commit_source_ref_partial_refresh(
+        self,
+        source_key: str,
+        *,
+        scans: tuple[RefScan, ...],
+        touches: tuple[RefScanTouch, ...],
+        keep: set[tuple[str, str, str]],
+        repo_metadata: tuple[SourceRepoMetadata, ...] = (),
+        processed_repos: frozenset[str] = frozenset(),
+    ) -> None:
+        """Commit processed repos without marking the whole source fresh."""
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        with self._db() as db:
+            _replace_ref_scans(db, scans)
+            _touch_ref_scans(db, touches)
+            _prune_source_refs_for_repos(db, source_key, keep, processed_repos)
+            _upsert_source_repo_metadata(db, repo_metadata)
+            _delete_orphan_snapshots(db)
+
+    def complete_source_ref_refresh(
+        self,
+        source_key: str,
+        *,
+        source_repos: frozenset[str],
+        scanned_at: datetime,
+    ) -> None:
+        """Mark a source refresh complete and prune repos outside the expanded source."""
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        with self._db() as db:
+            _prune_source_refs_to_repos(db, source_key, source_repos)
+            _prune_source_repo_metadata_to_repos(db, source_key, source_repos)
+            _refresh_source_run_from_ref_scans(db, source_key, scanned_at=scanned_at)
+            db.execute("delete from source_refresh_progress where source_key = ?", (source_key,))
+            _delete_orphan_snapshots(db)
+
+    def refresh_progress(
+        self,
+        source_key: str,
+        source_fingerprint: str,
+    ) -> dict[str, str]:
+        """Return processed repo statuses for the current refresh fingerprint."""
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        with self._db() as db:
+            db.execute(
+                """
+                delete from source_refresh_progress
+                where source_key = ? and source_fingerprint != ?
+                """,
+                (source_key, source_fingerprint),
+            )
+            rows = db.execute(
+                """
+                select source_repo, status
+                from source_refresh_progress
+                where source_key = ? and source_fingerprint = ?
+                """,
+                (source_key, source_fingerprint),
+            ).fetchall()
+        return {str(row["source_repo"]): str(row["status"]) for row in rows}
+
+    def mark_refresh_progress(
+        self,
+        source_key: str,
+        source_fingerprint: str,
+        statuses: dict[str, str],
+    ) -> None:
+        """Persist processed repo statuses for the current refresh fingerprint."""
+        if not statuses:
+            return
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        updated_at = dump_dt(datetime.now(UTC))
+        with self._db() as db:
+            db.executemany(
+                """
+                insert into source_refresh_progress(
+                    source_key, source_fingerprint, source_repo, status, updated_at
+                ) values (?, ?, ?, ?, ?)
+                on conflict(source_key, source_fingerprint, source_repo) do update set
+                    status = excluded.status,
+                    updated_at = excluded.updated_at
+                """,
+                [
+                    (source_key, source_fingerprint, repo, status, updated_at)
+                    for repo, status in sorted(statuses.items())
+                ],
+            )
+
+    def clear_refresh_progress(self, source_key: str) -> None:
+        """Clear resumable refresh state for a source."""
+        with self._db() as db:
+            db.execute("delete from source_refresh_progress where source_key = ?", (source_key,))
+
     def dependencies(
         self,
         repo: str,
@@ -253,12 +345,14 @@ class SqliteDependencyIndex:
                 db.execute("delete from source_ref_scans")
                 db.execute("delete from source_runs")
                 db.execute("delete from source_repo_metadata")
+                db.execute("delete from source_refresh_progress")
                 db.execute("delete from snapshot_edges")
                 db.execute("delete from dependency_snapshots")
                 return
             db.execute("delete from source_runs where source_key = ?", (source_key,))
             db.execute("delete from source_ref_scans where source_key = ?", (source_key,))
             db.execute("delete from source_repo_metadata where source_key = ?", (source_key,))
+            db.execute("delete from source_refresh_progress where source_key = ?", (source_key,))
             _delete_orphan_snapshots(db)
 
     def _select_edges_batch(
@@ -529,6 +623,26 @@ def _replace_source_repo_metadata(
     )
 
 
+def _upsert_source_repo_metadata(
+    db: sqlite3.Connection,
+    metadata: tuple[SourceRepoMetadata, ...],
+) -> None:
+    if not metadata:
+        return
+    db.executemany(
+        """
+        insert into source_repo_metadata(source_key, source_repo, default_branch)
+        values (?, ?, ?)
+        on conflict(source_key, source_repo) do update set
+            default_branch = excluded.default_branch
+        """,
+        [
+            (row.source_key, row.source_repo, row.default_branch)
+            for row in sorted(metadata, key=lambda item: (item.source_key, item.source_repo))
+        ],
+    )
+
+
 def _prune_source_refs(
     db: sqlite3.Connection,
     source_key: str,
@@ -557,6 +671,74 @@ def _prune_source_refs(
             """,
             [(source_key, repo, ref_kind, source_ref) for repo, ref_kind, source_ref in stale],
         )
+
+
+def _prune_source_refs_for_repos(
+    db: sqlite3.Connection,
+    source_key: str,
+    keep: set[tuple[str, str, str]],
+    processed_repos: frozenset[str],
+) -> None:
+    if not processed_repos:
+        return
+    placeholders = ",".join("?" for _ in processed_repos)
+    rows = db.execute(
+        f"""
+        select source_repo, ref_kind, source_ref
+        from source_ref_scans
+        where source_key = ? and source_repo in ({placeholders})
+        """,
+        (source_key, *sorted(processed_repos)),
+    ).fetchall()
+    stale: list[tuple[str, str, str]] = []
+    for row in rows:
+        key = (str(row["source_repo"]), str(row["ref_kind"]), str(row["source_ref"]))
+        if key not in keep:
+            stale.append(key)
+    if stale:
+        db.executemany(
+            """
+            delete from source_ref_scans
+            where source_key = ? and source_repo = ? and ref_kind = ? and source_ref = ?
+            """,
+            [(source_key, repo, ref_kind, source_ref) for repo, ref_kind, source_ref in stale],
+        )
+
+
+def _prune_source_refs_to_repos(
+    db: sqlite3.Connection,
+    source_key: str,
+    source_repos: frozenset[str],
+) -> None:
+    if not source_repos:
+        db.execute("delete from source_ref_scans where source_key = ?", (source_key,))
+        return
+    placeholders = ",".join("?" for _ in source_repos)
+    db.execute(
+        f"""
+        delete from source_ref_scans
+        where source_key = ? and source_repo not in ({placeholders})
+        """,
+        (source_key, *sorted(source_repos)),
+    )
+
+
+def _prune_source_repo_metadata_to_repos(
+    db: sqlite3.Connection,
+    source_key: str,
+    source_repos: frozenset[str],
+) -> None:
+    if not source_repos:
+        db.execute("delete from source_repo_metadata where source_key = ?", (source_key,))
+        return
+    placeholders = ",".join("?" for _ in source_repos)
+    db.execute(
+        f"""
+        delete from source_repo_metadata
+        where source_key = ? and source_repo not in ({placeholders})
+        """,
+        (source_key, *sorted(source_repos)),
+    )
 
 
 def _refresh_source_run_from_ref_scans(

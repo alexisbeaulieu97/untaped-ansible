@@ -12,6 +12,11 @@ from typing import Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict
 from untaped.api import UntapedError
+from untaped_github import (
+    RepositoryInventoryScope,
+    ResolveRepositoryInventory,
+    normalize_team_scopes,
+)
 
 from untaped_ansible._concurrency import bounded_map
 from untaped_ansible.application.ports import (
@@ -33,6 +38,7 @@ from untaped_ansible.domain.payloads import (
     GitRef,
     IndexedDependency,
     ProbedRepo,
+    ProbeReport,
     RefreshProgressEvent,
     RefScan,
     RefScanMetadata,
@@ -40,9 +46,10 @@ from untaped_ansible.domain.payloads import (
     RepoFailure,
     SourceRepoMetadata,
 )
-from untaped_ansible.settings import SourceDefinition, normalize_team_refs
+from untaped_ansible.settings import SourceDefinition
 
 ProgressCallback = Callable[[RefreshProgressEvent], None]
+ProbeMode = Literal["all", "default_branch"]
 
 # Errors a fetch/parse worker may raise: GitCacheError from the local Git
 # cache and UntapedError from the SQLite index. The worker has no HTTP path
@@ -134,6 +141,8 @@ class RefreshGitSourceIndex:
         ref_scan_default: RefScanDefault = "all",
         concurrency: int = 8,
         probe_concurrency: int = 8,
+        repo_batch_size: int = 100,
+        rate_limit_floor: int = 500,
         on_progress: ProgressCallback | None = None,
     ) -> None:
         if clone_protocol not in {"https", "ssh"}:
@@ -142,6 +151,10 @@ class RefreshGitSourceIndex:
             raise ValueError("concurrency must be between 1 and 32")
         if probe_concurrency < 1 or probe_concurrency > 32:
             raise ValueError("probe_concurrency must be between 1 and 32")
+        if repo_batch_size < 1:
+            raise ValueError("repo_batch_size must be >= 1")
+        if rate_limit_floor < 0:
+            raise ValueError("rate_limit_floor must be >= 0")
         self._github = github
         self._git = git
         self._probe = probe
@@ -156,72 +169,188 @@ class RefreshGitSourceIndex:
         self._ref_scan_default = ref_scan_default
         self._concurrency = concurrency
         self._probe_concurrency = probe_concurrency
+        self._repo_batch_size = repo_batch_size
+        self._rate_limit_floor = rate_limit_floor
         self._on_progress = on_progress
 
     def __call__(self, source: SourceDefinition, *, source_key: str) -> RefreshResult:
         repos = self._expand_repos(source)
-        probe_report = self._probe.probe(
-            [repo.full_name for repo in repos],
-            kinds=self._probe_kinds(source),
-            on_progress=self._probe_progress,
+        paths = source.dependency_paths or self._default_dependency_paths
+        paths_fingerprint = _dependency_paths_fingerprint(paths)
+        aliases_fingerprint = _aliases_fingerprint(self._aliases)
+        source_fingerprint = _source_refresh_fingerprint(
+            source,
+            repos=repos,
+            paths_fingerprint=paths_fingerprint,
+            aliases_fingerprint=aliases_fingerprint,
+            ref_scan_default=self._effective_ref_scan_default(source),
+            clone_protocol=self._clone_protocol,
+            fetch_depth=self._fetch_depth,
+            blob_filter=self._blob_filter,
         )
-        failures: dict[str, str] = dict(probe_report.failures)
-        tasks = [
-            self._repo_refresh_task(source, repo, probe_report.repos[repo.full_name])
-            for repo in repos
-            if repo.full_name in probe_report.repos
-        ]
-
+        progress = self._index.refresh_progress(source_key, source_fingerprint)
+        failures: dict[str, str] = {
+            repo: status.removeprefix("failure:")
+            for repo, status in progress.items()
+            if status.startswith("failure:")
+        }
+        successful_repos: set[str] = {
+            repo for repo, status in progress.items() if status == "success"
+        }
+        pending_repos = [repo for repo in repos if repo.full_name not in progress]
         selected: set[tuple[str, str, str]] = set()
         ignored_collections: set[str] = set()
-        paths = source.dependency_paths or self._default_dependency_paths
         checked_at = datetime.now(UTC)
-        pending_scans: list[RefScan] = []
-        pending_touches: list[RefScanTouch] = []
-        pending_repo_metadata: list[SourceRepoMetadata] = []
+        changed_refs = 0
+        unchanged_refs = 0
+        rate_limit_cost: int | None = None
+        rate_limit_remaining: int | None = None
+        rate_limit_reset_at: datetime | None = None
+        probe_kinds = self._probe_kinds(source)
+        probe_mode = self._probe_mode(source)
 
-        for full_name, outcome in self._refresh_repos(
-            tasks,
-            source_key=source_key,
-            paths=paths,
-            checked_at=checked_at,
-        ):
-            if isinstance(outcome, str):
-                failures[full_name] = outcome
-                continue
-            selected.update(outcome.selected)
-            ignored_collections.update(outcome.ignored_collections)
-            pending_scans.extend(outcome.scans)
-            pending_touches.extend(outcome.touches)
-            pending_repo_metadata.append(outcome.repo_metadata)
-
-        # When every repo failed there is nothing trustworthy to commit:
-        # leave cached data and freshness (scanned_at) untouched so the run
-        # does not look fresh. An empty source (zero repos expanded) is a
-        # successful refresh and still commits.
-        if not repos or len(failures) < len(repos):
-            self._index.commit_source_ref_refresh(
-                source_key,
-                scans=tuple(pending_scans),
-                touches=tuple(pending_touches),
-                keep=selected,
-                repo_metadata=tuple(pending_repo_metadata),
-                scanned_at=checked_at,
-                failed_repos=frozenset(failures),
+        for batch_index, batch in enumerate(_chunks(pending_repos, self._repo_batch_size)):
+            probe_report = self._probe.probe(
+                [repo.full_name for repo in batch],
+                kinds=probe_kinds,
+                mode=probe_mode,
+                on_progress=self._probe_progress,
             )
+            rate_limit_cost, rate_limit_remaining, rate_limit_reset_at = _merge_rate_limit(
+                rate_limit_cost,
+                rate_limit_remaining,
+                rate_limit_reset_at,
+                probe_report,
+            )
+            batch_failures: dict[str, str] = dict(probe_report.failures)
+            tasks = [
+                self._repo_refresh_task(source, repo, probe_report.repos[repo.full_name])
+                for repo in batch
+                if repo.full_name in probe_report.repos
+            ]
+            batch_selected: set[tuple[str, str, str]] = set()
+            batch_scans: list[RefScan] = []
+            batch_touches: list[RefScanTouch] = []
+            batch_repo_metadata: list[SourceRepoMetadata] = []
+            batch_statuses: dict[str, str] = {}
+
+            for full_name, outcome in self._refresh_repos(
+                tasks,
+                source_key=source_key,
+                paths=paths,
+                checked_at=checked_at,
+            ):
+                if isinstance(outcome, str):
+                    batch_failures[full_name] = outcome
+                    continue
+                successful_repos.add(full_name)
+                batch_statuses[full_name] = "success"
+                batch_selected.update(outcome.selected)
+                ignored_collections.update(outcome.ignored_collections)
+                batch_scans.extend(outcome.scans)
+                batch_touches.extend(outcome.touches)
+                batch_repo_metadata.append(outcome.repo_metadata)
+
+            for repo, reason in batch_failures.items():
+                failures[repo] = reason
+                batch_statuses[repo] = f"failure:{reason}"
+
+            if batch_statuses:
+                selected.update(batch_selected)
+                changed_refs += len(batch_scans)
+                unchanged_refs += len(batch_touches)
+                self._index.commit_source_ref_partial_refresh(
+                    source_key,
+                    scans=tuple(batch_scans),
+                    touches=tuple(batch_touches),
+                    keep=batch_selected,
+                    repo_metadata=tuple(batch_repo_metadata),
+                    processed_repos=frozenset(batch_statuses) - frozenset(batch_failures),
+                )
+                self._index.mark_refresh_progress(source_key, source_fingerprint, batch_statuses)
+
+            repos_left = len(pending_repos) - (batch_index + 1) * self._repo_batch_size
+            if (
+                repos_left > 0
+                and rate_limit_remaining is not None
+                and rate_limit_remaining < self._rate_limit_floor
+            ):
+                return self._refresh_result(
+                    source_key=source_key,
+                    repos=repos,
+                    selected=selected,
+                    ignored_collections=ignored_collections,
+                    changed_refs=changed_refs,
+                    unchanged_refs=unchanged_refs,
+                    failures=failures,
+                    rate_limit_cost=rate_limit_cost,
+                    rate_limit_remaining=rate_limit_remaining,
+                    rate_limit_reset_at=rate_limit_reset_at,
+                    completed=False,
+                    pause_reason=_rate_limit_pause_reason(rate_limit_remaining),
+                )
+
+        # When every expanded repo failed there is nothing trustworthy to mark
+        # complete: leave cached data and freshness untouched so the run does
+        # not look fresh. An empty source is a successful refresh and still
+        # prunes now-unselected repos.
+        if not repos or successful_repos:
+            self._index.complete_source_ref_refresh(
+                source_key,
+                source_repos=frozenset(repo.full_name for repo in repos),
+                scanned_at=checked_at,
+            )
+        else:
+            self._index.clear_refresh_progress(source_key)
+        return self._refresh_result(
+            source_key=source_key,
+            repos=repos,
+            selected=selected,
+            ignored_collections=ignored_collections,
+            changed_refs=changed_refs,
+            unchanged_refs=unchanged_refs,
+            failures=failures,
+            rate_limit_cost=rate_limit_cost,
+            rate_limit_remaining=rate_limit_remaining,
+            rate_limit_reset_at=rate_limit_reset_at,
+            completed=True,
+        )
+
+    def _refresh_result(
+        self,
+        *,
+        source_key: str,
+        repos: list[_RepoCandidate],
+        selected: set[tuple[str, str, str]],
+        ignored_collections: set[str],
+        changed_refs: int,
+        unchanged_refs: int,
+        failures: dict[str, str],
+        rate_limit_cost: int | None,
+        rate_limit_remaining: int | None,
+        rate_limit_reset_at: datetime | None,
+        completed: bool,
+        pause_reason: str | None = None,
+    ) -> RefreshResult:
         status = self._index.status(source_key)
+        refs = status.refs if completed and status is not None else len(selected)
+        edges = status.edges if completed and status is not None else 0
         return RefreshResult(
             source_key=source_key,
+            completed=completed,
+            pause_reason=pause_reason,
             repos=len(repos),
-            refs=len(selected),
-            edges=0 if status is None else status.edges,
+            refs=refs,
+            edges=edges,
             ignored_collections=tuple(sorted(ignored_collections)),
-            changed_refs=len(pending_scans),
-            unchanged_refs=len(pending_touches),
+            changed_refs=changed_refs,
+            unchanged_refs=unchanged_refs,
             failures=tuple(
                 RepoFailure(repo=repo, reason=failures[repo]) for repo in sorted(failures)
             ),
-            rate_limit_remaining=probe_report.rate_limit_remaining,
+            rate_limit_cost=rate_limit_cost,
+            rate_limit_remaining=rate_limit_remaining,
+            rate_limit_reset_at=rate_limit_reset_at,
         )
 
     def _refresh_repos(
@@ -273,9 +402,21 @@ class RefreshGitSourceIndex:
         selections = source_ref_selections(
             source,
             default_branch="HEAD",
-            ref_scan_default=self._ref_scan_default,
+            ref_scan_default=self._effective_ref_scan_default(source),
         )
         return tuple(dict.fromkeys(selection.kind for selection in selections))
+
+    def _effective_ref_scan_default(self, source: SourceDefinition) -> RefScanDefault:
+        return source.ref_scan_default or self._ref_scan_default
+
+    def _probe_mode(self, source: SourceDefinition) -> ProbeMode:
+        if (
+            self._effective_ref_scan_default(source) == "default_branch"
+            and not source.ref_kinds
+            and not source.ref_patterns
+        ):
+            return "default_branch"
+        return "all"
 
     def _repo_refresh_task(
         self,
@@ -287,7 +428,7 @@ class RefreshGitSourceIndex:
         selections = source_ref_selections(
             source,
             default_branch=default_branch,
-            ref_scan_default=self._ref_scan_default,
+            ref_scan_default=self._effective_ref_scan_default(source),
         )
         selected: dict[tuple[str, str], GitRef] = {}
         for selection in selections:
@@ -413,60 +554,21 @@ class RefreshGitSourceIndex:
         )
 
     def _expand_repos(self, source: SourceDefinition) -> list[_RepoCandidate]:
-        """Expand explicit repos, orgs, and teams into candidates, in parallel.
+        """Expand explicit repos, orgs, and teams into candidates.
 
         Expansion failures propagate: an unknown org/team/repo is a source
         misconfiguration, not a per-repo refresh failure.
         """
-        expansions: list[Callable[[], list[_RepoCandidate]]] = []
-
-        def expand_repo(repo: str) -> Callable[[], list[_RepoCandidate]]:
-            owner, name = repo.split("/", maxsplit=1)
-            return lambda: [
-                _repo_candidate(self._github.get_repository(owner, name), fallback=repo)
-            ]
-
-        def expand_org(org: str) -> Callable[[], list[_RepoCandidate]]:
-            return lambda: _repo_candidates(self._github.list_org_repos(org))
-
-        def expand_team(team: str) -> Callable[[], list[_RepoCandidate]]:
-            org, slug = _split_team(team)
-            return lambda: _repo_candidates(self._github.list_team_repos(org, slug))
-
-        explicit_count = len(source.repos)
-        expansions.extend(expand_repo(repo) for repo in source.repos)
-        expansions.extend(expand_org(org) for org in source.orgs)
-        expansions.extend(
-            expand_team(team) for team in normalize_team_refs(source.teams, source.orgs)
+        selector_count = len(source.repos) + len(source.orgs) + len(source.teams)
+        inventory = ResolveRepositoryInventory(self._github)(
+            RepositoryInventoryScope(
+                orgs=tuple(source.orgs),
+                teams=normalize_team_scopes(source.teams, orgs=tuple(source.orgs)),
+                repos=tuple(source.repos),
+            )
         )
-
-        results = self._run_expansions(expansions)
-
-        repos: dict[str, _RepoCandidate] = {}
-        for index, candidates in enumerate(results):
-            for candidate in candidates:
-                if index < explicit_count:
-                    repos[candidate.full_name] = candidate
-                else:
-                    repos.setdefault(candidate.full_name, candidate)
-        return [repos[name] for name in sorted(repos)]
-
-    def _run_expansions(
-        self,
-        expansions: list[Callable[[], list[_RepoCandidate]]],
-    ) -> list[list[_RepoCandidate]]:
-        total = len(expansions)
-        results: dict[int, list[_RepoCandidate]] = {}
-
-        def expand(index: int) -> list[_RepoCandidate]:
-            return expansions[index]()
-
-        def record(index: int, candidates: list[_RepoCandidate]) -> None:
-            results[index] = candidates
-            self._emit_progress("expanding", done=len(results), total=total)
-
-        bounded_map(expand, range(total), concurrency=self._probe_concurrency, on_each=record)
-        return [results[index] for index in range(total)]
+        self._emit_progress("expanding", done=selector_count, total=selector_count)
+        return [_repo_candidate(item.model_dump(), fallback=None) for item in inventory]
 
     def _probe_progress(self, done: int, total: int) -> None:
         self._emit_progress("probing", done=done, total=total)
@@ -592,6 +694,60 @@ def _dependency_paths_fingerprint(paths: list[str]) -> str:
 def _aliases_fingerprint(aliases: dict[str, str]) -> str:
     payload = json.dumps(aliases, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(payload).hexdigest()
+
+
+def _source_refresh_fingerprint(
+    source: SourceDefinition,
+    *,
+    repos: list[_RepoCandidate],
+    paths_fingerprint: str,
+    aliases_fingerprint: str,
+    ref_scan_default: RefScanDefault,
+    clone_protocol: str,
+    fetch_depth: int,
+    blob_filter: bool,
+) -> str:
+    payload = {
+        "source": source.model_dump(mode="json", exclude={"name"}),
+        "repos": [repo.full_name for repo in repos],
+        "paths_fingerprint": paths_fingerprint,
+        "aliases_fingerprint": aliases_fingerprint,
+        "ref_scan_default": ref_scan_default,
+        "clone_protocol": clone_protocol,
+        "fetch_depth": fetch_depth,
+        "blob_filter": blob_filter,
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _merge_rate_limit(
+    current_cost: int | None,
+    current_remaining: int | None,
+    current_reset_at: datetime | None,
+    report: ProbeReport,
+) -> tuple[int | None, int | None, datetime | None]:
+    cost = current_cost
+    if report.rate_limit_cost is not None:
+        cost = report.rate_limit_cost if cost is None else cost + report.rate_limit_cost
+    remaining = current_remaining
+    if report.rate_limit_remaining is not None:
+        remaining = (
+            report.rate_limit_remaining
+            if remaining is None
+            else min(remaining, report.rate_limit_remaining)
+        )
+    reset_at = report.rate_limit_reset_at or current_reset_at
+    return cost, remaining, reset_at
+
+
+def _rate_limit_pause_reason(remaining: int) -> str:
+    return f"GitHub GraphQL rate limit is low: {remaining} points remaining"
+
+
+def _chunks[T](values: list[T], size: int) -> Iterable[list[T]]:
+    for start in range(0, len(values), size):
+        yield values[start : start + size]
 
 
 def _split_team(value: str) -> tuple[str, str]:

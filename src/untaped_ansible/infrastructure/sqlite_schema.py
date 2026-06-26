@@ -7,7 +7,7 @@ from pathlib import Path
 
 from untaped.api import UntapedError
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 _SCHEMA_SQL = """
 create table if not exists source_runs (
@@ -61,6 +61,15 @@ create table if not exists source_repo_metadata (
     primary key (source_key, source_repo)
 );
 
+create table if not exists source_refresh_progress (
+    source_key text not null,
+    source_fingerprint text not null,
+    source_repo text not null,
+    status text not null,
+    updated_at text not null,
+    primary key (source_key, source_fingerprint, source_repo)
+);
+
 create index if not exists idx_dependency_snapshots_identity
     on dependency_snapshots(
         source_repo, source_sha, dependency_paths_fingerprint, aliases_fingerprint
@@ -79,6 +88,8 @@ create index if not exists idx_source_ref_scans_source_snapshot
     on source_ref_scans(source_key, snapshot_id);
 create index if not exists idx_source_repo_metadata_source
     on source_repo_metadata(source_key, source_repo);
+create index if not exists idx_source_refresh_progress_source
+    on source_refresh_progress(source_key, source_fingerprint, source_repo);
 """
 
 

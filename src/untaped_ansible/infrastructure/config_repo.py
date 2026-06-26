@@ -72,7 +72,7 @@ class SourceRepository:
     def upsert(self, source: SourceDefinition) -> None:
         def _apply(state: dict[str, Any]) -> None:
             sources = [row for row in _source_rows(state) if row.get("name") != source.name]
-            sources.append(source.model_dump())
+            sources.append(source.model_dump(exclude_none=True))
             state[_SOURCES_KEY] = sources
 
         mutate_tool_state(_SECTION, _apply)

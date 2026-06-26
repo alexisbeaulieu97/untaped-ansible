@@ -18,13 +18,14 @@ Use this skill when the user wants an agent to operate `untaped-ansible` for Ans
 
 - `untaped-ansible graph` is the main command for downstream, upstream, and combined dependency views.
 - Saved sources are selected with repeatable `--source NAME`; repeated sources are additive.
-- Inline selectors such as `--org`, `--team`, `--repo`, `--path`, `--ref-kind`, and `--ref-pattern` are also additive where accepted.
-- `--cached` uses SQLite cache as-is; source-backed graphing refreshes by default unless cached mode is selected.
+- Inline selectors such as `--org`, `--team`, `--repo`, `--path`, `--ref-kind`, `--ref-pattern`, and `--ref-scan-default` are also additive where accepted.
+- Source-backed graphing is cache-first: it reads completed SQLite source data by default and touches GitHub only when `--refresh` is passed or `source refresh` is run. If no completed baseline exists, graph fails with the exact refresh command instead of rendering partial upstream output.
+- `--cached` uses SQLite cache as-is.
 - `--live` is the explicit opt-in for live GitHub downstream reads.
 - `--refresh`, `--cached`, and `--live` are mutually exclusive, as are `--upstream`, `--downstream`, and `--both`; conflicting flags are usage errors (exit 2). `--refresh` also requires `--source` or inline selectors.
 - `--team` accepts ORG/SLUG; a bare SLUG is allowed when exactly one `--org` is given and normalizes to ORG/SLUG.
 - Inline source selectors are cached under a deterministic fingerprint key, so repeating the identical graph command reuses the scan.
-- `ansible.freshness_ttl` (seconds, opt-in; default unset = always check) lets graph skip the remote freshness check per source selection whose last scan is within the TTL, with one stderr info line per skipped selection. `--refresh` always probes; `--cached` always skips all checks.
+- `ansible.freshness_ttl` is deprecated and no longer affects graph defaults; use `--refresh` or `source refresh NAME` when remote data should be checked.
 - Row-style commands (`alias list`, `source list`, `source show`, `source status`) accept `--format pipe` for typed NDJSON: `untaped-ansible source list --format pipe` emits one `{"untaped":"1","kind":"ansible.source","record":{...}}` line per row (kinds: `ansible.alias`, `ansible.source`, `ansible.source-status`). `graph` does not support `--format pipe`.
 - `source show` is a single entity: under `--format table` it renders a vertical key:value detail view, and under `--format json` it emits a bare object (`{…}`, not a one-element `[{…}]`). The collection commands (`source list`/`status`, `alias list`) still render tables and JSON arrays.
 
@@ -34,6 +35,8 @@ Use this skill when the user wants an agent to operate `untaped-ansible` for Ans
 - Do not collapse refs. A dependency at `repo@v1` is distinct from `repo@main`.
 - Upstream impact requires refreshed source data; if unavailable, prompt the user to refresh or configure sources.
 - Global GitHub GraphQL access failures from the `untaped-github` client (rate limit, secondary rate limit, auth, request-level forbidden, unknown) abort `source refresh` and source-backed `graph` once through the SDK error path. Do not treat these as per-repo failures or proceed with stale graph output. Known limitation: all-repo per-alias `FORBIDDEN` in a `200 OK` response still reports as per-repo missing/inaccessible.
-- `source refresh` is resilient to per-repo failures: successes are saved, each `failed <repo>: <reason>` is listed on stderr, and the command exits 1 with `refresh completed with N repo failure(s); successes were saved`. Treat that exit as partial success, not a hard failure. If every repo failed, nothing is committed: the index (including its freshness timestamp) is left unchanged and the command exits 1 with `refresh failed for all N repo(s); index left unchanged`. Graph refreshes warn instead and proceed with possibly stale data for failed repos.
+- `source refresh` expands orgs/teams/repos through the public `untaped-github` inventory API. All-ref scans use `batch_repo_refs`; per-source/global `default_branch` scans with no explicit ref filters use `batch_default_branch_refs`.
+- `source refresh` is resilient to per-repo failures: successes are saved, each `failed <repo>: <reason>` is listed on stderr, and the command exits 1 with `refresh completed with N repo failure(s); successes were saved`. Treat that exit as partial success, not a hard failure. If every repo failed, the completed baseline is left unchanged and the command exits 1 with `refresh failed for all N repo(s); index left unchanged`. Graph refreshes warn instead and proceed with possibly stale data for failed repos.
+- Large `source refresh` runs are resumable. If the GraphQL budget gets low while repos remain, processed repo batches are committed, untouched repos/refs are preserved, the source-wide completed timestamp is not updated, and the command exits 1 with a resume hint. Re-run the same `source refresh` command to continue.
 - Refresh progress and status print to stderr only; stdout stays machine-readable.
 - The SQLite index enforces a schema version; there are no migrations. On a version mismatch, commands fail with an actionable error naming the exact index file to delete and the `untaped-ansible source refresh NAME` command to run afterwards.

@@ -31,12 +31,12 @@ untaped-ansible skills install
 
 ```text
 untaped-ansible graph TARGET --downstream
-untaped-ansible graph TARGET --org acme --team platform --upstream
+untaped-ansible graph TARGET --org acme --team platform --upstream --refresh
 untaped-ansible graph TARGET --source platform --upstream --cached
 untaped-ansible graph TARGET --source platform --source ops --upstream --cached
 untaped-ansible graph TARGET --source platform --upstream
 untaped-ansible graph TARGET --source platform --downstream --live
-untaped-ansible graph TARGET --source platform --both --concurrency 12
+untaped-ansible graph TARGET --source platform --both --refresh --concurrency 12
 untaped-ansible graph TARGET --source platform --both --format mermaid --output deps.mmd
 untaped-ansible source save platform --org acme --team platform
 untaped-ansible source refresh platform --concurrency 12
@@ -74,21 +74,22 @@ refs without cached branch/tag metadata.
 Downstream graphs do not require a source or cached data. Local targets are read
 from disk. GitHub URL and `owner/repo` targets read declared dependencies live
 from GitHub when no source is configured. When `--source` or inline source
-selectors are present, graph checks the selected remote refs, updates changed
-repo/ref entries in SQLite, then reads from the cache; pass `--cached` to skip
-the remote freshness check, or `--live` to opt back into live GitHub reads for
-downstream traversal. Set `ansible.freshness_ttl` (seconds; unset by default,
-and `0` means unset) to skip that pre-graph check for sources refreshed within
-the TTL; `--refresh` always forces a refresh and `--cached` always skips the
-check regardless of the TTL.
+selectors are present, graph is cache-first: it reads only completed SQLite
+source data unless `--refresh` is passed. `--cached` is still accepted as an
+explicit cache-only mode, and `--live` opts downstream traversal back into
+live GitHub reads. `ansible.freshness_ttl` is deprecated and no longer affects
+graph defaults; use `--refresh` or `untaped-ansible source refresh NAME` when
+remote data should be checked.
 
 Upstream graphs are source-backed because GitHub impact analysis needs a
 search boundary. Repeat `--source` to union multiple saved source caches in one
-graph. Each saved source is refreshed under its own cache key unless `--cached`
-is passed. Use inline selectors for one-off work:
+graph. If a selected source has no completed baseline, graph fails with the
+exact refresh command instead of rendering partial upstream output. Use
+inline selectors for one-off work and pass `--refresh` when the inline cache
+needs to be created or updated:
 
 ```bash
-untaped-ansible graph acme/base --org acme --team platform --upstream
+untaped-ansible graph acme/base --org acme --team platform --upstream --refresh
 ```
 
 Git-backed source indexing is the default. The first source-backed run creates
@@ -96,18 +97,20 @@ bare repositories under `ansible.repo_cache_path`
 (`~/.untaped/ansible-repositories` by default), fetches only the selected refs,
 and reads dependency files from Git objects without checking out worktrees.
 Later runs fetch/check the same ref set and reparse only refs whose SHA, tag
-target, or dependency path configuration changed. Use `--cached` for the
-offline/fast path when you do not want remote checks.
+target, or dependency path configuration changed. Source-backed graphing uses
+that completed cache by default; run `untaped-ansible source refresh NAME` or
+pass graph `--refresh` when you want remote checks.
 
-A refresh runs in three phases. Org, team, and repo expansion runs in
-parallel, bounded by `ansible.probe_concurrency` (default `8`, accepts
-`1..32`). One batched GraphQL probe then checks every repo's refs — there is
-no per-repo `git ls-remote`. Finally, Git fetches only the repos whose refs
-changed, with per-repo concurrency bounded by `ansible.git_fetch_concurrency`
-(default `8`, accepts `1..32`); `ansible graph` and `ansible source refresh`
-both accept `--concurrency N` as a per-run override. Refresh progress is
-reported on stderr with repo/ref counts, changed and unchanged refs, edge count,
-elapsed time, and the Git concurrency used.
+A refresh runs in repo-level batches. Org, team, and repo expansion is
+resolved through the public `untaped-github` inventory API, with explicit repo
+metadata winning over org/team listings. Each batch uses the GraphQL ref probe
+— there is no per-repo `git ls-remote` — and carries GraphQL cost, remaining
+budget, and reset metadata. Git fetches only repos whose selected refs changed,
+with per-repo concurrency bounded by `ansible.git_fetch_concurrency` (default
+`8`, accepts `1..32`); `untaped-ansible graph --refresh` and
+`untaped-ansible source refresh` both accept `--concurrency N` as a per-run override.
+Refresh progress is reported on stderr with repo/ref counts, changed and
+unchanged refs, edge count, elapsed time, and the Git concurrency used.
 
 Global GitHub GraphQL access failures — rate limits, secondary rate limits,
 auth failures, or request-level forbidden responses from `/graphql` — abort the
@@ -121,10 +124,19 @@ Per-repo failures do not abort a refresh: successful repos are committed,
 each failure is listed on stderr, and `source refresh` exits 1. When every
 repo fails, nothing is committed and the index is left untouched.
 
+If the GraphQL budget drops below the built-in floor during a large refresh,
+processed repos are committed, untouched repos and refs are preserved, the
+source-wide completed timestamp is not updated, and the command exits 1 with a
+resume hint. Re-running the same source refresh resumes with the unprocessed
+repos. Removed repos/refs are pruned only after the expanded repo queue is
+exhausted without a budget stop.
+
 Source refreshes scan all branches and all tags by default
 (`ansible.ref_scan_default: all`). Set
 `ansible.ref_scan_default: default_branch` when runtime matters more than broad
-upstream coverage. `--ref-pattern` narrows source refs, so
+upstream coverage, or set `--ref-scan-default default_branch` on an individual
+saved or inline source. The default-branch strategy uses a cheaper GitHub
+query that does not request the `refs(...)` connection. `--ref-pattern` narrows source refs, so
 `--ref-pattern v3` scans matching branches and tags unless `--ref-kind` is also
 provided. `--ref-kind tags` without a pattern scans all tags. Patterns such as
 `--ref-pattern 'release/*'` filter the probed refs client-side; refs that
