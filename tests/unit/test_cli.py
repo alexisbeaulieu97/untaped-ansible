@@ -1566,20 +1566,30 @@ def test_graph_refresh_without_source_fails_fast_with_usage_error() -> None:
     assert "--refresh requires --source or inline source selectors" in result.output
 
 
-def test_graph_refresh_accepts_ref_scan_default_as_inline_selector(
+@pytest.mark.parametrize(
+    "modifier",
+    [
+        ["--path", "roles/requirements.yml"],
+        ["--ref-kind", "heads"],
+        ["--ref-pattern", "release/*"],
+        ["--ref-scan-default", "default_branch"],
+    ],
+)
+def test_graph_refresh_rejects_modifier_only_inline_source_selectors(
     tmp_path: Path,
     monkeypatch,
+    modifier: list[str],
 ) -> None:
     cfg = _write_config(tmp_path)
     monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
 
     result = CliInvoker().invoke(
         app,
-        ["graph", "acme/site", "--refresh", "--ref-scan-default", "default_branch"],
+        ["graph", "acme/site", "--refresh", *modifier],
     )
 
-    assert result.exit_code == 1
-    assert "source requires --org, --team, or --repo" in result.output
+    assert result.exit_code == 2, result.output
+    assert "--refresh requires --source or inline source selectors" in result.output
 
 
 def test_graph_source_conflicts_with_inline_selectors(tmp_path: Path, monkeypatch) -> None:
@@ -2983,6 +2993,29 @@ def test_source_refresh_warns_when_graphql_rate_limit_is_low(
 
     assert result.exit_code == 0, result.output
     assert "warning: GitHub GraphQL rate limit is low: 200 points remaining" in result.stderr
+
+
+def test_source_refresh_low_rate_limit_warning_uses_configured_floor(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    index_path = tmp_path / "index.sqlite3"
+    cfg = _write_config(
+        tmp_path,
+        index_path=index_path,
+        ansible_profile={"source_refresh_rate_limit_floor": 100},
+        extra_profile={"github": {"token": "ghp_test"}},
+        top_level_ansible={"sources": [{"name": "prod", "repos": ["acme/ok"]}]},
+    )
+    monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
+    _seed_unchanged_scan(monkeypatch, {"acme/ok": "sha-ok"})
+
+    with respx.mock(base_url="https://api.github.com") as mock:
+        _mock_refresh_repos(mock, {"acme/ok": "sha-ok"}, rate_limit_remaining=200)
+        result = CliInvoker().invoke(app, ["source", "refresh", "prod"])
+
+    assert result.exit_code == 0, result.output
+    assert "warning: GitHub GraphQL rate limit is low" not in result.stderr
 
 
 def test_graph_refresh_with_partial_failures_warns_and_proceeds(

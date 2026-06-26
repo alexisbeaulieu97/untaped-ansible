@@ -110,14 +110,20 @@ class SqliteDependencyIndex:
         keep: set[tuple[str, str, str]],
         repo_metadata: tuple[SourceRepoMetadata, ...] = (),
         processed_repos: frozenset[str] = frozenset(),
+        source_fingerprint: str | None = None,
+        progress_statuses: dict[str, str] | None = None,
     ) -> None:
         """Commit processed repos without marking the whole source fresh."""
+        if progress_statuses and source_fingerprint is None:
+            raise ValueError("source_fingerprint is required when progress_statuses are provided")
         self._path.parent.mkdir(parents=True, exist_ok=True)
         with self._db() as db:
             _replace_ref_scans(db, scans)
             _touch_ref_scans(db, touches)
             _prune_source_refs_for_repos(db, source_key, keep, processed_repos)
             _upsert_source_repo_metadata(db, repo_metadata)
+            if source_fingerprint is not None and progress_statuses:
+                _mark_refresh_progress(db, source_key, source_fingerprint, progress_statuses)
             _delete_orphan_snapshots(db)
 
     def complete_source_ref_refresh(
@@ -160,33 +166,6 @@ class SqliteDependencyIndex:
                 (source_key, source_fingerprint),
             ).fetchall()
         return {str(row["source_repo"]): str(row["status"]) for row in rows}
-
-    def mark_refresh_progress(
-        self,
-        source_key: str,
-        source_fingerprint: str,
-        statuses: dict[str, str],
-    ) -> None:
-        """Persist processed repo statuses for the current refresh fingerprint."""
-        if not statuses:
-            return
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        updated_at = dump_dt(datetime.now(UTC))
-        with self._db() as db:
-            db.executemany(
-                """
-                insert into source_refresh_progress(
-                    source_key, source_fingerprint, source_repo, status, updated_at
-                ) values (?, ?, ?, ?, ?)
-                on conflict(source_key, source_fingerprint, source_repo) do update set
-                    status = excluded.status,
-                    updated_at = excluded.updated_at
-                """,
-                [
-                    (source_key, source_fingerprint, repo, status, updated_at)
-                    for repo, status in sorted(statuses.items())
-                ],
-            )
 
     def clear_refresh_progress(self, source_key: str) -> None:
         """Clear resumable refresh state for a source."""
@@ -788,6 +767,29 @@ def _refresh_source_run_from_ref_scans(
             refs,
             int(edge_row["edges"] or 0),
         ),
+    )
+
+
+def _mark_refresh_progress(
+    db: sqlite3.Connection,
+    source_key: str,
+    source_fingerprint: str,
+    statuses: dict[str, str],
+) -> None:
+    updated_at = dump_dt(datetime.now(UTC))
+    db.executemany(
+        """
+        insert into source_refresh_progress(
+            source_key, source_fingerprint, source_repo, status, updated_at
+        ) values (?, ?, ?, ?, ?)
+        on conflict(source_key, source_fingerprint, source_repo) do update set
+            status = excluded.status,
+            updated_at = excluded.updated_at
+        """,
+        [
+            (source_key, source_fingerprint, repo, status, updated_at)
+            for repo, status in sorted(statuses.items())
+        ],
     )
 
 

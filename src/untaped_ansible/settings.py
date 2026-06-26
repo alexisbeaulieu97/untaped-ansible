@@ -63,6 +63,8 @@ class AnsibleSettings(BaseModel):
     git_fetch_depth: int = Field(default=1, ge=0)
     git_fetch_concurrency: int = Field(default=8, ge=1, le=32)
     probe_concurrency: int = Field(default=8, ge=1, le=32)
+    source_refresh_repo_batch_size: int = Field(default=100, ge=1)
+    source_refresh_rate_limit_floor: int = Field(default=500, ge=0)
     git_blob_filter: bool = True
     dependency_paths: list[str] = Field(default_factory=lambda: list(DEFAULT_DEPENDENCY_PATHS))
 

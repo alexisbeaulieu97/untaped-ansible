@@ -140,7 +140,6 @@ class RefreshGitSourceIndex:
         auth_header: str | None,
         ref_scan_default: RefScanDefault = "all",
         concurrency: int = 8,
-        probe_concurrency: int = 8,
         repo_batch_size: int = 100,
         rate_limit_floor: int = 500,
         on_progress: ProgressCallback | None = None,
@@ -149,8 +148,6 @@ class RefreshGitSourceIndex:
             raise ValueError("clone_protocol must be 'https' or 'ssh'")
         if concurrency < 1 or concurrency > 32:
             raise ValueError("concurrency must be between 1 and 32")
-        if probe_concurrency < 1 or probe_concurrency > 32:
-            raise ValueError("probe_concurrency must be between 1 and 32")
         if repo_batch_size < 1:
             raise ValueError("repo_batch_size must be >= 1")
         if rate_limit_floor < 0:
@@ -168,7 +165,6 @@ class RefreshGitSourceIndex:
         self._auth_header = auth_header if clone_protocol == "https" else None
         self._ref_scan_default = ref_scan_default
         self._concurrency = concurrency
-        self._probe_concurrency = probe_concurrency
         self._repo_batch_size = repo_batch_size
         self._rate_limit_floor = rate_limit_floor
         self._on_progress = on_progress
@@ -189,15 +185,11 @@ class RefreshGitSourceIndex:
             blob_filter=self._blob_filter,
         )
         progress = self._index.refresh_progress(source_key, source_fingerprint)
-        failures: dict[str, str] = {
-            repo: status.removeprefix("failure:")
-            for repo, status in progress.items()
-            if status.startswith("failure:")
-        }
+        failures: dict[str, str] = {}
         successful_repos: set[str] = {
             repo for repo, status in progress.items() if status == "success"
         }
-        pending_repos = [repo for repo in repos if repo.full_name not in progress]
+        pending_repos = [repo for repo in repos if repo.full_name not in successful_repos]
         selected: set[tuple[str, str, str]] = set()
         ignored_collections: set[str] = set()
         checked_at = datetime.now(UTC)
@@ -253,7 +245,6 @@ class RefreshGitSourceIndex:
 
             for repo, reason in batch_failures.items():
                 failures[repo] = reason
-                batch_statuses[repo] = f"failure:{reason}"
 
             if batch_statuses:
                 selected.update(batch_selected)
@@ -265,9 +256,10 @@ class RefreshGitSourceIndex:
                     touches=tuple(batch_touches),
                     keep=batch_selected,
                     repo_metadata=tuple(batch_repo_metadata),
-                    processed_repos=frozenset(batch_statuses) - frozenset(batch_failures),
+                    processed_repos=frozenset(batch_statuses),
+                    source_fingerprint=source_fingerprint,
+                    progress_statuses=batch_statuses,
                 )
-                self._index.mark_refresh_progress(source_key, source_fingerprint, batch_statuses)
 
             repos_left = len(pending_repos) - (batch_index + 1) * self._repo_batch_size
             if (
@@ -658,10 +650,6 @@ def _exact_refspec(ref: GitRef) -> str:
     return f"+{full_ref}:{full_ref}"
 
 
-def _repo_candidates(rows: Iterable[dict[str, object]]) -> list[_RepoCandidate]:
-    return [_repo_candidate(row, fallback=None) for row in rows if _str(row.get("full_name"))]
-
-
 def _repo_candidate(row: dict[str, object], *, fallback: str | None) -> _RepoCandidate:
     full_name = _str(row.get("full_name")) or fallback
     if full_name is None:
@@ -709,7 +697,7 @@ def _source_refresh_fingerprint(
 ) -> str:
     payload = {
         "source": source.model_dump(mode="json", exclude={"name"}),
-        "repos": [repo.full_name for repo in repos],
+        "repos": sorted({repo.full_name for repo in repos}),
         "paths_fingerprint": paths_fingerprint,
         "aliases_fingerprint": aliases_fingerprint,
         "ref_scan_default": ref_scan_default,
@@ -748,13 +736,6 @@ def _rate_limit_pause_reason(remaining: int) -> str:
 def _chunks[T](values: list[T], size: int) -> Iterable[list[T]]:
     for start in range(0, len(values), size):
         yield values[start : start + size]
-
-
-def _split_team(value: str) -> tuple[str, str]:
-    org, _, slug = value.partition("/")
-    if not org or not slug:
-        raise ValueError(f"team must be ORG/SLUG (got {value!r})")
-    return org, slug
 
 
 def _str(value: object) -> str | None:

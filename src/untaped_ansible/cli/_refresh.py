@@ -19,8 +19,6 @@ from untaped_ansible.infrastructure import (
 )
 from untaped_ansible.settings import AnsibleSettings, SourceDefinition
 
-_LOW_RATE_LIMIT_THRESHOLD = 500
-
 
 def run_source_refresh(
     source: SourceDefinition,
@@ -60,7 +58,7 @@ def run_source_refresh(
         ),
         err=True,
     )
-    warn_low_rate_limit(result)
+    warn_low_rate_limit(result, threshold=settings.source_refresh_rate_limit_floor)
     return result
 
 
@@ -96,8 +94,9 @@ def refresh_source(
             blob_filter=settings.git_blob_filter,
             auth_header=_git_auth_header(token) if token else None,
             concurrency=concurrency,
-            probe_concurrency=settings.probe_concurrency,
             ref_scan_default=settings.ref_scan_default,
+            repo_batch_size=settings.source_refresh_repo_batch_size,
+            rate_limit_floor=settings.source_refresh_rate_limit_floor,
             on_progress=on_progress,
         )(source, source_key=source_key)
     return result
@@ -133,10 +132,10 @@ def refresh_summary(
     return f"{message} (concurrency {concurrency})"
 
 
-def warn_low_rate_limit(result: RefreshResult) -> None:
+def warn_low_rate_limit(result: RefreshResult, *, threshold: int) -> None:
     """Warn on stderr when the GraphQL rate limit budget is running out."""
     remaining = result.rate_limit_remaining
-    if remaining is not None and remaining < _LOW_RATE_LIMIT_THRESHOLD:
+    if remaining is not None and remaining < threshold:
         echo(
             f"warning: GitHub GraphQL rate limit is low: {remaining} points remaining",
             err=True,

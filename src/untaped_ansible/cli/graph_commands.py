@@ -224,9 +224,7 @@ def graph_command(
       untaped-ansible graph acme/app --source prod --both --cached
       untaped-ansible graph ./roles/web --target-repo acme/web --downstream
     """
-    if refresh and not any(
-        (source, orgs, teams, source_repos, paths, ref_kinds, ref_patterns, ref_scan_default)
-    ):
+    if refresh and not any((source, orgs, teams, source_repos)):
         raise_usage("--refresh requires --source or inline source selectors")
     with report_errors():
         ctx = app_context()

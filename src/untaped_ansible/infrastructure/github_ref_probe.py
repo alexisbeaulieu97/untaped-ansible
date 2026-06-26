@@ -14,7 +14,8 @@ from untaped_ansible.domain.payloads import GitRef, ProbedRepo, ProbeReport
 if TYPE_CHECKING:
     from untaped_github import BatchRepoRefsResult
 
-GRAPHQL_CHUNK_SIZE = 50
+ALL_REFS_GRAPHQL_CHUNK_SIZE = 50
+DEFAULT_BRANCH_GRAPHQL_CHUNK_SIZE = 100
 _MISSING_REASON = "repository not found or inaccessible on GitHub"
 
 
@@ -51,15 +52,19 @@ class GithubRefProbe:
         github: _BatchRepoRefsClient,
         *,
         concurrency: int = 8,
-        chunk_size: int = GRAPHQL_CHUNK_SIZE,
+        chunk_size: int = ALL_REFS_GRAPHQL_CHUNK_SIZE,
+        default_branch_chunk_size: int = DEFAULT_BRANCH_GRAPHQL_CHUNK_SIZE,
     ) -> None:
         if concurrency < 1 or concurrency > 32:
             raise ValueError("concurrency must be between 1 and 32")
         if chunk_size < 1:
             raise ValueError("chunk_size must be >= 1")
+        if default_branch_chunk_size < 1:
+            raise ValueError("default_branch_chunk_size must be >= 1")
         self._github = github
         self._concurrency = concurrency
         self._chunk_size = chunk_size
+        self._default_branch_chunk_size = default_branch_chunk_size
 
     def probe(
         self,
@@ -72,10 +77,10 @@ class GithubRefProbe:
         if mode not in {"all", "default_branch"}:
             raise ValueError("mode must be 'all' or 'default_branch'")
         total = len(repos)
-        chunks = [
-            tuple(repos[start : start + self._chunk_size])
-            for start in range(0, total, self._chunk_size)
-        ]
+        chunk_size = (
+            self._default_branch_chunk_size if mode == "default_branch" else self._chunk_size
+        )
+        chunks = [tuple(repos[start : start + chunk_size]) for start in range(0, total, chunk_size)]
         probed: dict[str, ProbedRepo] = {}
         failures: dict[str, str] = {}
         rate_limit_cost: int | None = None
@@ -102,10 +107,10 @@ class GithubRefProbe:
                     if rate_limit_remaining is None
                     else min(rate_limit_remaining, outcome.rate_limit_remaining)
                 )
-            cost = getattr(outcome, "rate_limit_cost", None)
+            cost = outcome.rate_limit_cost
             if cost is not None:
                 rate_limit_cost = cost if rate_limit_cost is None else rate_limit_cost + cost
-            reset_at = getattr(outcome, "rate_limit_reset_at", None)
+            reset_at = outcome.rate_limit_reset_at
             if reset_at is not None:
                 rate_limit_reset_at = reset_at
 

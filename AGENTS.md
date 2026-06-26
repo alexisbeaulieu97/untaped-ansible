@@ -235,9 +235,13 @@ form one Cyclopts mutually-exclusive group and
 (`Group(..., validator=validators.LimitedChoice())` attached via
 `Parameter(group=...)`; `LimitedChoice()` is the typed equivalent of
 cyclopts' untyped `MutuallyExclusive` alias), so conflicting flags exit 2
-before the command body runs. The cross-flag rule "`--refresh` requires `--source` or inline
-selectors" cannot be a group validator; it is the first statement of the
-command body so it fails (exit 2) before any settings or index construction.
+before the command body runs. The cross-flag rule "`--refresh` requires
+`--source` or inline source boundary selectors" cannot be a group validator;
+it is the first statement of the command body so it fails (exit 2) before any
+settings or index construction. Only `--source`, `--org`, `--team`, and
+`--repo` count as source boundaries for this rule; modifiers such as `--path`,
+`--ref-kind`, `--ref-pattern`, and `--ref-scan-default` cannot create an
+inline source by themselves.
 
 `ansible.freshness_ttl` is deprecated. Graph no longer performs implicit
 freshness probes, so the setting does not affect graph defaults. Keep accepting
@@ -286,11 +290,13 @@ Source refresh is git-only for data transport. A refresh runs three phases:
    sources can pause and resume. `GithubRefProbe` wraps
    `GithubClient.batch_repo_refs(...)` for all-ref scans and
    `GithubClient.batch_default_branch_refs(...)` for default-branch-only
-   scans. The probe also supplies each repo's exact default branch (expansion
-   metadata is the fallback), cumulative `rate_limit_cost`, the minimum
-   GraphQL `rate_limit_remaining`, and `rate_limit_reset_at`; the CLI warns on
-   stderr when remaining drops below 500. Do not reintroduce `git ls-remote`
-   ref checks.
+   scans. All-ref probes use 50-repo GraphQL chunks; default-branch probes use
+   100-repo GraphQL chunks until a live smoke validates a higher limit. The
+   probe also supplies each repo's exact default branch (expansion metadata is
+   the fallback), cumulative `rate_limit_cost`, the minimum GraphQL
+   `rate_limit_remaining`, and `rate_limit_reset_at`; the CLI warns on stderr
+   when remaining drops below `ansible.source_refresh_rate_limit_floor`
+   (default 500). Do not reintroduce `git ls-remote` ref checks.
    Global `/graphql` access failures classified by
    `untaped_github.GithubGraphqlError` (rate limit, secondary rate
    limit, auth, forbidden, or unknown request-level failures) must
@@ -307,7 +313,8 @@ Source refresh is git-only for data transport. A refresh runs three phases:
    `ansible.git_fetch_concurrency` / `--concurrency`), reads dependency
    files with Git object plumbing, and commits each processed repo batch
    without updating the source-wide completed baseline until the expanded repo
-   queue is exhausted.
+   queue is exhausted. The source-refresh repo batch size comes from
+   `ansible.source_refresh_repo_batch_size` (default 100).
 
 Refresh is resilient to per-repo failures. Probe misses (missing or
 inaccessible repos) and per-repo fetch/parse errors (`GitCacheError`,
@@ -321,13 +328,16 @@ refresh path instead prepends a graph warning and proceeds with possibly stale
 data for the failed repos.
 
 Large refreshes are resumable. SQLite stores `source_refresh_progress` rows
-for the active source fingerprint. If the GraphQL budget drops below the
-built-in floor while repos remain, processed repos are committed, untouched
-repos/refs are preserved, the source-wide completed baseline timestamp is not
-updated, and the command exits 1 with a resume hint. Re-running the same source
-refresh skips completed progress rows and continues with the remaining repos.
-Only a budget-stop-free exhausted queue updates `source_runs`, prunes removed
-repos/refs, and clears refresh progress.
+for successful repos in the active source fingerprint. If the GraphQL budget
+drops below `ansible.source_refresh_rate_limit_floor` while repos remain,
+successful repos are committed, untouched repos/refs are preserved, the
+source-wide completed baseline timestamp is not updated, and the command exits
+1 with a resume hint. Re-running the same source refresh skips successful
+progress rows and retries failed or unprocessed repos. The intended resumed
+failure contract is that prior success in the active fingerprint can mark the
+source complete when the queue is exhausted, while per-repo failures still make
+the CLI exit non-zero. Only a budget-stop-free exhausted queue updates
+`source_runs`, prunes removed repos/refs, and clears refresh progress.
 
 When every expanded repo fails, there is nothing trustworthy to mark complete:
 cached data and `scanned_at` stay untouched and the run does not look fresh —
