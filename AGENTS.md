@@ -291,6 +291,17 @@ Source refresh is git-only for data transport. A refresh runs three phases:
    GraphQL `rate_limit_remaining` across chunks; the CLI warns on stderr
    when that drops below 500. Do not reintroduce `git ls-remote` ref
    checks.
+   Global `/graphql` access failures classified by
+   `untaped_github.GithubGraphqlError` (rate limit, secondary rate
+   limit, auth, forbidden, or unknown request-level failures) must
+   propagate out of `GithubRefProbe`, `RefreshGitSourceIndex`,
+   `refresh_source`, and `run_source_refresh`. They are not per-repo
+   failures: `source refresh` and source-backed `graph` should exit once
+   through the SDK `report_errors()` path instead of rendering
+   `failed <repo>:` lines or stale graph output. Known limitation: if
+   GitHub returns `200 OK` with per-alias `FORBIDDEN` for every repo,
+   v1 still reports those repos as missing/inaccessible rather than
+   inferring a global SSO or token-scope failure.
 3. **Fetch/parse** keeps bare repositories under `ansible.repo_cache_path`,
    fetches only changed or missing refs (bounded by
    `ansible.git_fetch_concurrency` / `--concurrency`), reads dependency

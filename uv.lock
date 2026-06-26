@@ -692,7 +692,7 @@ dependencies = [
 
 [[package]]
 name = "untaped-ansible"
-version = "0.6.0"
+version = "0.6.1"
 source = { editable = "." }
 dependencies = [
     { name = "cyclopts" },
@@ -719,7 +719,7 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.13.3" },
     { name = "pyyaml", specifier = ">=6.0.3" },
     { name = "untaped", git = "https://github.com/alexisbeaulieu97/untaped.git?rev=v2.2.0" },
-    { name = "untaped-github", git = "https://github.com/alexisbeaulieu97/untaped-github.git?rev=v0.8.0" },
+    { name = "untaped-github", git = "https://github.com/alexisbeaulieu97/untaped-github.git?rev=v0.9.2" },
 ]
 
 [package.metadata.requires-dev]
@@ -735,8 +735,8 @@ dev = [
 
 [[package]]
 name = "untaped-github"
-version = "0.8.0"
-source = { git = "https://github.com/alexisbeaulieu97/untaped-github.git?rev=v0.8.0#efbe48f76f30d2f1a04400d81a5ddf663316943d" }
+version = "0.9.2"
+source = { git = "https://github.com/alexisbeaulieu97/untaped-github.git?rev=v0.9.2#c3021475ff77183b1c5c60a1711d9fe4d3b0002a" }
 dependencies = [
     { name = "cyclopts" },
     { name = "pydantic" },

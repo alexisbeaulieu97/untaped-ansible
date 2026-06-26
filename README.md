@@ -109,6 +109,14 @@ both accept `--concurrency N` as a per-run override. Refresh progress is
 reported on stderr with repo/ref counts, changed and unchanged refs, edge count,
 elapsed time, and the Git concurrency used.
 
+Global GitHub GraphQL access failures — rate limits, secondary rate limits,
+auth failures, or request-level forbidden responses from `/graphql` — abort the
+refresh immediately with one `error: ...` message. They are not expanded into
+per-repo failures, and source-backed `graph` exits instead of rendering stale
+cached output. A known limitation remains: if GitHub returns `200 OK` with a
+per-repo `FORBIDDEN` error for every alias, that still reports as
+per-repo missing/inaccessible rather than a global SSO or token-scope failure.
+
 Per-repo failures do not abort a refresh: successful repos are committed,
 each failure is listed on stderr, and `source refresh` exits 1. When every
 repo fails, nothing is committed and the index is left untouched.
