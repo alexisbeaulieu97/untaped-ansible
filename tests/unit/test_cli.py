@@ -196,6 +196,34 @@ class _SeedGitCache:
         return None
 
 
+class _NoGitFetchCache:
+    """Git transport stub that proves unchanged repos do not fetch."""
+
+    def ensure_bare(self, url: str, *, cache_dir: Path, auth_header: str | None) -> Path:
+        raise AssertionError(f"unexpected git fetch for {url}")
+
+    def fetch_refs(
+        self,
+        bare_path: Path,
+        *,
+        refspecs: list[str],
+        depth: int,
+        blob_filter: bool,
+        auth_header: str | None,
+    ) -> None:
+        raise AssertionError("unexpected git fetch")
+
+    def read_file(
+        self,
+        bare_path: Path,
+        sha: str,
+        path: str,
+        *,
+        auth_header: str | None,
+    ) -> str | None:
+        raise AssertionError("unexpected dependency file read")
+
+
 def _seed_unchanged_scan(
     monkeypatch,
     repos: dict[str, str],
@@ -2845,11 +2873,80 @@ def test_source_refresh_transient_probe_failure_prints_safe_rerun_hint(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
+    index_path = tmp_path / "index.sqlite3"
+    cfg = _write_config(
+        tmp_path,
+        index_path=index_path,
+        extra_profile={"github": {"token": "ghp_test"}},
+        top_level_ansible={"sources": [{"name": "prod", "repos": ["acme/ok"]}]},
+    )
+    monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
+    _seed_unchanged_scan(monkeypatch, {"acme/ok": "sha-ok"})
+    _write_config(
+        tmp_path,
+        index_path=index_path,
+        extra_profile={"github": {"token": "ghp_test"}},
+        top_level_ansible={"sources": [{"name": "prod", "repos": ["acme/ok", "acme/flaky"]}]},
+    )
+    get_settings.cache_clear()
+
+    def graphql_response(request: httpx.Request) -> httpx.Response:
+        query = request.content.decode()
+        if "flaky" in query:
+            return httpx.Response(502, text="Bad Gateway")
+        return httpx.Response(
+            200,
+            json={
+                "data": {
+                    "rateLimit": {
+                        "cost": 1,
+                        "remaining": 4900,
+                        "resetAt": "2026-01-01T00:00:00Z",
+                    },
+                    "r0": _graphql_repo_node("acme/ok", sha="sha-ok"),
+                    "r1": _graphql_repo_node("acme/ok", sha="sha-ok"),
+                }
+            },
+        )
+
+    monkeypatch.setattr(_refresh, "GitRepositoryCache", _NoGitFetchCache)
+    with respx.mock(base_url="https://api.github.com") as mock:
+        for full_name in ("acme/ok", "acme/flaky"):
+            owner, name = full_name.split("/", maxsplit=1)
+            mock.get(f"/repos/{owner}/{name}").mock(
+                return_value=httpx.Response(
+                    200,
+                    json={
+                        "full_name": full_name,
+                        "default_branch": "main",
+                        "clone_url": f"https://github.com/{full_name}.git",
+                    },
+                )
+            )
+        mock.post("/graphql").mock(side_effect=graphql_response)
+
+        result = CliInvoker().invoke(app, ["source", "refresh", "prod"])
+
+    assert result.exit_code == 1
+    assert "failed acme/flaky: transient ref probe failed: HTTP 502" in result.stderr
+    assert (
+        "hint: rerun `untaped-ansible source refresh prod`; unchanged repos skip Git fetch "
+        "and dependency scan work"
+    ) in result.stderr
+    assert SqliteDependencyIndex(index_path).ref_scans(
+        "source:prod", "acme/ok", [("heads", "main")]
+    )
+
+
+def test_source_refresh_hard_failure_does_not_print_transient_rerun_hint(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
     cfg = _write_config(
         tmp_path,
         index_path=tmp_path / "index.sqlite3",
         extra_profile={"github": {"token": "ghp_test"}},
-        top_level_ansible={"sources": [{"name": "prod", "repos": ["acme/ok", "acme/flaky"]}]},
+        top_level_ansible={"sources": [{"name": "prod", "repos": ["acme/ok", "acme/bad"]}]},
     )
     monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
 
@@ -2873,12 +2970,7 @@ def test_source_refresh_transient_probe_failure_prints_safe_rerun_hint(
             edges=0,
             changed_refs=0,
             unchanged_refs=1,
-            failures=(
-                RepoFailure(
-                    repo="acme/flaky",
-                    reason="transient ref probe failed: HTTP 502 for https://api.github.com/graphql",
-                ),
-            ),
+            failures=(RepoFailure(repo="acme/bad", reason="git fetch failed: timeout"),),
         )
 
     monkeypatch.setattr(_refresh, "refresh_source", fake_refresh)
@@ -2886,11 +2978,8 @@ def test_source_refresh_transient_probe_failure_prints_safe_rerun_hint(
     result = CliInvoker().invoke(app, ["source", "refresh", "prod"])
 
     assert result.exit_code == 1
-    assert "failed acme/flaky: transient ref probe failed: HTTP 502" in result.stderr
-    assert (
-        "hint: rerun `untaped-ansible source refresh prod`; unchanged repos skip Git fetch "
-        "and dependency scan work"
-    ) in result.stderr
+    assert "failed acme/bad: git fetch failed: timeout" in result.stderr
+    assert "unchanged repos skip Git fetch" not in result.stderr
 
 
 def test_source_refresh_budget_pause_exits_nonzero_without_repo_failures(
@@ -2964,6 +3053,7 @@ def test_source_refresh_all_failures_exits_nonzero_and_leaves_index_unchanged(
     assert "failed acme/gone: " in result.stderr
     assert "failed acme/ok: " in result.stderr
     assert "refresh failed for all 2 repos; index left unchanged" in result.output
+    assert "unchanged repos skip Git fetch" not in result.stderr
     # the index commit was skipped: cached data and freshness are untouched
     after = SqliteDependencyIndex(index_path).status("source:prod")
     assert after is not None

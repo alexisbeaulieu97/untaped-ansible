@@ -16,7 +16,10 @@ from untaped_github import (
 )
 
 from untaped_ansible.domain.payloads import GitRef
-from untaped_ansible.infrastructure.github_ref_probe import GithubRefProbe
+from untaped_ansible.infrastructure.github_ref_probe import (
+    GithubRefProbe,
+    is_transient_ref_probe_failure,
+)
 
 
 class FakeBatchClient:
@@ -253,6 +256,7 @@ def test_probe_marks_github_transient_failures_without_losing_successes() -> Non
     assert report.failures == {
         "acme/flaky": "transient ref probe failed: HTTP 502 for https://api.github.com/graphql"
     }
+    assert is_transient_ref_probe_failure(report.failures["acme/flaky"])
 
 
 def test_probe_marks_default_branch_github_transient_failures() -> None:
@@ -270,6 +274,7 @@ def test_probe_marks_default_branch_github_transient_failures() -> None:
     assert report.failures == {
         "acme/flaky": "transient ref probe failed: HTTP 502 for https://api.github.com/graphql"
     }
+    assert is_transient_ref_probe_failure(report.failures["acme/flaky"])
 
 
 def test_probe_marks_untaped_error_chunks_as_failures() -> None:
