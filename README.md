@@ -107,7 +107,10 @@ metadata winning over org/team listings. Each batch uses the GraphQL ref probe
 — there is no per-repo `git ls-remote` — and carries GraphQL cost, remaining
 budget, and reset metadata. Git fetches only repos whose selected refs changed,
 with per-repo concurrency bounded by `ansible.git_fetch_concurrency` (default
-`8`, accepts `1..32`); `untaped-ansible graph --refresh` and
+`8`, accepts `1..32`). Refresh batches use
+`ansible.source_refresh_repo_batch_size` (default `100`); all-ref GraphQL
+probe chunks use `50` repos, while default-branch-only probes use `100` repos.
+`untaped-ansible graph --refresh` and
 `untaped-ansible source refresh` both accept `--concurrency N` as a per-run override.
 Refresh progress is reported on stderr with repo/ref counts, changed and
 unchanged refs, edge count, elapsed time, and the Git concurrency used.
@@ -124,12 +127,15 @@ Per-repo failures do not abort a refresh: successful repos are committed,
 each failure is listed on stderr, and `source refresh` exits 1. When every
 repo fails, nothing is committed and the index is left untouched.
 
-If the GraphQL budget drops below the built-in floor during a large refresh,
-processed repos are committed, untouched repos and refs are preserved, the
-source-wide completed timestamp is not updated, and the command exits 1 with a
-resume hint. Re-running the same source refresh resumes with the unprocessed
-repos. Removed repos/refs are pruned only after the expanded repo queue is
-exhausted without a budget stop.
+If the GraphQL budget drops below `ansible.source_refresh_rate_limit_floor`
+(default `500`) during a large refresh, successful repos are committed,
+untouched repos and refs are preserved, the source-wide completed timestamp is
+not updated, and the command exits 1 with a resume hint. Re-running the same
+source refresh skips previously successful repos and retries failed or
+unprocessed repos. If a resumed queue is exhausted after prior success, the
+source can be marked complete even when the last batch has per-repo failures;
+the CLI still exits 1 and lists those failures. Removed repos/refs are pruned
+only after the expanded repo queue is exhausted without a budget stop.
 
 Source refreshes scan all branches and all tags by default
 (`ansible.ref_scan_default: all`). Set

@@ -104,8 +104,10 @@ class IncrementalDependencyIndexWriter(Protocol):
         keep: set[tuple[str, str, str]],
         repo_metadata: tuple[payloads.SourceRepoMetadata, ...] = (),
         processed_repos: frozenset[str] = frozenset(),
+        source_fingerprint: str | None = None,
+        progress_statuses: dict[str, str] | None = None,
     ) -> None:
-        """Commit processed repos without updating the source-wide completion timestamp."""
+        """Commit processed repos and progress without updating source-wide freshness."""
         ...
 
     def complete_source_ref_refresh(
@@ -124,15 +126,6 @@ class IncrementalDependencyIndexWriter(Protocol):
         source_fingerprint: str,
     ) -> dict[str, str]:
         """Return processed repo statuses for a resumable refresh fingerprint."""
-        ...
-
-    def mark_refresh_progress(
-        self,
-        source_key: str,
-        source_fingerprint: str,
-        statuses: dict[str, str],
-    ) -> None:
-        """Persist processed repo statuses for a resumable refresh fingerprint."""
         ...
 
     def clear_refresh_progress(self, source_key: str) -> None:

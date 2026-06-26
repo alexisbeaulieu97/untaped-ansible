@@ -52,6 +52,8 @@ def test_ansible_settings_default_to_git_source_refresh() -> None:
     assert settings.git_fetch_depth == 1
     assert settings.git_fetch_concurrency == 8
     assert settings.probe_concurrency == 8
+    assert settings.source_refresh_repo_batch_size == 100
+    assert settings.source_refresh_rate_limit_floor == 500
     assert settings.git_blob_filter is True
 
 
@@ -78,3 +80,7 @@ def test_ansible_settings_validate_ref_scan_and_git_options() -> None:
         AnsibleSettings(probe_concurrency=0)
     with pytest.raises(ValidationError, match="probe_concurrency"):
         AnsibleSettings(probe_concurrency=33)
+    with pytest.raises(ValidationError, match="source_refresh_repo_batch_size"):
+        AnsibleSettings(source_refresh_repo_batch_size=0)
+    with pytest.raises(ValidationError, match="source_refresh_rate_limit_floor"):
+        AnsibleSettings(source_refresh_rate_limit_floor=-1)

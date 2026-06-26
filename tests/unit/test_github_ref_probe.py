@@ -132,6 +132,33 @@ def test_probe_chunks_repos_and_reports_cumulative_progress() -> None:
     assert progress == [(2, 5), (4, 5), (5, 5)]
 
 
+def test_probe_uses_all_refs_chunk_size_for_all_ref_mode() -> None:
+    client = FakeBatchClient()
+    repos = [f"acme/repo-{index}" for index in range(51)]
+    for repo in repos:
+        client.refs[repo] = [RepoRef(kind="heads", name="main", sha=f"sha-{repo}")]
+
+    GithubRefProbe(client, concurrency=1).probe(repos, kinds=("heads",))
+
+    assert [len(call[0]) for call in client.calls] == [50, 1]
+    assert [call[2] for call in client.calls] == [50, 1]
+
+
+def test_probe_uses_default_branch_chunk_size_for_default_branch_mode() -> None:
+    client = FakeBatchClient()
+    repos = [f"acme/repo-{index}" for index in range(120)]
+
+    GithubRefProbe(client, concurrency=1).probe(
+        repos,
+        kinds=("heads", "tags"),
+        mode="default_branch",
+    )
+
+    assert [len(call[0]) for call in client.default_branch_calls] == [100, 20]
+    assert [call[1] for call in client.default_branch_calls] == [100, 20]
+    assert client.calls == []
+
+
 def test_probe_takes_min_rate_limit_across_chunks() -> None:
     client = FakeBatchClient()
     repos = [f"acme/repo-{index}" for index in range(4)]
