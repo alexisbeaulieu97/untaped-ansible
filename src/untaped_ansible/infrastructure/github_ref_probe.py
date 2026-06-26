@@ -35,8 +35,8 @@ class GithubRefProbe:
 
     Splits ``repos`` into GraphQL-sized chunks and drives them through a
     bounded thread pool; each worker issues one ``batch_repo_refs`` call.
-    Chunk-level transport errors mark every repo in that chunk as failed
-    instead of aborting the probe.
+    Generic chunk-level transport errors mark every repo in that chunk as
+    failed; classified global GraphQL failures abort the probe.
     """
 
     def __init__(
@@ -114,6 +114,8 @@ class GithubRefProbe:
         try:
             return self._github.batch_repo_refs(chunk, kinds=kinds, chunk_size=len(chunk))
         except GithubGraphqlError:
+            # Must precede the broad UntapedError catch: this is a global
+            # GraphQL failure, not a per-repo chunk failure.
             raise
         except (HttpError, UntapedError) as exc:
             # Provenance prefix: distinguishes probe transport failures from
