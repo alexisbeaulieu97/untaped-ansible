@@ -147,6 +147,27 @@ def _mock_refresh_repos(
     mock.post("/graphql").mock(return_value=httpx.Response(200, json=payload))
 
 
+def _mock_refresh_graphql_error(
+    mock: respx.MockRouter,
+    repos: tuple[str, ...],
+    response: httpx.Response,
+) -> None:
+    """Mock source-refresh expansion, then fail the GraphQL ref probe globally."""
+    for full_name in sorted(repos):
+        owner, name = full_name.split("/", maxsplit=1)
+        mock.get(f"/repos/{owner}/{name}").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "full_name": full_name,
+                    "default_branch": "main",
+                    "clone_url": f"https://github.com/{full_name}.git",
+                },
+            )
+        )
+    mock.post("/graphql").mock(return_value=response)
+
+
 class _SeedGitCache:
     """Git transport stub for seeding: fetches succeed, no dependency files."""
 
@@ -2727,6 +2748,34 @@ def test_source_refresh_all_failures_exits_nonzero_and_leaves_index_unchanged(
     )
 
 
+def test_source_refresh_global_graphql_error_exits_once_without_per_repo_failures(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    cfg = _write_config(
+        tmp_path,
+        extra_profile={"github": {"token": "ghp_test"}},
+        top_level_ansible={"sources": [{"name": "prod", "repos": ["acme/gone", "acme/ok"]}]},
+    )
+    monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
+
+    with respx.mock(base_url="https://api.github.com") as mock:
+        _mock_refresh_graphql_error(
+            mock,
+            ("acme/gone", "acme/ok"),
+            httpx.Response(403, json={"message": "API rate limit exceeded for user ID 123."}),
+        )
+        result = CliInvoker().invoke(app, ["source", "refresh", "prod"])
+
+    assert result.exit_code == 1
+    assert result.stdout == ""
+    assert result.stderr.count("github graphql rate limit exceeded") == 1
+    assert "API rate limit exceeded" in result.stderr
+    assert "failed acme/gone:" not in result.stderr
+    assert "failed acme/ok:" not in result.stderr
+    assert "refresh failed for all" not in result.stderr
+
+
 def test_source_refresh_emits_progress_lines_on_stderr_in_non_tty_mode(
     tmp_path: Path,
     monkeypatch,
@@ -2834,6 +2883,44 @@ def test_graph_refresh_with_partial_failures_warns_and_proceeds(
         in result.stdout
     )
     assert "    +-- acme/site@main" in result.stdout
+
+
+def test_graph_refresh_global_graphql_error_exits_without_rendering_stale_graph(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    index_path = tmp_path / "index.sqlite3"
+    _seed_index(
+        SqliteDependencyIndex(index_path),
+        "source:platform",
+        (_fresh_platform_dependency(),),
+        scanned_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    cfg = _write_config(
+        tmp_path,
+        index_path=index_path,
+        extra_profile={"github": {"token": "ghp_test"}},
+        top_level_ansible={"sources": [{"name": "platform", "repos": ["acme/site"]}]},
+    )
+    monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
+
+    with respx.mock(base_url="https://api.github.com") as mock:
+        _mock_refresh_graphql_error(
+            mock,
+            ("acme/site",),
+            httpx.Response(403, json={"message": "API rate limit exceeded for user ID 123."}),
+        )
+        result = CliInvoker().invoke(
+            app,
+            ["graph", "acme/base", "--source", "platform", "--upstream", "--refresh"],
+        )
+
+    assert result.exit_code == 1
+    assert result.stdout == ""
+    assert result.stderr.count("github graphql rate limit exceeded") == 1
+    assert "API rate limit exceeded" in result.stderr
+    assert "warning: refresh of platform" not in result.stdout
+    assert "acme/site@main" not in result.stdout
 
 
 def teardown_module() -> None:

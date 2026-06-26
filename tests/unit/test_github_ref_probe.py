@@ -7,7 +7,7 @@ from collections.abc import Sequence
 
 import pytest
 from untaped.api import HttpError, UntapedError
-from untaped_github import BatchRepoRefsResult, RepoRef, RepoRefs
+from untaped_github import BatchRepoRefsResult, GithubGraphqlError, RepoRef, RepoRefs
 
 from untaped_ansible.domain.payloads import GitRef
 from untaped_ansible.infrastructure.github_ref_probe import GithubRefProbe
@@ -133,6 +133,21 @@ def test_probe_marks_untaped_error_chunks_as_failures() -> None:
 
     assert report.repos == {}
     assert report.failures == {"acme/bad": "ref probe failed: invalid repository 'acme/bad'"}
+
+
+def test_probe_propagates_global_graphql_errors() -> None:
+    client = FakeBatchClient()
+    client.errors["acme/limited"] = GithubGraphqlError(
+        "github graphql rate limit exceeded: API rate limit exceeded",
+        kind="rate_limited",
+        status_code=403,
+        url="https://api.github.com/graphql",
+    )
+
+    with pytest.raises(GithubGraphqlError) as exc_info:
+        GithubRefProbe(client).probe(["acme/limited"], kinds=("heads",))
+
+    assert exc_info.value.kind == "rate_limited"
 
 
 def test_probe_validates_construction_arguments() -> None:

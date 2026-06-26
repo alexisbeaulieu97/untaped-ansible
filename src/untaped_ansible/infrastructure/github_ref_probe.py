@@ -6,6 +6,7 @@ from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Protocol
 
 from untaped.api import HttpError, UntapedError
+from untaped_github import GithubGraphqlError
 
 from untaped_ansible._concurrency import bounded_map
 from untaped_ansible.domain.payloads import GitRef, ProbedRepo, ProbeReport
@@ -112,6 +113,8 @@ class GithubRefProbe:
     ) -> BatchRepoRefsResult | str:
         try:
             return self._github.batch_repo_refs(chunk, kinds=kinds, chunk_size=len(chunk))
+        except GithubGraphqlError:
+            raise
         except (HttpError, UntapedError) as exc:
             # Provenance prefix: distinguishes probe transport failures from
             # git-fetch failures in `failed <repo>: <reason>` stderr listings.
