@@ -43,13 +43,35 @@ class ProbedRepo(BaseModel):
     refs: tuple[GitRef, ...] = ()
 
 
+class ProbeTarget(BaseModel):
+    """Repository metadata needed by remote ref probe backends."""
+
+    model_config = ConfigDict(frozen=True)
+
+    full_name: str
+    default_branch: str
+    clone_url: str | None = None
+    ssh_url: str | None = None
+    html_url: str | None = None
+
+
+class ProbeFailure(BaseModel):
+    """One repository that could not be probed for refs."""
+
+    model_config = ConfigDict(frozen=True)
+
+    reason: str
+    kind: Literal["missing", "transient", "chunk", "git"]
+
+
 class ProbeReport(BaseModel):
     """Outcome of one batched ref freshness probe."""
 
     model_config = ConfigDict(frozen=True)
 
     repos: dict[str, ProbedRepo] = Field(default_factory=dict)
-    failures: dict[str, str] = Field(default_factory=dict)
+    failures: dict[str, ProbeFailure] = Field(default_factory=dict)
+    fallbacks: dict[str, str] = Field(default_factory=dict)
     rate_limit_cost: int | None = None
     rate_limit_remaining: int | None = None
     rate_limit_reset_at: datetime | None = None

@@ -58,6 +58,7 @@ class AnsibleSettings(BaseModel):
     stale_after: int = 86_400
     freshness_ttl: int | None = Field(default=None, ge=0)
     ref_scan_default: Literal["all", "default_branch"] = "all"
+    source_refresh_backend: Literal["auto", "graphql", "git"] = "auto"
     repo_cache_path: Path = Path("~/.untaped/ansible-repositories")
     git_clone_protocol: Literal["https", "ssh"] = "https"
     git_fetch_depth: int = Field(default=1, ge=0)

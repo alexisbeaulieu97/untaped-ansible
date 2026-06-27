@@ -21,7 +21,9 @@ from untaped_ansible.domain.payloads import (
     CachedRef,
     GitRef,
     ProbedRepo,
+    ProbeFailure,
     ProbeReport,
+    ProbeTarget,
     RefreshProgressEvent,
     RefScan,
     SourceRepoMetadata,
@@ -92,34 +94,43 @@ class FakeRefProbe:
     def __init__(self) -> None:
         self.refs: dict[str, list[GitRef]] = {}
         self.default_branches: dict[str, str | None] = {}
-        self.failures: dict[str, str] = {}
+        self.failures: dict[str, str | ProbeFailure] = {}
         self.rate_limit_remaining: int | None = None
         self.calls: list[tuple[tuple[str, ...], tuple[str, ...], str]] = []
 
     def probe(
         self,
-        repos: Sequence[str],
+        repos: Sequence[ProbeTarget],
         *,
         kinds: Sequence[str],
         mode: str = "all",
         on_progress: Callable[[int, int], None] | None = None,
     ) -> ProbeReport:
-        self.calls.append((tuple(repos), tuple(kinds), mode))
+        names = tuple(repo.full_name for repo in repos)
+        self.calls.append((names, tuple(kinds), mode))
         probed: dict[str, ProbedRepo] = {}
-        failures: dict[str, str] = {}
-        for repo in repos:
+        failures: dict[str, ProbeFailure] = {}
+        for repo in names:
             if repo in self.failures:
-                failures[repo] = self.failures[repo]
+                failure = self.failures[repo]
+                failures[repo] = (
+                    failure
+                    if isinstance(failure, ProbeFailure)
+                    else ProbeFailure(kind="chunk", reason=failure)
+                )
                 continue
             if repo not in self.refs:
-                failures[repo] = "repository not found or inaccessible on GitHub"
+                failures[repo] = ProbeFailure(
+                    kind="missing",
+                    reason="repository not found or inaccessible on GitHub",
+                )
                 continue
             probed[repo] = ProbedRepo(
                 default_branch=self.default_branches.get(repo, "main"),
                 refs=tuple(ref for ref in self.refs[repo] if ref.kind in kinds),
             )
         if on_progress is not None:
-            on_progress(len(repos), len(repos))
+            on_progress(len(names), len(names))
         return ProbeReport(
             repos=probed,
             failures=failures,

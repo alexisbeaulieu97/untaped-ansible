@@ -10,7 +10,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal, Protocol
 
-from pydantic import BaseModel, ConfigDict
 from untaped.api import UntapedError
 from untaped_github import (
     RepositoryInventoryScope,
@@ -39,6 +38,7 @@ from untaped_ansible.domain.payloads import (
     IndexedDependency,
     ProbedRepo,
     ProbeReport,
+    ProbeTarget,
     RefreshProgressEvent,
     RefScan,
     RefScanMetadata,
@@ -46,6 +46,7 @@ from untaped_ansible.domain.payloads import (
     RepoFailure,
     SourceRepoMetadata,
 )
+from untaped_ansible.domain.repo_targets import remote_url_for
 from untaped_ansible.settings import SourceDefinition
 
 ProgressCallback = Callable[[RefreshProgressEvent], None]
@@ -89,16 +90,6 @@ class GitCache(Protocol):
     ) -> str | None: ...
 
 
-class _RepoCandidate(BaseModel):
-    model_config = ConfigDict(frozen=True)
-
-    full_name: str
-    default_branch: str
-    clone_url: str | None = None
-    ssh_url: str | None = None
-    html_url: str | None = None
-
-
 @dataclass(frozen=True)
 class _RepoRefreshResult:
     selected: frozenset[tuple[str, str, str]]
@@ -110,7 +101,7 @@ class _RepoRefreshResult:
 
 @dataclass(frozen=True)
 class _RepoRefreshTask:
-    repo: _RepoCandidate
+    repo: ProbeTarget
     default_branch: str
     refs: tuple[GitRef, ...]
 
@@ -142,6 +133,7 @@ class RefreshGitSourceIndex:
         concurrency: int = 8,
         repo_batch_size: int = 100,
         rate_limit_floor: int = 500,
+        backend: Literal["auto", "graphql", "git"] = "auto",
         on_progress: ProgressCallback | None = None,
     ) -> None:
         if clone_protocol not in {"https", "ssh"}:
@@ -152,6 +144,8 @@ class RefreshGitSourceIndex:
             raise ValueError("repo_batch_size must be >= 1")
         if rate_limit_floor < 0:
             raise ValueError("rate_limit_floor must be >= 0")
+        if backend not in {"auto", "graphql", "git"}:
+            raise ValueError("backend must be auto, graphql, or git")
         self._github = github
         self._git = git
         self._probe = probe
@@ -167,6 +161,7 @@ class RefreshGitSourceIndex:
         self._concurrency = concurrency
         self._repo_batch_size = repo_batch_size
         self._rate_limit_floor = rate_limit_floor
+        self._backend = backend
         self._on_progress = on_progress
 
     def __call__(self, source: SourceDefinition, *, source_key: str) -> RefreshResult:
@@ -200,21 +195,25 @@ class RefreshGitSourceIndex:
         rate_limit_reset_at: datetime | None = None
         probe_kinds = self._probe_kinds(source)
         probe_mode = self._probe_mode(source)
+        probe_fallbacks: dict[str, str] = {}
 
         for batch_index, batch in enumerate(_chunks(pending_repos, self._repo_batch_size)):
             probe_report = self._probe.probe(
-                [repo.full_name for repo in batch],
+                batch,
                 kinds=probe_kinds,
                 mode=probe_mode,
                 on_progress=self._probe_progress,
             )
+            probe_fallbacks.update(probe_report.fallbacks)
             rate_limit_cost, rate_limit_remaining, rate_limit_reset_at = _merge_rate_limit(
                 rate_limit_cost,
                 rate_limit_remaining,
                 rate_limit_reset_at,
                 probe_report,
             )
-            batch_failures: dict[str, str] = dict(probe_report.failures)
+            batch_failures: dict[str, str] = {
+                repo: failure.reason for repo, failure in probe_report.failures.items()
+            }
             tasks = [
                 self._repo_refresh_task(source, repo, probe_report.repos[repo.full_name])
                 for repo in batch
@@ -275,6 +274,7 @@ class RefreshGitSourceIndex:
                     changed_refs=changed_refs,
                     unchanged_refs=unchanged_refs,
                     failures=failures,
+                    probe_fallbacks=probe_fallbacks,
                     rate_limit_cost=rate_limit_cost,
                     rate_limit_remaining=rate_limit_remaining,
                     rate_limit_reset_at=rate_limit_reset_at,
@@ -302,6 +302,7 @@ class RefreshGitSourceIndex:
             changed_refs=changed_refs,
             unchanged_refs=unchanged_refs,
             failures=failures,
+            probe_fallbacks=probe_fallbacks,
             rate_limit_cost=rate_limit_cost,
             rate_limit_remaining=rate_limit_remaining,
             rate_limit_reset_at=rate_limit_reset_at,
@@ -312,12 +313,13 @@ class RefreshGitSourceIndex:
         self,
         *,
         source_key: str,
-        repos: list[_RepoCandidate],
+        repos: list[ProbeTarget],
         selected: set[tuple[str, str, str]],
         ignored_collections: set[str],
         changed_refs: int,
         unchanged_refs: int,
         failures: dict[str, str],
+        probe_fallbacks: dict[str, str],
         rate_limit_cost: int | None,
         rate_limit_remaining: int | None,
         rate_limit_reset_at: datetime | None,
@@ -340,6 +342,7 @@ class RefreshGitSourceIndex:
             failures=tuple(
                 RepoFailure(repo=repo, reason=failures[repo]) for repo in sorted(failures)
             ),
+            probe_fallbacks=probe_fallbacks,
             rate_limit_cost=rate_limit_cost,
             rate_limit_remaining=rate_limit_remaining,
             rate_limit_reset_at=rate_limit_reset_at,
@@ -413,7 +416,7 @@ class RefreshGitSourceIndex:
     def _repo_refresh_task(
         self,
         source: SourceDefinition,
-        repo: _RepoCandidate,
+        repo: ProbeTarget,
         probed: ProbedRepo,
     ) -> _RepoRefreshTask:
         default_branch = probed.default_branch or repo.default_branch
@@ -451,7 +454,7 @@ class RefreshGitSourceIndex:
         ignored_collections: set[str] = set()
         pending_scans: list[RefScan] = []
         pending_touches: list[RefScanTouch] = []
-        clone_url = _clone_url(repo, self._clone_protocol)
+        clone_url = remote_url_for(repo, self._clone_protocol)
         metadata_by_ref = self._ref_scan_metadata(source_key, repo.full_name, task.refs)
         changed_refs: list[GitRef] = []
         for ref in task.refs:
@@ -545,7 +548,7 @@ class RefreshGitSourceIndex:
             ignored_collections=frozenset(ignored_collections),
         )
 
-    def _expand_repos(self, source: SourceDefinition) -> list[_RepoCandidate]:
+    def _expand_repos(self, source: SourceDefinition) -> list[ProbeTarget]:
         """Expand explicit repos, orgs, and teams into candidates.
 
         Expansion failures propagate: an unknown org/team/repo is a source
@@ -650,28 +653,18 @@ def _exact_refspec(ref: GitRef) -> str:
     return f"+{full_ref}:{full_ref}"
 
 
-def _repo_candidate(row: dict[str, object], *, fallback: str | None) -> _RepoCandidate:
+def _repo_candidate(row: dict[str, object], *, fallback: str | None) -> ProbeTarget:
     full_name = _str(row.get("full_name")) or fallback
     if full_name is None:
         raise ValueError("repository metadata missing full_name")
     default_branch = _str(row.get("default_branch")) or "HEAD"
-    return _RepoCandidate(
+    return ProbeTarget(
         full_name=full_name,
         default_branch=default_branch,
         clone_url=_str(row.get("clone_url")),
         ssh_url=_str(row.get("ssh_url")),
         html_url=_str(row.get("html_url")),
     )
-
-
-def _clone_url(repo: _RepoCandidate, clone_protocol: str) -> str:
-    if clone_protocol == "ssh":
-        return repo.ssh_url or f"git@github.com:{repo.full_name}.git"
-    if repo.clone_url is not None:
-        return repo.clone_url
-    if repo.html_url is not None:
-        return f"{repo.html_url.rstrip('/')}.git"
-    return f"https://github.com/{repo.full_name}.git"
 
 
 def _dependency_paths_fingerprint(paths: list[str]) -> str:
@@ -687,7 +680,7 @@ def _aliases_fingerprint(aliases: dict[str, str]) -> str:
 def _source_refresh_fingerprint(
     source: SourceDefinition,
     *,
-    repos: list[_RepoCandidate],
+    repos: list[ProbeTarget],
     paths_fingerprint: str,
     aliases_fingerprint: str,
     ref_scan_default: RefScanDefault,

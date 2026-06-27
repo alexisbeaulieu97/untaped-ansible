@@ -48,6 +48,13 @@ RefScanDefaultOption = Annotated[
         help="Source scan strategy: all refs or only each repo's default branch.",
     ),
 ]
+BackendOption = Annotated[
+    Literal["auto", "graphql", "git"] | None,
+    Parameter(
+        name="--backend",
+        help="Ref probe backend for this refresh: auto, graphql, or git.",
+    ),
+]
 
 app = create_app(
     name="source",
@@ -307,6 +314,7 @@ def source_refresh_command(
     name: Annotated[str, Parameter(help="Source name.")],
     *,
     concurrency: ConcurrencyOption = None,
+    backend: BackendOption = None,
 ) -> None:
     """Refresh a saved source from GitHub."""
     with report_errors():
@@ -328,6 +336,7 @@ def source_refresh_command(
             github_settings=get_config_section("github", GithubSettings),
             http=ctx.http,
             concurrency=git_concurrency,
+            backend=backend,
             ui=ctx.ui(strict=False),
         )
         if result.failures:

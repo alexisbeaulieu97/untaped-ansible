@@ -224,6 +224,50 @@ class _NoGitFetchCache:
         raise AssertionError("unexpected dependency file read")
 
 
+class _LsRemoteSeedGitCache(_SeedGitCache):
+    """Git transport stub that can recover refs through ls-remote."""
+
+    def ls_remote(
+        self,
+        url: str,
+        *,
+        patterns: list[str],
+        auth_header: str | None,
+    ) -> str:
+        repo = url.removesuffix(".git").rsplit("/", maxsplit=2)[-2:]
+        full_name = "/".join(repo)
+        return "\n".join(
+            [
+                "ref: refs/heads/main\tHEAD",
+                f"sha-{full_name.rsplit('/', maxsplit=1)[-1]}\tHEAD",
+                f"sha-{full_name.rsplit('/', maxsplit=1)[-1]}\trefs/heads/main",
+                "",
+            ]
+        )
+
+
+class _NoFetchLsRemoteGitCache(_NoGitFetchCache):
+    """Git transport stub that permits ls-remote but rejects fetch/scan work."""
+
+    def ls_remote(
+        self,
+        url: str,
+        *,
+        patterns: list[str],
+        auth_header: str | None,
+    ) -> str:
+        del patterns, auth_header
+        repo = url.removesuffix(".git").rsplit("/", maxsplit=1)[-1]
+        return "\n".join(
+            [
+                "ref: refs/heads/main\tHEAD",
+                f"sha-{repo}\tHEAD",
+                f"sha-{repo}\trefs/heads/main",
+                "",
+            ]
+        )
+
+
 def _seed_unchanged_scan(
     monkeypatch,
     repos: dict[str, str],
@@ -833,6 +877,7 @@ def test_graph_inline_upstream_refreshes_and_renders_impact(
         github_settings,
         http,
         concurrency: int,
+        backend=None,
         on_progress=None,
     ) -> RefreshResult:
         del source, aliases, settings, concurrency
@@ -897,6 +942,7 @@ def test_graph_inline_source_reuses_fingerprint_cache_without_refresh(
         github_settings,
         http,
         concurrency: int,
+        backend=None,
         on_progress=None,
     ) -> RefreshResult:
         nonlocal refresh_calls
@@ -1073,6 +1119,7 @@ def test_graph_repeated_sources_refresh_each_saved_source(
         github_settings,
         http,
         concurrency: int,
+        backend=None,
         on_progress=None,
     ) -> RefreshResult:
         del aliases, settings, concurrency
@@ -1721,6 +1768,7 @@ def test_inline_source_cache_key_is_order_insensitive(tmp_path: Path, monkeypatc
         github_settings,
         http,
         concurrency: int,
+        backend=None,
         on_progress=None,
     ) -> RefreshResult:
         nonlocal refresh_calls
@@ -2230,6 +2278,70 @@ def test_source_refresh_allows_git_concurrency_override(tmp_path: Path, monkeypa
     assert "concurrency 5" in result.stderr
 
 
+def test_source_refresh_backend_override_passes_to_refresh(tmp_path: Path, monkeypatch) -> None:
+    cfg = _write_config(
+        tmp_path,
+        extra_profile={"github": {"token": "ghp_test"}},
+        top_level_ansible={"sources": [{"name": "prod", "repos": ["acme/site"]}]},
+    )
+    monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
+    captured: dict[str, str] = {}
+
+    class FakeGitRefresh:
+        def __init__(self, **kwargs) -> None:
+            captured["backend"] = kwargs["backend"]
+
+        def __call__(self, source, *, source_key: str) -> RefreshResult:
+            return RefreshResult(
+                source_key=source_key,
+                repos=1,
+                refs=1,
+                edges=0,
+                changed_refs=1,
+                unchanged_refs=0,
+            )
+
+    monkeypatch.setattr(_refresh, "RefreshGitSourceIndex", FakeGitRefresh)
+
+    result = CliInvoker().invoke(app, ["source", "refresh", "prod", "--backend", "git"])
+
+    assert result.exit_code == 0, result.output
+    assert captured["backend"] == "git"
+
+
+def test_source_refresh_git_backend_skips_unchanged_fetch_and_graphql(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    index_path = tmp_path / "index.sqlite3"
+    cfg = _write_config(
+        tmp_path,
+        index_path=index_path,
+        extra_profile={"github": {"token": "ghp_test"}},
+        top_level_ansible={"sources": [{"name": "prod", "repos": ["acme/site"]}]},
+    )
+    monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
+    _seed_unchanged_scan(monkeypatch, {"acme/site": "sha-site"})
+
+    monkeypatch.setattr(_refresh, "GitRepositoryCache", _NoFetchLsRemoteGitCache)
+    with respx.mock(base_url="https://api.github.com", assert_all_called=True) as mock:
+        mock.get("/repos/acme/site").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "full_name": "acme/site",
+                    "default_branch": "main",
+                    "clone_url": "https://github.com/acme/site.git",
+                },
+            )
+        )
+
+        result = CliInvoker().invoke(app, ["source", "refresh", "prod", "--backend", "git"])
+
+    assert result.exit_code == 0, result.output
+    assert "refreshed source 'prod': 1 repos, 1 refs" in result.stderr
+
+
 def test_graph_with_source_uses_cache_by_default_with_git_backend(
     tmp_path: Path,
     monkeypatch,
@@ -2269,6 +2381,66 @@ def test_graph_with_source_uses_cache_by_default_with_git_backend(
     assert result.exit_code == 0, result.output
     assert "    +-- acme/site@main" in result.stdout
     assert "changed" not in result.stderr
+
+
+def test_graph_backend_without_refresh_is_usage_error(tmp_path: Path, monkeypatch) -> None:
+    cfg = _write_config(
+        tmp_path,
+        top_level_ansible={"sources": [{"name": "platform", "repos": ["acme/site"]}]},
+    )
+    monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
+
+    result = CliInvoker().invoke(
+        app,
+        ["graph", "acme/base", "--source", "platform", "--backend", "git"],
+    )
+
+    assert result.exit_code == 2, result.output
+    assert "--backend requires --refresh" in result.output
+
+
+def test_graph_refresh_backend_override_passes_to_refresh(tmp_path: Path, monkeypatch) -> None:
+    cfg = _write_config(
+        tmp_path,
+        extra_profile={"github": {"token": "ghp_test"}},
+        top_level_ansible={"sources": [{"name": "platform", "repos": ["acme/site"]}]},
+    )
+    monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
+    captured: dict[str, str] = {}
+
+    class FakeGitRefresh:
+        def __init__(self, **kwargs) -> None:
+            captured["backend"] = kwargs["backend"]
+
+        def __call__(self, source, *, source_key: str) -> RefreshResult:
+            return RefreshResult(
+                source_key=source_key,
+                repos=1,
+                refs=1,
+                edges=0,
+                changed_refs=1,
+                unchanged_refs=0,
+            )
+
+    monkeypatch.setattr(_refresh, "RefreshGitSourceIndex", FakeGitRefresh)
+
+    result = CliInvoker().invoke(
+        app,
+        [
+            "graph",
+            "acme/base",
+            "--source",
+            "platform",
+            "--upstream",
+            "--refresh",
+            "--backend",
+            "git",
+        ],
+    )
+
+    assert result.exit_code == 1, result.output
+    assert "no cached source data found" in result.output
+    assert captured["backend"] == "git"
 
 
 def test_graph_with_source_missing_cache_fails_by_default(
@@ -2312,6 +2484,7 @@ def test_graph_inline_upstream_with_ref_renders_all_matching_source_refs(
         github_settings,
         http,
         concurrency: int,
+        backend=None,
         on_progress=None,
     ) -> RefreshResult:
         del aliases, settings, concurrency
@@ -2384,6 +2557,7 @@ def test_graph_inline_source_preserves_repeated_selectors(
         github_settings,
         http,
         concurrency: int,
+        backend=None,
         on_progress=None,
     ) -> RefreshResult:
         del aliases, settings, concurrency
@@ -2462,6 +2636,7 @@ def test_graph_inline_source_passes_ref_scan_default_to_refresh(
         github_settings,
         http,
         concurrency: int,
+        backend=None,
         on_progress=None,
     ) -> RefreshResult:
         del aliases, settings, github_settings, http, concurrency, on_progress
@@ -2548,6 +2723,7 @@ def _counting_refresh(calls: list[str]):
         github_settings,
         http,
         concurrency: int,
+        backend=None,
         on_progress=None,
     ) -> RefreshResult:
         del aliases, settings, concurrency
@@ -2856,7 +3032,7 @@ def test_source_refresh_partial_failure_exits_nonzero_and_saves_successes(
 
     with respx.mock(base_url="https://api.github.com") as mock:
         _mock_refresh_repos(mock, {"acme/ok": "sha-ok"}, missing=("acme/gone",))
-        result = CliInvoker().invoke(app, ["source", "refresh", "prod"])
+        result = CliInvoker().invoke(app, ["source", "refresh", "prod", "--backend", "graphql"])
 
     assert result.exit_code == 1
     assert result.stdout == ""
@@ -2877,6 +3053,7 @@ def test_source_refresh_transient_probe_failure_prints_safe_rerun_hint(
     cfg = _write_config(
         tmp_path,
         index_path=index_path,
+        ansible_profile={"source_refresh_backend": "graphql"},
         extra_profile={"github": {"token": "ghp_test"}},
         top_level_ansible={"sources": [{"name": "prod", "repos": ["acme/ok"]}]},
     )
@@ -2885,6 +3062,7 @@ def test_source_refresh_transient_probe_failure_prints_safe_rerun_hint(
     _write_config(
         tmp_path,
         index_path=index_path,
+        ansible_profile={"source_refresh_backend": "graphql"},
         extra_profile={"github": {"token": "ghp_test"}},
         top_level_ansible={"sources": [{"name": "prod", "repos": ["acme/ok", "acme/flaky"]}]},
     )
@@ -2925,7 +3103,7 @@ def test_source_refresh_transient_probe_failure_prints_safe_rerun_hint(
             )
         mock.post("/graphql").mock(side_effect=graphql_response)
 
-        result = CliInvoker().invoke(app, ["source", "refresh", "prod"])
+        result = CliInvoker().invoke(app, ["source", "refresh", "prod", "--backend", "graphql"])
 
     assert result.exit_code == 1
     assert "failed acme/flaky: transient ref probe failed: HTTP 502" in result.stderr
@@ -2936,6 +3114,64 @@ def test_source_refresh_transient_probe_failure_prints_safe_rerun_hint(
     assert SqliteDependencyIndex(index_path).ref_scans(
         "source:prod", "acme/ok", [("heads", "main")]
     )
+
+
+def test_source_refresh_auto_recovers_transient_probe_failure_with_git_fallback(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    index_path = tmp_path / "index.sqlite3"
+    cfg = _write_config(
+        tmp_path,
+        index_path=index_path,
+        extra_profile={"github": {"token": "ghp_test"}},
+        top_level_ansible={"sources": [{"name": "prod", "repos": ["acme/flaky", "acme/ok"]}]},
+    )
+    monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
+
+    def graphql_response(request: httpx.Request) -> httpx.Response:
+        query = request.content.decode()
+        if "flaky" in query:
+            return httpx.Response(502, text="Bad Gateway")
+        return httpx.Response(
+            200,
+            json={
+                "data": {
+                    "rateLimit": {
+                        "cost": 1,
+                        "remaining": 4900,
+                        "resetAt": "2026-01-01T00:00:00Z",
+                    },
+                    "r0": _graphql_repo_node("acme/ok", sha="sha-ok"),
+                }
+            },
+        )
+
+    monkeypatch.setattr(_refresh, "GitRepositoryCache", _LsRemoteSeedGitCache)
+    with respx.mock(base_url="https://api.github.com") as mock:
+        for full_name in ("acme/flaky", "acme/ok"):
+            owner, name = full_name.split("/", maxsplit=1)
+            mock.get(f"/repos/{owner}/{name}").mock(
+                return_value=httpx.Response(
+                    200,
+                    json={
+                        "full_name": full_name,
+                        "default_branch": "main",
+                        "clone_url": f"https://github.com/{full_name}.git",
+                    },
+                )
+            )
+        mock.post("/graphql").mock(side_effect=graphql_response)
+
+        result = CliInvoker().invoke(app, ["source", "refresh", "prod"])
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout == ""
+    assert "warning: 1 repo fell back to git ls-remote after transient" in result.stderr
+    assert "failed acme/flaky" not in result.stderr
+    index = SqliteDependencyIndex(index_path)
+    assert index.ref_scans("source:prod", "acme/ok", [("heads", "main")])
+    assert index.ref_scans("source:prod", "acme/flaky", [("heads", "main")])
 
 
 def test_source_refresh_hard_failure_does_not_print_transient_rerun_hint(
@@ -2960,6 +3196,7 @@ def test_source_refresh_hard_failure_does_not_print_transient_rerun_hint(
         github_settings,
         http,
         concurrency: int,
+        backend=None,
         on_progress=None,
     ) -> RefreshResult:
         del source, index, aliases, settings, github_settings, http, concurrency, on_progress
@@ -3004,6 +3241,7 @@ def test_source_refresh_budget_pause_exits_nonzero_without_repo_failures(
         github_settings,
         http,
         concurrency: int,
+        backend=None,
         on_progress=None,
     ) -> RefreshResult:
         del source, index, aliases, settings, github_settings, http, concurrency, on_progress
@@ -3080,7 +3318,7 @@ def test_source_refresh_global_graphql_error_exits_once_without_per_repo_failure
             ("acme/gone", "acme/ok"),
             httpx.Response(403, json={"message": "API rate limit exceeded for user ID 123."}),
         )
-        result = CliInvoker().invoke(app, ["source", "refresh", "prod"])
+        result = CliInvoker().invoke(app, ["source", "refresh", "prod", "--backend", "graphql"])
 
     assert result.exit_code == 1
     assert result.stdout == ""
@@ -3182,6 +3420,7 @@ def test_graph_refresh_with_partial_failures_warns_and_proceeds(
         github_settings,
         http,
         concurrency: int,
+        backend=None,
         on_progress=None,
     ) -> RefreshResult:
         del source, aliases, settings, concurrency
@@ -3251,6 +3490,7 @@ def test_graph_refresh_budget_pause_exits_without_rendering_stale_graph(
         github_settings,
         http,
         concurrency: int,
+        backend=None,
         on_progress=None,
     ) -> RefreshResult:
         del source, index, aliases, settings, github_settings, http, concurrency, on_progress
@@ -3305,7 +3545,16 @@ def test_graph_refresh_global_graphql_error_exits_without_rendering_stale_graph(
         )
         result = CliInvoker().invoke(
             app,
-            ["graph", "acme/base", "--source", "platform", "--upstream", "--refresh"],
+            [
+                "graph",
+                "acme/base",
+                "--source",
+                "platform",
+                "--upstream",
+                "--refresh",
+                "--backend",
+                "graphql",
+            ],
         )
 
     assert result.exit_code == 1

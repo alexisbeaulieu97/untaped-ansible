@@ -9,7 +9,13 @@ from untaped.api import HttpError, UntapedError
 from untaped_github import GithubGraphqlError
 
 from untaped_ansible._concurrency import bounded_map
-from untaped_ansible.domain.payloads import GitRef, ProbedRepo, ProbeReport
+from untaped_ansible.domain.payloads import (
+    GitRef,
+    ProbedRepo,
+    ProbeFailure,
+    ProbeReport,
+    ProbeTarget,
+)
 
 if TYPE_CHECKING:
     from untaped_github import BatchRepoRefsResult
@@ -69,7 +75,7 @@ class GithubRefProbe:
 
     def probe(
         self,
-        repos: Sequence[str],
+        repos: Sequence[ProbeTarget],
         *,
         kinds: Sequence[str],
         mode: Literal["all", "default_branch"] = "all",
@@ -77,13 +83,16 @@ class GithubRefProbe:
     ) -> ProbeReport:
         if mode not in {"all", "default_branch"}:
             raise ValueError("mode must be 'all' or 'default_branch'")
-        total = len(repos)
+        repo_names = tuple(_target_full_name(target) for target in repos)
+        total = len(repo_names)
         chunk_size = (
             self._default_branch_chunk_size if mode == "default_branch" else self._chunk_size
         )
-        chunks = [tuple(repos[start : start + chunk_size]) for start in range(0, total, chunk_size)]
+        chunks = [
+            tuple(repo_names[start : start + chunk_size]) for start in range(0, total, chunk_size)
+        ]
         probed: dict[str, ProbedRepo] = {}
-        failures: dict[str, str] = {}
+        failures: dict[str, ProbeFailure] = {}
         rate_limit_cost: int | None = None
         rate_limit_remaining: int | None = None
         rate_limit_reset_at = None
@@ -92,7 +101,9 @@ class GithubRefProbe:
         def merge(chunk: tuple[str, ...], outcome: BatchRepoRefsResult | str) -> None:
             nonlocal rate_limit_cost, rate_limit_remaining, rate_limit_reset_at
             if isinstance(outcome, str):
-                failures.update(dict.fromkeys(chunk, outcome))
+                failures.update(
+                    {repo: ProbeFailure(kind="chunk", reason=outcome) for repo in chunk}
+                )
                 return
             for repo_refs in outcome.repos:
                 probed[repo_refs.full_name] = ProbedRepo(
@@ -101,9 +112,17 @@ class GithubRefProbe:
                         GitRef(kind=ref.kind, name=ref.name, sha=ref.sha) for ref in repo_refs.refs
                     ),
                 )
-            failures.update(dict.fromkeys(outcome.missing, _MISSING_REASON))
+            failures.update(
+                {
+                    repo: ProbeFailure(kind="missing", reason=_MISSING_REASON)
+                    for repo in outcome.missing
+                }
+            )
             for failure in outcome.failures:
-                failures[failure.full_name] = _format_transient_failure(failure.reason)
+                failures[failure.full_name] = ProbeFailure(
+                    kind="transient",
+                    reason=_format_transient_failure(failure.reason),
+                )
             if outcome.rate_limit_remaining is not None:
                 rate_limit_remaining = (
                     outcome.rate_limit_remaining
@@ -160,6 +179,10 @@ class GithubRefProbe:
 def _format_transient_failure(reason: str) -> str:
     detail = reason.strip() or "unknown transient GitHub GraphQL failure"
     return f"{TRANSIENT_REF_PROBE_FAILURE_PREFIX}{detail}"
+
+
+def _target_full_name(target: ProbeTarget | str) -> str:
+    return target if isinstance(target, str) else target.full_name
 
 
 def is_transient_ref_probe_failure(reason: str) -> bool:

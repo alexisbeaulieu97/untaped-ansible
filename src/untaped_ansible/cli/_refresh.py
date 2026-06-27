@@ -5,6 +5,7 @@ from __future__ import annotations
 import time
 from base64 import b64encode
 from collections.abc import Callable
+from typing import Literal
 
 from untaped.api import HttpSettings, ProgressHandle, UiContext, echo
 from untaped_github import GithubClient, GithubSettings
@@ -13,7 +14,9 @@ from untaped_ansible.application.refresh_git_index import RefreshGitSourceIndex
 from untaped_ansible.application.refresh_index import RefreshResult
 from untaped_ansible.domain.payloads import RefreshProgressEvent
 from untaped_ansible.infrastructure import (
+    AutoRefProbe,
     GithubRefProbe,
+    GitRemoteRefProbe,
     GitRepositoryCache,
     SqliteDependencyIndex,
 )
@@ -33,6 +36,7 @@ def run_source_refresh(
     http: HttpSettings,
     concurrency: int,
     ui: UiContext,
+    backend: Literal["auto", "graphql", "git"] | None = None,
 ) -> RefreshResult:
     """Refresh one source with stderr progress, then echo summary and warnings."""
     started_at = time.perf_counter()
@@ -46,6 +50,7 @@ def run_source_refresh(
             github_settings=github_settings,
             http=http,
             concurrency=concurrency,
+            backend=backend,
             on_progress=progress_reporter(progress),
         )
     echo(
@@ -59,6 +64,7 @@ def run_source_refresh(
         err=True,
     )
     warn_low_rate_limit(result, threshold=settings.source_refresh_rate_limit_floor)
+    warn_probe_fallbacks(result)
     return result
 
 
@@ -72,6 +78,7 @@ def refresh_source(
     github_settings: GithubSettings,
     http: HttpSettings,
     concurrency: int,
+    backend: Literal["auto", "graphql", "git"] | None = None,
     on_progress: Callable[[RefreshProgressEvent], None] | None = None,
 ) -> RefreshResult:
     """Run a git-backed source refresh with fully wired adapters."""
@@ -81,10 +88,20 @@ def refresh_source(
             if github_settings.token is not None
             else ""
         )
+        git = GitRepositoryCache()
+        selected_backend = backend or settings.source_refresh_backend
+        auth_header = _git_auth_header(token) if token else None
+        graphql_probe = GithubRefProbe(github, concurrency=settings.probe_concurrency)
+        git_probe = GitRemoteRefProbe(
+            git,
+            clone_protocol=settings.git_clone_protocol,
+            auth_header=auth_header,
+            concurrency=settings.probe_concurrency,
+        )
         result = RefreshGitSourceIndex(
             github=github,
-            git=GitRepositoryCache(),
-            probe=GithubRefProbe(github, concurrency=settings.probe_concurrency),
+            git=git,
+            probe=AutoRefProbe(graphql_probe, git_probe, backend=selected_backend),
             index=index,
             aliases=aliases,
             default_dependency_paths=settings.dependency_paths,
@@ -92,11 +109,12 @@ def refresh_source(
             clone_protocol=settings.git_clone_protocol,
             fetch_depth=settings.git_fetch_depth,
             blob_filter=settings.git_blob_filter,
-            auth_header=_git_auth_header(token) if token else None,
+            auth_header=auth_header,
             concurrency=concurrency,
             ref_scan_default=settings.ref_scan_default,
             repo_batch_size=settings.source_refresh_repo_batch_size,
             rate_limit_floor=settings.source_refresh_rate_limit_floor,
+            backend=selected_backend,
             on_progress=on_progress,
         )(source, source_key=source_key)
     return result
@@ -140,6 +158,29 @@ def warn_low_rate_limit(result: RefreshResult, *, threshold: int) -> None:
             f"warning: GitHub GraphQL rate limit is low: {remaining} points remaining",
             err=True,
         )
+
+
+def warn_probe_fallbacks(result: RefreshResult) -> None:
+    """Warn when GraphQL probing fell back to per-repo Git ls-remote calls."""
+    if not result.probe_fallbacks:
+        return
+    reasons = set(result.probe_fallbacks.values())
+    count = len(result.probe_fallbacks)
+    if reasons == {"graphql_rate_limited"}:
+        echo(
+            "warning: "
+            f"{pluralize(count, 'repo')} fell back to git ls-remote after "
+            "GitHub GraphQL rate limit exhaustion; large fallbacks can be much slower "
+            "because Git probing runs one network subprocess per repo",
+            err=True,
+        )
+        return
+    echo(
+        "warning: "
+        f"{pluralize(count, 'repo')} fell back to git ls-remote after transient "
+        "GitHub GraphQL probe failures",
+        err=True,
+    )
 
 
 def pluralize(count: int, noun: str) -> str:

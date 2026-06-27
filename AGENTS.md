@@ -279,37 +279,50 @@ refs across branches and tags unless paired with `--ref-kind`; any explicit
 ref kind or pattern uses the all-ref GraphQL probe path. `--ref-kind tags`
 without a pattern scans all tags.
 
-Source refresh is git-only for data transport. A refresh runs three phases:
+Source refresh is GitHub-inventory-backed and local-git-backed for object
+transport. Ref probing is backend-selectable through
+`ansible.source_refresh_backend` and `--backend auto|graphql|git` on
+`source refresh`; `graph --refresh` accepts the same override, while
+`graph --backend` without `--refresh` is a usage error. `auto` is the default:
+GraphQL is the happy path, with bounded Git `ls-remote` fallback only for
+fallback-eligible per-repo GraphQL probe failures or primary GraphQL
+rate-limit exhaustion. The selected backend is per-run, is not persisted on
+sources, and is not part of the refresh fingerprint. A refresh runs three
+phases:
 
 1. **Expansion** resolves explicit repos, orgs, and teams into a deduped,
    sorted repo list through `untaped-github`'s public
    `ResolveRepositoryInventory` API. Explicit repos win over org/team
    listings. Expansion failures are fatal: an unknown org/team/repo is a
    source misconfiguration, not a per-repo failure.
-2. **Freshness probe** is GraphQL-only and runs in repo-level batches so large
-   sources can pause and resume. `GithubRefProbe` wraps
-   `GithubClient.batch_repo_refs(...)` for all-ref scans and
-   `GithubClient.batch_default_branch_refs(...)` for default-branch-only
-   scans. All-ref probes use 50-repo GraphQL chunks; default-branch probes use
-   100-repo GraphQL chunks until a live smoke validates a higher limit. The
-   probe also supplies each repo's exact default branch (expansion metadata is
-   the fallback), cumulative `rate_limit_cost`, the minimum GraphQL
+2. **Freshness probe** runs in repo-level batches so large sources can pause
+   and resume. `GithubRefProbe` wraps `GithubClient.batch_repo_refs(...)` for
+   all-ref scans and `GithubClient.batch_default_branch_refs(...)` for
+   default-branch-only scans. All-ref GraphQL probes use 50-repo chunks;
+   default-branch GraphQL probes use 100-repo chunks. `GitRemoteRefProbe`
+   uses `git ls-remote --symref` (Git 2.8+) with the same HTTPS auth-header
+   injection/redaction behavior as fetches, the normal 60-second Git timeout,
+   and `ansible.probe_concurrency`. `git` mode still uses GitHub REST
+   inventory expansion and still needs GitHub credentials for private sources;
+   only the ref probe transport changes. The probe supplies each repo's exact
+   default branch (expansion metadata is the fallback) and, for GraphQL
+   results, cumulative `rate_limit_cost`, the minimum GraphQL
    `rate_limit_remaining`, and `rate_limit_reset_at`; the CLI warns on stderr
    when remaining drops below `ansible.source_refresh_rate_limit_floor`
-   (default 500). Do not reintroduce `git ls-remote` ref checks.
-   `BatchRepoRefsResult.failures` rows from `untaped-github` are transient
-   per-repo probe failures and should be surfaced as `transient ref probe
-   failed: ...`, not as global GraphQL access failures.
-   Global `/graphql` access failures classified by
-   `untaped_github.GithubGraphqlError` (rate limit, secondary rate
-   limit, auth, forbidden, or unknown request-level failures) must
-   propagate out of `GithubRefProbe`, `RefreshGitSourceIndex`,
-   `refresh_source`, and `run_source_refresh`. They are not per-repo
-   failures: `source refresh` and source-backed `graph` should exit once
-   through the SDK `report_errors()` path instead of rendering
-   `failed <repo>:` lines or stale graph output. Known limitation: if
-   GitHub returns `200 OK` with per-alias `FORBIDDEN` for every repo,
-   v1 still reports those repos as missing/inaccessible rather than
+   (default 500). `BatchRepoRefsResult.failures` rows from `untaped-github`
+   are transient per-repo probe failures and should be surfaced as
+   `transient ref probe failed: ...`, not as global GraphQL access failures.
+   `AutoRefProbe` falls back to Git only for structured per-repo
+   `ProbeFailure.kind in {"transient", "chunk"}` and never for `missing` or
+   `git` failures. On `GithubGraphqlError(kind="rate_limited")`, v1 falls
+   back the whole active probe target set to Git instead of preserving partial
+   GraphQL successes. Global `/graphql` failures classified as
+   `secondary_rate_limited`, `auth`, `forbidden`, or `unknown` must propagate
+   out of `GithubRefProbe`, `RefreshGitSourceIndex`, `refresh_source`, and
+   `run_source_refresh`: they are not per-repo failures, and source-backed
+   `graph` should exit once instead of rendering stale graph output. Known
+   limitation: if GitHub returns `200 OK` with per-alias `FORBIDDEN` for every
+   repo, v1 still reports those repos as missing/inaccessible rather than
    inferring a global SSO or token-scope failure.
 3. **Fetch/parse** keeps bare repositories under `ansible.repo_cache_path`,
    fetches only changed or missing refs (bounded by
@@ -320,17 +333,20 @@ Source refresh is git-only for data transport. A refresh runs three phases:
    `ansible.source_refresh_repo_batch_size` (default 100).
 
 Refresh is resilient to per-repo failures. Probe misses (missing or
-inaccessible repos) and per-repo fetch/parse errors (`GitCacheError`,
-`UntapedError`) are recorded as `RefreshResult.failures`
+inaccessible repos), unrecovered probe failures, and per-repo fetch/parse
+errors (`GitCacheError`, `UntapedError`) are recorded as `RefreshResult.failures`
 instead of aborting the run, and pruning is scoped to succeeded repos during
 partial commits: failed and untouched repos keep their previously cached refs
 and repo metadata. After the summary, `source refresh` echoes each
 `failed <repo>: <reason>` to stderr and exits 1
 (`refresh completed with N repo failure(s); successes were saved`). Transient
-ref probe failures also print a hint that a normal rerun is safe and unchanged
-repos skip Git fetch/dependency scan work. The graph
-refresh path instead prepends a graph warning and proceeds with possibly stale
-data for the failed repos.
+GraphQL ref probe failures in explicit `graphql` mode also print a hint that a
+normal rerun is safe and unchanged repos skip Git fetch/dependency scan work.
+When auto fallback activates, `RefreshResult.probe_fallbacks` records the repos
+and reason, and the CLI prints a stderr warning with the fallback count. Large
+rate-limit fallbacks can be much slower because Git probing runs one network
+subprocess per repo. The graph refresh path instead prepends a graph warning
+and proceeds with possibly stale data for failed repos.
 
 Large refreshes are resumable. SQLite stores `source_refresh_progress` rows
 for successful repos in the active source fingerprint. If the GraphQL budget

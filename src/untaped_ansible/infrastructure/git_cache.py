@@ -80,6 +80,20 @@ class GitRepositoryCache:
         args.extend(refspecs)
         self._run(args, cwd=bare_path, timeout=self._slow_timeout, auth_header=auth_header)
 
+    def ls_remote(
+        self,
+        url: str,
+        *,
+        patterns: list[str],
+        auth_header: str | None,
+    ) -> str:
+        """Run ``git ls-remote --symref`` without requiring a local repository."""
+        return self._run(
+            ["ls-remote", "--symref", url, *patterns],
+            capture=True,
+            auth_header=auth_header,
+        )
+
     def read_file(
         self,
         bare_path: Path,

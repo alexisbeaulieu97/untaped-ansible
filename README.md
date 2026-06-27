@@ -37,9 +37,11 @@ untaped-ansible graph TARGET --source platform --source ops --upstream --cached
 untaped-ansible graph TARGET --source platform --upstream
 untaped-ansible graph TARGET --source platform --downstream --live
 untaped-ansible graph TARGET --source platform --both --refresh --concurrency 12
+untaped-ansible graph TARGET --source platform --both --refresh --backend git
 untaped-ansible graph TARGET --source platform --both --format mermaid --output deps.mmd
 untaped-ansible source save platform --org acme --team platform
 untaped-ansible source refresh platform --concurrency 12
+untaped-ansible source refresh platform --backend graphql
 untaped-ansible source status platform
 untaped-ansible alias add common acme/common
 untaped-ansible config|profile|skills ...
@@ -103,32 +105,50 @@ pass graph `--refresh` when you want remote checks.
 
 A refresh runs in repo-level batches. Org, team, and repo expansion is
 resolved through the public `untaped-github` inventory API, with explicit repo
-metadata winning over org/team listings. Each batch uses the GraphQL ref probe
-— there is no per-repo `git ls-remote` — and carries GraphQL cost, remaining
-budget, and reset metadata. Git fetches only repos whose selected refs changed,
-with per-repo concurrency bounded by `ansible.git_fetch_concurrency` (default
-`8`, accepts `1..32`). Refresh batches use
-`ansible.source_refresh_repo_batch_size` (default `100`); all-ref GraphQL
-probe chunks use `50` repos, while default-branch-only probes use `100` repos.
-`untaped-ansible graph --refresh` and
-`untaped-ansible source refresh` both accept `--concurrency N` as a per-run override.
+metadata winning over org/team listings. Ref probing is GraphQL-primary by
+default (`ansible.source_refresh_backend: auto`): GraphQL handles the happy
+path and Git `ls-remote` is used only for recoverable per-repo GraphQL probe
+failures or primary GraphQL rate-limit exhaustion. Set
+`ansible.source_refresh_backend` or pass `--backend auto|graphql|git` to
+`source refresh`; `graph --refresh` accepts the same `--backend` override, and
+`graph --backend` without `--refresh` is a usage error. The `git` backend still
+uses GitHub REST inventory expansion and still needs GitHub credentials for
+private sources; it only replaces the ref probe transport.
+
+GraphQL probe results carry GraphQL cost, remaining budget, and reset
+metadata. All-ref GraphQL chunks use `50` repos, while default-branch-only
+GraphQL chunks use `100` repos. Git `ls-remote` probing runs one subprocess
+per repo, uses `git ls-remote --symref` (Git 2.8+), the same HTTPS auth-header
+redaction path as fetches, the normal 60-second Git timeout, and
+`ansible.probe_concurrency` for concurrency. Large Git fallback runs can be
+much slower than GraphQL batches; when fallback activates, a warning with the
+repo count and reason is printed to stderr. Git fetches still only repos whose
+selected refs changed, with per-repo concurrency bounded by
+`ansible.git_fetch_concurrency` (default `8`, accepts `1..32`). Refresh
+batches use `ansible.source_refresh_repo_batch_size` (default `100`).
+`untaped-ansible graph --refresh` and `untaped-ansible source refresh` both
+accept `--concurrency N` as a per-run override for fetch/parse work.
 Refresh progress is reported on stderr with repo/ref counts, changed and
 unchanged refs, edge count, elapsed time, and the Git concurrency used.
 
-Global GitHub GraphQL access failures — rate limits, secondary rate limits,
-auth failures, or request-level forbidden responses from `/graphql` — abort the
-refresh immediately with one `error: ...` message. They are not expanded into
-per-repo failures, and source-backed `graph` exits instead of rendering stale
-cached output. A known limitation remains: if GitHub returns `200 OK` with a
-per-repo `FORBIDDEN` error for every alias, that still reports as
-per-repo missing/inaccessible rather than a global SSO or token-scope failure.
+In `auto` mode, primary GraphQL rate-limit exhaustion falls back to Git
+`ls-remote` for the whole active probe target set. Secondary rate limiting,
+auth failures, request-level forbidden responses, and unknown global GraphQL
+access failures still abort immediately with one `error: ...` message. They
+are not expanded into per-repo failures, and source-backed `graph` exits
+instead of rendering stale cached output. A known limitation remains: if
+GitHub returns `200 OK` with a per-repo `FORBIDDEN` error for every alias, that
+still reports as per-repo missing/inaccessible rather than a global SSO or
+token-scope failure.
 
 Per-repo failures do not abort a refresh: successful repos are committed,
 each failure is listed on stderr, and `source refresh` exits 1. When every
 repo fails, nothing is committed and the index is left untouched.
-Transient GraphQL ref-probe failures print an additional hint to rerun the
-same `source refresh` command; unchanged repos skip Git fetch and dependency
-scan work on the rerun.
+Transient GraphQL ref-probe failures in explicit `graphql` mode print an
+additional hint to rerun the same `source refresh` command; unchanged repos
+skip Git fetch and dependency scan work on the rerun. In `auto` mode, transient
+GraphQL per-repo failures first fall back to Git `ls-remote`; only unrecovered
+repos remain in the failure list.
 
 If the GraphQL budget drops below `ansible.source_refresh_rate_limit_floor`
 (default `500`) during a large refresh, successful repos are committed,
