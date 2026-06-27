@@ -15,7 +15,7 @@ from untaped_github import (
     RepoRefs,
 )
 
-from untaped_ansible.domain.payloads import GitRef
+from untaped_ansible.domain.payloads import GitRef, ProbeFailure
 from untaped_ansible.infrastructure.github_ref_probe import (
     GithubRefProbe,
     is_transient_ref_probe_failure,
@@ -146,7 +146,12 @@ def test_probe_converts_batch_results_to_domain_refs() -> None:
         GitRef(kind="heads", name="main", sha="sha-main"),
         GitRef(kind="tags", name="v1", sha="sha-v1"),
     )
-    assert report.failures == {"acme/gone": "repository not found or inaccessible on GitHub"}
+    assert report.failures == {
+        "acme/gone": ProbeFailure(
+            kind="missing",
+            reason="repository not found or inaccessible on GitHub",
+        )
+    }
     assert client.calls == [(("acme/site", "acme/gone"), ("heads", "tags"), 2)]
 
 
@@ -238,8 +243,9 @@ def test_probe_marks_failed_chunks_without_aborting_others() -> None:
 
     assert set(report.repos) == {"acme/ok", "acme/also-ok"}
     assert "acme/boom" in report.failures
-    assert "502" in report.failures["acme/boom"]
-    assert report.failures["acme/boom"].startswith("ref probe failed: ")
+    assert report.failures["acme/boom"].kind == "chunk"
+    assert "502" in report.failures["acme/boom"].reason
+    assert report.failures["acme/boom"].reason.startswith("ref probe failed: ")
 
 
 def test_probe_marks_github_transient_failures_without_losing_successes() -> None:
@@ -254,9 +260,12 @@ def test_probe_marks_github_transient_failures_without_losing_successes() -> Non
 
     assert set(report.repos) == {"acme/ok"}
     assert report.failures == {
-        "acme/flaky": "transient ref probe failed: HTTP 502 for https://api.github.com/graphql"
+        "acme/flaky": ProbeFailure(
+            kind="transient",
+            reason="transient ref probe failed: HTTP 502 for https://api.github.com/graphql",
+        )
     }
-    assert is_transient_ref_probe_failure(report.failures["acme/flaky"])
+    assert is_transient_ref_probe_failure(report.failures["acme/flaky"].reason)
 
 
 def test_probe_marks_default_branch_github_transient_failures() -> None:
@@ -272,9 +281,12 @@ def test_probe_marks_default_branch_github_transient_failures() -> None:
 
     assert set(report.repos) == {"acme/ok"}
     assert report.failures == {
-        "acme/flaky": "transient ref probe failed: HTTP 502 for https://api.github.com/graphql"
+        "acme/flaky": ProbeFailure(
+            kind="transient",
+            reason="transient ref probe failed: HTTP 502 for https://api.github.com/graphql",
+        )
     }
-    assert is_transient_ref_probe_failure(report.failures["acme/flaky"])
+    assert is_transient_ref_probe_failure(report.failures["acme/flaky"].reason)
 
 
 def test_probe_marks_untaped_error_chunks_as_failures() -> None:
@@ -284,7 +296,12 @@ def test_probe_marks_untaped_error_chunks_as_failures() -> None:
     report = GithubRefProbe(client).probe(["acme/bad"], kinds=("heads",))
 
     assert report.repos == {}
-    assert report.failures == {"acme/bad": "ref probe failed: invalid repository 'acme/bad'"}
+    assert report.failures == {
+        "acme/bad": ProbeFailure(
+            kind="chunk",
+            reason="ref probe failed: invalid repository 'acme/bad'",
+        )
+    }
 
 
 def test_probe_propagates_global_graphql_errors() -> None:

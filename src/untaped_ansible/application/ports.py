@@ -138,7 +138,7 @@ class RefProbe(Protocol):
 
     def probe(
         self,
-        repos: Sequence[str],
+        repos: Sequence[payloads.ProbeTarget],
         *,
         kinds: Sequence[str],
         mode: Literal["all", "default_branch"] = "all",

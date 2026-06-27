@@ -44,6 +44,13 @@ GraphFormatOption = Annotated[
     GraphFormat,
     Parameter(name=["--format", "-f"], help="Graph output format."),
 ]
+BackendOption = Annotated[
+    Literal["auto", "graphql", "git"] | None,
+    Parameter(
+        name="--backend",
+        help="Ref probe backend for source refresh: auto, graphql, or git.",
+    ),
+]
 
 # LimitedChoice() defaults to at-most-one selection — cyclopts' MutuallyExclusive
 # is an untyped alias for exactly this, so the typed parent is used directly.
@@ -145,6 +152,7 @@ def graph_command(
             ),
         ),
     ] = None,
+    backend: BackendOption = None,
     live: Annotated[
         bool,
         Parameter(
@@ -226,6 +234,8 @@ def graph_command(
     """
     if refresh and not any((source, orgs, teams, source_repos)):
         raise_usage("--refresh requires --source or inline source selectors")
+    if backend is not None and not refresh:
+        raise_usage("--backend requires --refresh")
     with report_errors():
         ctx = app_context()
         settings = get_config_section("ansible", AnsibleSettings)
@@ -264,6 +274,7 @@ def graph_command(
                     github_settings=github_settings,
                     http=ctx.http,
                     concurrency=git_concurrency,
+                    backend=backend,
                     ui=ctx.ui(strict=False),
                 )
                 if not result.completed:

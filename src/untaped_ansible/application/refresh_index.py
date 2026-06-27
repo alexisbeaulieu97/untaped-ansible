@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from untaped_ansible.domain.payloads import RepoFailure
 
@@ -24,6 +24,7 @@ class RefreshResult(BaseModel):
     changed_refs: int = 0
     unchanged_refs: int = 0
     failures: tuple[RepoFailure, ...] = ()
+    probe_fallbacks: dict[str, str] = Field(default_factory=dict)
     rate_limit_cost: int | None = None
     rate_limit_remaining: int | None = None
     rate_limit_reset_at: datetime | None = None

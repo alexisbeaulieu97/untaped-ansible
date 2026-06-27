@@ -83,6 +83,63 @@ def test_auth_header_is_not_passed_in_git_argv(monkeypatch, tmp_path: Path) -> N
     assert not captured["auth_config_path"].exists()
 
 
+def test_ls_remote_uses_repo_independent_git_command(monkeypatch) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        cmd = args[0]
+        assert isinstance(cmd, list)
+        captured["cmd"] = cmd
+        captured["cwd"] = kwargs.get("cwd")
+        captured["timeout"] = kwargs.get("timeout")
+        return subprocess.CompletedProcess(cmd, 0, stdout="abc\trefs/heads/main\n", stderr="")
+
+    monkeypatch.setattr("shutil.which", lambda _: "/usr/bin/git")
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    output = GitRepositoryCache(timeout=12).ls_remote(
+        "https://github.com/acme/site.git",
+        patterns=["HEAD", "refs/heads/*"],
+        auth_header=None,
+    )
+
+    assert output == "abc\trefs/heads/main\n"
+    assert captured["cmd"] == [
+        "/usr/bin/git",
+        "ls-remote",
+        "--symref",
+        "https://github.com/acme/site.git",
+        "HEAD",
+        "refs/heads/*",
+    ]
+    assert captured["cwd"] is None
+    assert captured["timeout"] == 12
+
+
+def test_ls_remote_auth_header_is_redacted_from_errors(monkeypatch) -> None:
+    def fake_run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        cmd = args[0]
+        return subprocess.CompletedProcess(
+            cmd,
+            128,
+            stdout="",
+            stderr="fatal: AUTHORIZATION: bearer secret-token denied",
+        )
+
+    monkeypatch.setattr("shutil.which", lambda _: "/usr/bin/git")
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    with pytest.raises(GitCacheError) as exc_info:
+        GitRepositoryCache().ls_remote(
+            "https://github.com/acme/site.git",
+            patterns=["HEAD"],
+            auth_header="AUTHORIZATION: bearer secret-token",
+        )
+
+    assert "secret-token" not in str(exc_info.value)
+    assert "<redacted>" in str(exc_info.value)
+
+
 def test_fetch_refs_propagates_missing_remote_ref(monkeypatch, tmp_path: Path) -> None:
     def fake_run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
         cmd = args[0]
