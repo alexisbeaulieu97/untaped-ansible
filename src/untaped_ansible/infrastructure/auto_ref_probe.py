@@ -116,7 +116,6 @@ def _merge_fallback(
     }
     failures.update(git_report.failures)
     fallbacks = dict(graphql_report.fallbacks)
-    fallbacks.update(git_report.fallbacks)
     fallbacks.update({repo: reason for repo in fallback_repos})
     return graphql_report.model_copy(
         update={
