@@ -324,6 +324,12 @@ phases:
    limitation: if GitHub returns `200 OK` with per-alias `FORBIDDEN` for every
    repo, v1 still reports those repos as missing/inaccessible rather than
    inferring a global SSO or token-scope failure.
+   GraphQL and Git probes agree for branches, lightweight tags, annotated tags,
+   and tags-of-tags. GraphQL peels annotated tags up to two levels; Git
+   `ls-remote` exposes fully peeled `^{}` targets for deeper annotated-tag
+   chains. Rare 3+ level chains can therefore churn if a refresh switches
+   backend. Normalizing those deeper chains is future work, so do not claim
+   full backend-invariant SHAs for every possible tag chain.
 3. **Fetch/parse** keeps bare repositories under `ansible.repo_cache_path`,
    fetches only changed or missing refs (bounded by
    `ansible.git_fetch_concurrency` / `--concurrency`), reads dependency

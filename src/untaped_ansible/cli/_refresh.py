@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 from base64 import b64encode
+from collections import Counter
 from collections.abc import Callable
 from typing import Literal
 
@@ -12,7 +13,11 @@ from untaped_github import GithubClient, GithubSettings
 
 from untaped_ansible.application.refresh_git_index import RefreshGitSourceIndex
 from untaped_ansible.application.refresh_index import RefreshResult
-from untaped_ansible.domain.payloads import RefreshProgressEvent
+from untaped_ansible.domain.payloads import (
+    GRAPHQL_RATE_LIMIT_FALLBACK,
+    GRAPHQL_TRANSIENT_FALLBACK,
+    RefreshProgressEvent,
+)
 from untaped_ansible.infrastructure import (
     AutoRefProbe,
     GithubRefProbe,
@@ -114,7 +119,6 @@ def refresh_source(
             ref_scan_default=settings.ref_scan_default,
             repo_batch_size=settings.source_refresh_repo_batch_size,
             rate_limit_floor=settings.source_refresh_rate_limit_floor,
-            backend=selected_backend,
             on_progress=on_progress,
         )(source, source_key=source_key)
     return result
@@ -164,23 +168,33 @@ def warn_probe_fallbacks(result: RefreshResult) -> None:
     """Warn when GraphQL probing fell back to per-repo Git ls-remote calls."""
     if not result.probe_fallbacks:
         return
-    reasons = set(result.probe_fallbacks.values())
-    count = len(result.probe_fallbacks)
-    if reasons == {"graphql_rate_limited"}:
+    counts = Counter(result.probe_fallbacks.values())
+    rate_limited = counts.pop(GRAPHQL_RATE_LIMIT_FALLBACK, 0)
+    if rate_limited:
         echo(
             "warning: "
-            f"{pluralize(count, 'repo')} fell back to git ls-remote after "
+            f"{pluralize(rate_limited, 'repo')} fell back to git ls-remote after "
             "GitHub GraphQL rate limit exhaustion; large fallbacks can be much slower "
             "because Git probing runs one network subprocess per repo",
             err=True,
         )
-        return
-    echo(
-        "warning: "
-        f"{pluralize(count, 'repo')} fell back to git ls-remote after transient "
-        "GitHub GraphQL probe failures",
-        err=True,
-    )
+    transient = counts.pop(GRAPHQL_TRANSIENT_FALLBACK, 0)
+    if transient:
+        echo(
+            "warning: "
+            f"{pluralize(transient, 'repo')} fell back to git ls-remote after transient "
+            "GitHub GraphQL probe failures",
+            err=True,
+        )
+    unknown = sum(counts.values())
+    if unknown:
+        reasons = ", ".join(f"{reason} ({count})" for reason, count in sorted(counts.items()))
+        echo(
+            "warning: "
+            f"{pluralize(unknown, 'repo')} fell back to git ls-remote for "
+            f"unrecognized fallback reason(s): {reasons}",
+            err=True,
+        )
 
 
 def pluralize(count: int, noun: str) -> str:

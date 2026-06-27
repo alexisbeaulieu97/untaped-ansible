@@ -7,7 +7,12 @@ from typing import Literal, Protocol
 
 from untaped_github import GithubGraphqlError
 
-from untaped_ansible.domain.payloads import ProbeReport, ProbeTarget
+from untaped_ansible.domain.payloads import (
+    GRAPHQL_RATE_LIMIT_FALLBACK,
+    GRAPHQL_TRANSIENT_FALLBACK,
+    ProbeReport,
+    ProbeTarget,
+)
 
 BackendMode = Literal["auto", "graphql", "git"]
 _FALLBACK_KINDS = {"transient", "chunk"}
@@ -52,16 +57,17 @@ class AutoRefProbe:
             return self._graphql.probe(repos, kinds=kinds, mode=mode, on_progress=on_progress)
         if self._backend == "git":
             return self._git.probe(repos, kinds=kinds, mode=mode, on_progress=on_progress)
+        auto_progress = _monotonic_progress(len(repos), on_progress)
         try:
-            report = self._graphql.probe(repos, kinds=kinds, mode=mode, on_progress=on_progress)
+            report = self._graphql.probe(repos, kinds=kinds, mode=mode, on_progress=auto_progress)
         except GithubGraphqlError as exc:
             if exc.kind != "rate_limited":
                 raise
-            git_report = self._git.probe(repos, kinds=kinds, mode=mode, on_progress=on_progress)
+            git_report = self._git.probe(repos, kinds=kinds, mode=mode, on_progress=auto_progress)
             return _with_fallbacks(
                 git_report,
                 repos=[target.full_name for target in repos],
-                reason="graphql_rate_limited",
+                reason=GRAPHQL_RATE_LIMIT_FALLBACK,
             )
         fallback_targets = [
             target
@@ -75,13 +81,13 @@ class AutoRefProbe:
             fallback_targets,
             kinds=kinds,
             mode=mode,
-            on_progress=on_progress,
+            on_progress=None,
         )
         return _merge_fallback(
             report,
             git_report,
             fallback_repos=[target.full_name for target in fallback_targets],
-            reason="graphql_transient",
+            reason=GRAPHQL_TRANSIENT_FALLBACK,
         )
 
 
@@ -119,3 +125,23 @@ def _merge_fallback(
             "fallbacks": fallbacks,
         }
     )
+
+
+def _monotonic_progress(
+    total: int,
+    on_progress: Callable[[int, int], None] | None,
+) -> Callable[[int, int], None] | None:
+    if on_progress is None:
+        return None
+
+    max_done = 0
+
+    def report(done: int, _total: int) -> None:
+        nonlocal max_done
+        clamped = max(0, min(done, total))
+        if clamped <= max_done:
+            return
+        max_done = clamped
+        on_progress(max_done, total)
+
+    return report

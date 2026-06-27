@@ -18,6 +18,8 @@ from untaped_ansible import app
 from untaped_ansible.application.refresh_index import RefreshResult
 from untaped_ansible.cli import _refresh
 from untaped_ansible.domain.payloads import (
+    GRAPHQL_RATE_LIMIT_FALLBACK,
+    GRAPHQL_TRANSIENT_FALLBACK,
     IndexedDependency,
     RefScan,
     RepoFailure,
@@ -2287,9 +2289,14 @@ def test_source_refresh_backend_override_passes_to_refresh(tmp_path: Path, monke
     monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
     captured: dict[str, str] = {}
 
+    class FakeAutoRefProbe:
+        def __init__(self, graphql, git, *, backend: str) -> None:
+            del graphql, git
+            captured["backend"] = backend
+
     class FakeGitRefresh:
         def __init__(self, **kwargs) -> None:
-            captured["backend"] = kwargs["backend"]
+            del kwargs
 
         def __call__(self, source, *, source_key: str) -> RefreshResult:
             return RefreshResult(
@@ -2301,6 +2308,7 @@ def test_source_refresh_backend_override_passes_to_refresh(tmp_path: Path, monke
                 unchanged_refs=0,
             )
 
+    monkeypatch.setattr(_refresh, "AutoRefProbe", FakeAutoRefProbe)
     monkeypatch.setattr(_refresh, "RefreshGitSourceIndex", FakeGitRefresh)
 
     result = CliInvoker().invoke(app, ["source", "refresh", "prod", "--backend", "git"])
@@ -2408,9 +2416,14 @@ def test_graph_refresh_backend_override_passes_to_refresh(tmp_path: Path, monkey
     monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
     captured: dict[str, str] = {}
 
+    class FakeAutoRefProbe:
+        def __init__(self, graphql, git, *, backend: str) -> None:
+            del graphql, git
+            captured["backend"] = backend
+
     class FakeGitRefresh:
         def __init__(self, **kwargs) -> None:
-            captured["backend"] = kwargs["backend"]
+            del kwargs
 
         def __call__(self, source, *, source_key: str) -> RefreshResult:
             return RefreshResult(
@@ -2422,6 +2435,7 @@ def test_graph_refresh_backend_override_passes_to_refresh(tmp_path: Path, monkey
                 unchanged_refs=0,
             )
 
+    monkeypatch.setattr(_refresh, "AutoRefProbe", FakeAutoRefProbe)
     monkeypatch.setattr(_refresh, "RefreshGitSourceIndex", FakeGitRefresh)
 
     result = CliInvoker().invoke(
@@ -3174,6 +3188,42 @@ def test_source_refresh_auto_recovers_transient_probe_failure_with_git_fallback(
     assert index.ref_scans("source:prod", "acme/flaky", [("heads", "main")])
 
 
+def test_source_refresh_default_auto_recovers_primary_rate_limit_with_git_fallback(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    index_path = tmp_path / "index.sqlite3"
+    cfg = _write_config(
+        tmp_path,
+        index_path=index_path,
+        extra_profile={"github": {"token": "ghp_test"}},
+        top_level_ansible={"sources": [{"name": "prod", "repos": ["acme/a", "acme/b"]}]},
+    )
+    monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
+
+    monkeypatch.setattr(_refresh, "GitRepositoryCache", _LsRemoteSeedGitCache)
+    with respx.mock(base_url="https://api.github.com") as mock:
+        _mock_refresh_graphql_error(
+            mock,
+            ("acme/a", "acme/b"),
+            httpx.Response(403, json={"message": "API rate limit exceeded for user ID 123."}),
+        )
+
+        result = CliInvoker().invoke(app, ["source", "refresh", "prod"])
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout == ""
+    assert "failed acme/" not in result.stderr
+    assert (
+        "warning: 2 repos fell back to git ls-remote after GitHub GraphQL rate limit exhaustion"
+        in result.stderr
+    )
+    assert "large fallbacks can be much slower" in result.stderr
+    index = SqliteDependencyIndex(index_path)
+    assert index.ref_scans("source:prod", "acme/a", [("heads", "main")])
+    assert index.ref_scans("source:prod", "acme/b", [("heads", "main")])
+
+
 def test_source_refresh_hard_failure_does_not_print_transient_rerun_hint(
     tmp_path: Path,
     monkeypatch,
@@ -3396,6 +3446,50 @@ def test_source_refresh_low_rate_limit_warning_uses_configured_floor(
 
     assert result.exit_code == 0, result.output
     assert "warning: GitHub GraphQL rate limit is low" not in result.stderr
+
+
+def test_warn_probe_fallbacks_groups_mixed_reasons(capsys: pytest.CaptureFixture[str]) -> None:
+    result = RefreshResult(
+        source_key="source:prod",
+        repos=0,
+        refs=0,
+        edges=0,
+        probe_fallbacks={
+            "acme/a": GRAPHQL_RATE_LIMIT_FALLBACK,
+            "acme/b": GRAPHQL_TRANSIENT_FALLBACK,
+            "acme/c": GRAPHQL_TRANSIENT_FALLBACK,
+        },
+    )
+
+    _refresh.warn_probe_fallbacks(result)
+
+    stderr = capsys.readouterr().err
+    assert "warning: 1 repo fell back to git ls-remote after GitHub GraphQL rate limit" in stderr
+    assert "large fallbacks can be much slower" in stderr
+    assert "warning: 2 repos fell back to git ls-remote after transient" in stderr
+
+
+def test_warn_probe_fallbacks_reports_unknown_reasons(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    result = RefreshResult(
+        source_key="source:prod",
+        repos=0,
+        refs=0,
+        edges=0,
+        probe_fallbacks={
+            "acme/a": "future_reason",
+            "acme/b": "future_reason",
+        },
+    )
+
+    _refresh.warn_probe_fallbacks(result)
+
+    stderr = capsys.readouterr().err
+    assert (
+        "warning: 2 repos fell back to git ls-remote for unrecognized fallback reason(s)" in stderr
+    )
+    assert "future_reason (2)" in stderr
 
 
 def test_graph_refresh_with_partial_failures_warns_and_proceeds(

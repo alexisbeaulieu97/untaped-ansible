@@ -7,6 +7,10 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+ProbeFallbackReason = Literal["graphql_rate_limited", "graphql_transient"]
+GRAPHQL_RATE_LIMIT_FALLBACK: ProbeFallbackReason = "graphql_rate_limited"
+GRAPHQL_TRANSIENT_FALLBACK: ProbeFallbackReason = "graphql_transient"
+
 
 class IndexedDependency(BaseModel):
     """One indexed dependency edge from a scanned source repo/ref."""

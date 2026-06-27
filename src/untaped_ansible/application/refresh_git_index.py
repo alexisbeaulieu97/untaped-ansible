@@ -133,7 +133,6 @@ class RefreshGitSourceIndex:
         concurrency: int = 8,
         repo_batch_size: int = 100,
         rate_limit_floor: int = 500,
-        backend: Literal["auto", "graphql", "git"] = "auto",
         on_progress: ProgressCallback | None = None,
     ) -> None:
         if clone_protocol not in {"https", "ssh"}:
@@ -144,8 +143,6 @@ class RefreshGitSourceIndex:
             raise ValueError("repo_batch_size must be >= 1")
         if rate_limit_floor < 0:
             raise ValueError("rate_limit_floor must be >= 0")
-        if backend not in {"auto", "graphql", "git"}:
-            raise ValueError("backend must be auto, graphql, or git")
         self._github = github
         self._git = git
         self._probe = probe
@@ -161,7 +158,6 @@ class RefreshGitSourceIndex:
         self._concurrency = concurrency
         self._repo_batch_size = repo_batch_size
         self._rate_limit_floor = rate_limit_floor
-        self._backend = backend
         self._on_progress = on_progress
 
     def __call__(self, source: SourceDefinition, *, source_key: str) -> RefreshResult:

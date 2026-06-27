@@ -141,6 +141,13 @@ GitHub returns `200 OK` with a per-repo `FORBIDDEN` error for every alias, that
 still reports as per-repo missing/inaccessible rather than a global SSO or
 token-scope failure.
 
+GraphQL and Git probes record the same SHA for branches, lightweight tags,
+annotated tags, and tags-of-tags. GraphQL currently peels annotated tags up to
+two levels; Git `ls-remote` exposes fully peeled `^{}` targets for deeper
+annotated-tag chains. Rare 3+ level tag chains can therefore look changed if a
+run switches between GraphQL and Git fallback. Normalizing those deeper chains
+is future work.
+
 Per-repo failures do not abort a refresh: successful repos are committed,
 each failure is listed on stderr, and `source refresh` exits 1. When every
 repo fails, nothing is committed and the index is left untouched.

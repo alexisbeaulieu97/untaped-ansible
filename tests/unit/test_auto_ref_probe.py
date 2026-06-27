@@ -9,6 +9,8 @@ import pytest
 from untaped_github import GithubGraphqlError
 
 from untaped_ansible.domain.payloads import (
+    GRAPHQL_RATE_LIMIT_FALLBACK,
+    GRAPHQL_TRANSIENT_FALLBACK,
     GitRef,
     ProbedRepo,
     ProbeFailure,
@@ -23,6 +25,7 @@ class FakeProbe:
         self.report = ProbeReport()
         self.error: Exception | None = None
         self.calls: list[tuple[tuple[str, ...], tuple[str, ...], str]] = []
+        self.progress_events: list[tuple[int, int]] = []
 
     def probe(
         self,
@@ -33,10 +36,12 @@ class FakeProbe:
         on_progress: Callable[[int, int], None] | None = None,
     ) -> ProbeReport:
         self.calls.append((tuple(repo.full_name for repo in repos), tuple(kinds), mode))
+        if on_progress is not None:
+            events = self.progress_events or [(len(repos), len(repos))]
+            for done, total in events:
+                on_progress(done, total)
         if self.error is not None:
             raise self.error
-        if on_progress is not None:
-            on_progress(len(repos), len(repos))
         return self.report
 
 
@@ -78,8 +83,8 @@ def test_auto_falls_back_transient_and_chunk_failures_only() -> None:
     assert report.failures == {"acme/missing": ProbeFailure(kind="missing", reason="missing")}
     assert git.calls == [(("acme/transient", "acme/chunk"), ("heads",), "all")]
     assert report.fallbacks == {
-        "acme/transient": "graphql_transient",
-        "acme/chunk": "graphql_transient",
+        "acme/transient": GRAPHQL_TRANSIENT_FALLBACK,
+        "acme/chunk": GRAPHQL_TRANSIENT_FALLBACK,
     }
 
 
@@ -102,7 +107,7 @@ def test_auto_git_fallback_failures_replace_graphql_transient_failures() -> None
     assert report.failures == {
         "acme/flaky": ProbeFailure(kind="git", reason="git ref probe failed: denied")
     }
-    assert report.fallbacks == {"acme/flaky": "graphql_transient"}
+    assert report.fallbacks == {"acme/flaky": GRAPHQL_TRANSIENT_FALLBACK}
 
 
 def test_auto_primary_rate_limit_falls_back_entire_target_set() -> None:
@@ -130,9 +135,55 @@ def test_auto_primary_rate_limit_falls_back_entire_target_set() -> None:
     assert set(report.repos) == {"acme/a", "acme/b"}
     assert git.calls == [(("acme/a", "acme/b"), ("heads",), "default_branch")]
     assert report.fallbacks == {
-        "acme/a": "graphql_rate_limited",
-        "acme/b": "graphql_rate_limited",
+        "acme/a": GRAPHQL_RATE_LIMIT_FALLBACK,
+        "acme/b": GRAPHQL_RATE_LIMIT_FALLBACK,
     }
+
+
+def test_auto_rate_limit_fallback_progress_is_monotonic_with_original_total() -> None:
+    graphql = FakeProbe()
+    git = FakeProbe()
+    graphql.error = GithubGraphqlError("github graphql rate limit exceeded", kind="rate_limited")
+    graphql.progress_events = [(1, 2)]
+    git.progress_events = [(1, 2), (2, 2)]
+    git.report = ProbeReport(
+        repos={
+            "acme/a": _probed("main", "sha-a"),
+            "acme/b": _probed("main", "sha-b"),
+        }
+    )
+    progress: list[tuple[int, int]] = []
+
+    AutoRefProbe(graphql, git, backend="auto").probe(
+        _targets("acme/a", "acme/b"),
+        kinds=("heads",),
+        on_progress=lambda done, total: progress.append((done, total)),
+    )
+
+    assert progress == [(1, 2), (2, 2)]
+    assert all(total == 2 for _, total in progress)
+    assert [done for done, _ in progress] == sorted(done for done, _ in progress)
+
+
+def test_auto_transient_subset_fallback_does_not_emit_smaller_progress_total() -> None:
+    graphql = FakeProbe()
+    git = FakeProbe()
+    graphql.progress_events = [(3, 3)]
+    graphql.report = ProbeReport(
+        repos={"acme/ok": _probed("main", "sha-ok")},
+        failures={"acme/flaky": ProbeFailure(kind="transient", reason="transient")},
+    )
+    git.progress_events = [(1, 1)]
+    git.report = ProbeReport(repos={"acme/flaky": _probed("main", "sha-flaky")})
+    progress: list[tuple[int, int]] = []
+
+    AutoRefProbe(graphql, git, backend="auto").probe(
+        _targets("acme/ok", "acme/flaky", "acme/missing"),
+        kinds=("heads",),
+        on_progress=lambda done, total: progress.append((done, total)),
+    )
+
+    assert progress == [(3, 3)]
 
 
 @pytest.mark.parametrize("kind", ["auth", "forbidden", "secondary_rate_limited", "unknown"])
