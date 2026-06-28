@@ -2,16 +2,37 @@
 
 from __future__ import annotations
 
+import sys
 from collections.abc import Sequence
 from hashlib import sha256
 
 from untaped_ansible.application.graph import BuildGraph, GraphRequest
 from untaped_ansible.domain.payloads import CachedRef, IndexedDependency
+from untaped_ansible.domain.renderers import render_graph
 
 
 def _edge_id(relation: str, source_id: str, target_id: str) -> str:
     digest = sha256(f"{relation}\0{source_id}\0{target_id}".encode()).hexdigest()[:16]
     return f"edge:{digest}"
+
+
+def _chain_edges(length: int, *, cycle: bool = False) -> list[IndexedDependency]:
+    edges: list[IndexedDependency] = []
+    limit = length if cycle else length - 1
+    for index in range(limit):
+        source = f"acme/role-{index:04d}"
+        target = f"acme/role-{(index + 1) % length:04d}"
+        edges.append(
+            IndexedDependency(
+                source_repo=source,
+                source_ref="main",
+                dependency_repo=target,
+                dependency_name=target.rsplit("/", maxsplit=1)[-1],
+                dependency_version="main",
+                source_path="roles/requirements.yml",
+            )
+        )
+    return edges
 
 
 class StubIndex:
@@ -209,8 +230,11 @@ def test_downstream_cycle_emits_closing_edge_and_structured_cycle() -> None:
             "requires",
         ),
     ]
-    assert [(cycle.direction, cycle.node_ids, cycle.edge_ids) for cycle in graph.cycles] == [
+    assert [
+        (cycle.kind, cycle.relation, cycle.node_ids, cycle.edge_ids) for cycle in graph.cycles
+    ] == [
         (
+            "cycle",
             "requires",
             ("acme/base@v1", "acme/users@main", "acme/base@v1"),
             (
@@ -259,8 +283,11 @@ def test_upstream_cycle_emits_closing_edge_and_structured_cycle() -> None:
             "impacts",
         ),
     ]
-    assert [(cycle.direction, cycle.node_ids, cycle.edge_ids) for cycle in graph.cycles] == [
+    assert [
+        (cycle.kind, cycle.relation, cycle.node_ids, cycle.edge_ids) for cycle in graph.cycles
+    ] == [
         (
+            "cycle",
             "impacts",
             ("acme/base@v1", "acme/users@main", "acme/base@v1"),
             (
@@ -290,8 +317,11 @@ def test_self_loop_is_reported_as_one_node_cycle() -> None:
     assert [(edge.source_id, edge.target_id, edge.relation) for edge in graph.edges] == [
         ("acme/base@v1", "acme/base@v1", "requires")
     ]
-    assert [(cycle.direction, cycle.node_ids, cycle.edge_ids) for cycle in graph.cycles] == [
+    assert [
+        (cycle.kind, cycle.relation, cycle.node_ids, cycle.edge_ids) for cycle in graph.cycles
+    ] == [
         (
+            "cycle",
             "requires",
             ("acme/base@v1", "acme/base@v1"),
             (_edge_id("requires", "acme/base@v1", "acme/base@v1"),),
@@ -338,31 +368,34 @@ def test_cycles_beyond_depth_are_not_reported() -> None:
     assert graph.cycles == ()
 
 
-def test_dense_cycle_component_is_capped_deterministically() -> None:
-    edges: list[IndexedDependency] = []
-    for index in range(51):
-        source = f"acme/role-{index:02d}"
-        target = f"acme/role-{(index + 1) % 51:02d}"
-        edges.append(
-            IndexedDependency(
-                source_repo=source,
-                source_ref="main",
-                dependency_repo=target,
-                dependency_name=target.rsplit("/", maxsplit=1)[-1],
-                dependency_version="main",
-                source_path="roles/requirements.yml",
-            )
-        )
-    index = StubIndex(edges)
+def test_long_acyclic_chain_builds_and_renders_without_recursion_error() -> None:
+    length = sys.getrecursionlimit() + 25
+    index = StubIndex(_chain_edges(length))
 
     graph = BuildGraph(index)(
-        GraphRequest(repo="acme/role-00", ref="main", direction="deps", depth=None)
+        GraphRequest(repo="acme/role-0000", ref="main", direction="deps", depth=None)
     )
+    rendered = render_graph(graph, "tree")
 
     assert graph.cycles == ()
-    assert graph.warnings == (
-        "cycle enumeration skipped for requires component with 51 nodes and 51 edges",
+    assert "acme/role-0000@main" in rendered
+    assert f"acme/role-{length - 1:04d}@main" in rendered
+
+
+def test_long_cyclic_ring_builds_detects_and_renders_without_recursion_error() -> None:
+    length = sys.getrecursionlimit() + 25
+    index = StubIndex(_chain_edges(length, cycle=True))
+
+    graph = BuildGraph(index)(
+        GraphRequest(repo="acme/role-0000", ref="main", direction="deps", depth=None)
     )
+    rendered = render_graph(graph, "tree")
+
+    assert len(graph.cycles) == 1
+    assert graph.cycles[0].kind == "cycle"
+    assert graph.cycles[0].relation == "requires"
+    assert len(graph.cycles[0].node_ids) == length + 1
+    assert "(cycle)" in rendered
 
 
 def test_transitive_dependency_traversal_uses_exact_cached_refs() -> None:

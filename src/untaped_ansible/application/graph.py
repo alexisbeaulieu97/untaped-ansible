@@ -232,9 +232,15 @@ class _GraphBuilder:
         return children
 
     def _replay(self, entry: _Walk) -> None:
-        for item in entry.items:
+        stack = [iter(entry.items)]
+        while stack:
+            try:
+                item = next(stack[-1])
+            except StopIteration:
+                stack.pop()
+                continue
             if isinstance(item, _Walk):
-                self._replay(item)
+                stack.append(iter(item.items))
             elif isinstance(item, _AddNodeItem):
                 self._add_node(item.repo, item.ref, ref_kind=item.ref_kind)
             elif isinstance(item, _AddTargetItem):

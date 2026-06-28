@@ -148,16 +148,20 @@ bypasses `render_rows`, so it carries no typed-pipe envelope or `kind` tag.
   over that model.
 - `GraphEdge.id` is public JSON identity: `edge:` plus the first 16 hex
   characters of `sha256(relation + NUL + source_id + NUL + target_id)`. Do
-  not change this format without treating it as a graph contract change.
+  not change this format without treating it as a graph contract change. This
+  is topological identity, not physical declaration identity: duplicate
+  declarations with the same relation/source/target collapse to one
+  representative graph edge.
 - Graph cycles are detected after graph construction over the emitted,
   depth-bounded edge set. Cycle-closing edges must be emitted before traversal
   stops on a per-path cycle guard, otherwise cycle output hides the actual
-  dependency relation. `DependencyGraph.cycles` records canonical cycles
-  separately for `requires` and `impacts`, including self-loops; each cycle
-  stores the closed `node_ids` path and the corresponding `edge_ids`. Cycle
-  enumeration is capped by deterministic SCC size/edge-count checks before
-  enumeration, and dense components produce a graph warning instead of a
-  nondeterministic partial cycle list.
+  dependency relation. `DependencyGraph.cycles` records `kind`, `relation`,
+  `node_ids`, and `edge_ids` separately for `requires` and `impacts`, including
+  self-loops. `kind="cycle"` stores a closed ordered `node_ids` path and the
+  corresponding path `edge_ids`. `kind="scc_group"` stores a sorted open SCC
+  node set and sorted internal SCC edge IDs when elementary cycle enumeration
+  exceeds the deterministic cap. Never emit a nondeterministic partial cycle
+  list for a dense component.
 - Tree output renders nested traversal paths for downstream and upstream
   independently. Each direction starts with the target node for that direction;
   when the requested target omits `--ref`, tree output should preserve concrete
@@ -178,7 +182,9 @@ bypasses `render_rows`, so it carries no typed-pipe envelope or `kind` tag.
   Empty, whitespace-only, and `---`-only files remain warning-free. Malformed
   or templated YAML and recognized dependency files with unsupported top-level
   shape return empty dependencies plus `ParseWarning`; they are visibility
-  warnings, not repo failures.
+  warnings, not repo failures. Recognized nested sections (`dependencies`,
+  `roles`, `collections`) are warning-free when missing, null, or empty lists;
+  present non-list values warn and are skipped.
 
 ## Cached Source Data
 

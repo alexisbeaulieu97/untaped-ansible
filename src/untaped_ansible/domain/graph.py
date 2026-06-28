@@ -5,9 +5,10 @@ from __future__ import annotations
 from hashlib import sha256
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 EdgeRelation = Literal["requires", "impacts"]
+CycleKind = Literal["cycle", "scc_group"]
 
 
 class GraphNode(BaseModel):
@@ -46,13 +47,30 @@ class GraphEdge(BaseModel):
 
 
 class GraphCycle(BaseModel):
-    """One directed cycle detected in the emitted graph."""
+    """One cycle record detected in the emitted graph."""
 
     model_config = ConfigDict(frozen=True)
 
-    direction: EdgeRelation
+    kind: CycleKind
+    relation: EdgeRelation
     node_ids: tuple[str, ...]
     edge_ids: tuple[str, ...]
+
+    @model_validator(mode="after")
+    def validate_kind_shape(self) -> GraphCycle:
+        if self.kind == "cycle":
+            if len(self.node_ids) < 2 or self.node_ids[0] != self.node_ids[-1]:
+                raise ValueError("cycle node_ids must be a closed path")
+            if len(self.edge_ids) != len(self.node_ids) - 1:
+                raise ValueError("cycle edge_ids must match path edges")
+            return self
+        if self.node_ids != tuple(sorted(self.node_ids)):
+            raise ValueError("scc_group node_ids must be sorted")
+        if self.edge_ids != tuple(sorted(self.edge_ids)):
+            raise ValueError("scc_group edge_ids must be sorted")
+        if len(self.node_ids) >= 2 and self.node_ids[0] == self.node_ids[-1]:
+            raise ValueError("scc_group node_ids must be an open set")
+        return self
 
 
 class DependencyGraph(BaseModel):

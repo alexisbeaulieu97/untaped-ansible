@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 
@@ -20,14 +20,22 @@ def parse_dependency_file(path: str, text: str) -> ParseReport:
     if path.endswith("meta/main.yml"):
         if not isinstance(data, dict):
             return _warning_report(path, "expected mapping at top level")
-        return ParseReport(dependencies=_parse_entries(data.get("dependencies"), path))
+        dependencies, warnings = _parse_list_section(data, "dependencies", path)
+        return ParseReport(dependencies=dependencies, warnings=warnings)
     if _is_requirements_path(path):
         if isinstance(data, list):
             return ParseReport(dependencies=_parse_entries(data, path))
         if isinstance(data, dict):
+            dependencies, dependency_warnings = _parse_list_section(data, "roles", path)
+            collections, collection_warnings = _parse_collection_section(
+                data,
+                "collections",
+                path,
+            )
             return ParseReport(
-                dependencies=_parse_entries(data.get("roles"), path),
-                ignored_collections=_parse_collections(data.get("collections")),
+                dependencies=dependencies,
+                ignored_collections=collections,
+                warnings=(*dependency_warnings, *collection_warnings),
             )
         return _warning_report(path, "expected mapping or list at top level")
     return ParseReport()
@@ -36,7 +44,7 @@ def parse_dependency_file(path: str, text: str) -> ParseReport:
 class _LoadedYaml:
     def __init__(
         self,
-        status: str,
+        status: Literal["empty", "invalid", "parsed"],
         data: Any = None,
     ) -> None:
         self.status = status
@@ -61,6 +69,19 @@ def _is_requirements_path(path: str) -> bool:
 
 def _warning_report(path: str, reason: str) -> ParseReport:
     return ParseReport(warnings=(ParseWarning(source_path=path, reason=reason),))
+
+
+def _parse_list_section(
+    data: dict[Any, Any],
+    key: str,
+    source_path: str,
+) -> tuple[tuple[DependencyDeclaration, ...], tuple[ParseWarning, ...]]:
+    if key not in data or data[key] is None:
+        return (), ()
+    raw = data[key]
+    if not isinstance(raw, list):
+        return (), (ParseWarning(source_path=source_path, reason=f"expected list at {key}"),)
+    return _parse_entries(raw, source_path), ()
 
 
 def _parse_entries(raw: Any, source_path: str) -> tuple[DependencyDeclaration, ...]:
@@ -99,9 +120,16 @@ def _parse_entry(entry: Any, source_path: str) -> DependencyDeclaration | None:
     )
 
 
-def _parse_collections(raw: Any) -> tuple[str, ...]:
+def _parse_collection_section(
+    data: dict[Any, Any],
+    key: str,
+    source_path: str,
+) -> tuple[tuple[str, ...], tuple[ParseWarning, ...]]:
+    if key not in data or data[key] is None:
+        return (), ()
+    raw = data[key]
     if not isinstance(raw, list):
-        return ()
+        return (), (ParseWarning(source_path=source_path, reason=f"expected list at {key}"),)
     names: list[str] = []
     for entry in raw:
         if isinstance(entry, str):
@@ -112,7 +140,7 @@ def _parse_collections(raw: Any) -> tuple[str, ...]:
             name = ""
         if name:
             names.append(name)
-    return tuple(names)
+    return tuple(names), ()
 
 
 def _string(value: Any) -> str | None:

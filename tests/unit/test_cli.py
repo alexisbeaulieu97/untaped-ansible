@@ -852,8 +852,55 @@ def test_graph_live_downstream_surfaces_parse_warnings(
 
     assert result.exit_code == 0, result.output
     assert (
-        "warning: skipped roles/requirements.yml: could not parse dependency YAML" in result.stdout
+        "warning: skipped acme/site@main roles/requirements.yml: could not parse dependency YAML"
+    ) in result.stdout
+
+
+def test_graph_live_transitive_parse_warnings_keep_repo_ref_context(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    cfg = _write_config(
+        tmp_path,
+        index_path=tmp_path / "index.sqlite3",
+        extra_profile={"github": {"token": "ghp_test"}},
     )
+    monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
+
+    with respx.mock(base_url="https://api.github.com") as mock:
+        _mock_dependency_file(
+            mock,
+            "acme/site",
+            content="\n".join(
+                [
+                    "- src: https://github.com/acme/one",
+                    "- src: https://github.com/acme/two",
+                    "",
+                ]
+            ),
+        )
+        _mock_dependency_file(
+            mock,
+            "acme/one",
+            content="---\ngalaxy_info:\n  role_name: {@ role_slug @}\n",
+        )
+        _mock_dependency_file(
+            mock,
+            "acme/two",
+            content="---\ngalaxy_info:\n  role_name: {@ role_slug @}\n",
+        )
+        result = CliInvoker().invoke(
+            app,
+            ["graph", "acme/site", "--downstream", "--depth", "2"],
+        )
+
+    assert result.exit_code == 0, result.output
+    assert (
+        "warning: skipped acme/one@main roles/requirements.yml: could not parse dependency YAML"
+    ) in result.stdout
+    assert (
+        "warning: skipped acme/two@main roles/requirements.yml: could not parse dependency YAML"
+    ) in result.stdout
 
 
 def test_graph_tree_ignores_global_collection_view_list(

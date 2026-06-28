@@ -80,7 +80,8 @@ def test_tree_renderer_keeps_path_guard_for_cycles() -> None:
         ),
         cycles=(
             GraphCycle(
-                direction="requires",
+                kind="cycle",
+                relation="requires",
                 node_ids=("target", "users", "target"),
                 edge_ids=(
                     _edge_id("requires", "target", "users"),
@@ -337,7 +338,8 @@ def test_mermaid_renderer_emits_cycle_comments() -> None:
         ),
         cycles=(
             GraphCycle(
-                direction="requires",
+                kind="cycle",
+                relation="requires",
                 node_ids=("target", "users", "target"),
                 edge_ids=(
                     _edge_id("requires", "target", "users"),
@@ -352,6 +354,39 @@ def test_mermaid_renderer_emits_cycle_comments() -> None:
     assert "target --> users" in rendered
     assert "users --> target" in rendered
     assert "%% cycle requires: target -> users -> target" in rendered
+
+
+def test_mermaid_renderer_emits_scc_group_comments() -> None:
+    graph = DependencyGraph(
+        target_id="target",
+        nodes=(
+            GraphNode(id="target", label="acme/base@v1", repo="acme/base", ref="v1"),
+            GraphNode(id="users", label="acme/users@main", repo="acme/users", ref="main"),
+        ),
+        edges=(
+            GraphEdge(source_id="target", target_id="users", relation="requires"),
+            GraphEdge(source_id="users", target_id="target", relation="requires"),
+        ),
+        cycles=(
+            GraphCycle(
+                kind="scc_group",
+                relation="requires",
+                node_ids=("target", "users"),
+                edge_ids=tuple(
+                    sorted(
+                        (
+                            _edge_id("requires", "target", "users"),
+                            _edge_id("requires", "users", "target"),
+                        )
+                    )
+                ),
+            ),
+        ),
+    )
+
+    rendered = render_graph(graph, "mermaid")
+
+    assert "%% scc_group requires: target, users" in rendered
 
 
 def test_json_renderer_emits_structured_graph() -> None:

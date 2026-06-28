@@ -55,13 +55,18 @@ upstream lookups.
 
 Graph JSON includes stable edge IDs and detected cycles. Each edge carries
 `id: "edge:<digest>"`, where the digest is the first 16 hex characters of
-`sha256(relation + NUL + source_id + NUL + target_id)`. `cycles` contains
-records with `direction`, `node_ids`, and `edge_ids`, detected separately for
-downstream `requires` and upstream `impacts` edges. Cycle detection runs only
-on the graph that was emitted, so `--depth` can hide a longer cycle whose
-closing edge is outside the traversal horizon. Mermaid output emits every
-edge in the graph and includes cycle comments when cycles are known. Tree
-output keeps rendering cycles as path-local `(cycle)` markers.
+`sha256(relation + NUL + source_id + NUL + target_id)`. That ID is topological:
+duplicate physical declarations for the same relation/source/target collapse
+to one representative graph edge. `cycles` contains records with `kind`,
+`relation`, `node_ids`, and `edge_ids`, detected separately for downstream
+`requires` and upstream `impacts` edges. `kind: "cycle"` records use a closed
+ordered `node_ids` path and matching path edge IDs; `kind: "scc_group"` records
+use a sorted open node set and sorted internal SCC edge IDs when a component
+has too many elementary cycles to enumerate deterministically. Cycle detection
+runs only on the graph that was emitted, so `--depth` can hide a longer cycle
+whose closing edge is outside the traversal horizon. Mermaid output emits
+every edge in the graph and includes cycle/group comments when cycles are
+known. Tree output keeps rendering cycles as path-local `(cycle)` markers.
 
 Use relationship flags in user terms:
 

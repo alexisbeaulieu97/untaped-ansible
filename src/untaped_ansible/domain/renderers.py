@@ -65,10 +65,9 @@ def _render_mermaid(graph: DependencyGraph) -> str:
         lines.append(f'  {_mermaid_id(node.id)}["{_escape_mermaid(node.label)}"]')
     for edge in graph.edges:
         lines.append(f"  {_mermaid_id(edge.source_id)} --> {_mermaid_id(edge.target_id)}")
-    lines.extend(
-        f"  %% cycle {cycle.direction}: {_escape_mermaid_comment(' -> '.join(cycle.node_ids))}"
-        for cycle in graph.cycles
-    )
+    for cycle in graph.cycles:
+        detail = " -> ".join(cycle.node_ids) if cycle.kind == "cycle" else ", ".join(cycle.node_ids)
+        lines.append(f"  %% {cycle.kind} {cycle.relation}: {_escape_mermaid_comment(detail)}")
     lines.extend(f"  %% warning: {_escape_mermaid_comment(warning)}" for warning in graph.warnings)
     return "\n".join(lines)
 
@@ -137,19 +136,31 @@ def _append_tree_children(
     prefix: str,
     path: set[str],
 ) -> None:
-    for child_id in _sort_node_ids(adjacency.get(parent_id, []), nodes):
-        child = nodes[child_id]
-        if child_id in path:
-            lines.append(f"{prefix}+-- {child.label} (cycle)")
+    stack = [
+        (
+            prefix,
+            path,
+            iter(_sort_node_ids(adjacency.get(parent_id, []), nodes)),
+        )
+    ]
+    while stack:
+        current_prefix, current_path, children = stack[-1]
+        try:
+            child_id = next(children)
+        except StopIteration:
+            stack.pop()
             continue
-        lines.append(f"{prefix}+-- {child.label}")
-        _append_tree_children(
-            lines,
-            nodes=nodes,
-            adjacency=adjacency,
-            parent_id=child_id,
-            prefix=f"{prefix}    ",
-            path={*path, child_id},
+        child = nodes[child_id]
+        if child_id in current_path:
+            lines.append(f"{current_prefix}+-- {child.label} (cycle)")
+            continue
+        lines.append(f"{current_prefix}+-- {child.label}")
+        stack.append(
+            (
+                f"{current_prefix}    ",
+                {*current_path, child_id},
+                iter(_sort_node_ids(adjacency.get(child_id, []), nodes)),
+            )
         )
 
 

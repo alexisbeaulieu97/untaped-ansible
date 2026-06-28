@@ -38,6 +38,7 @@ from untaped_ansible.infrastructure import (
     SourceRepository,
     SqliteDependencyIndex,
 )
+from untaped_ansible.infrastructure.github_index import LiveParseWarning
 from untaped_ansible.settings import AnsibleSettings, SourceDefinition
 
 GraphDirection = Literal["deps", "impact", "both"]
@@ -345,7 +346,7 @@ def graph_command(
                         stale_after=settings.stale_after,
                         refresh_hint=refresh_hint,
                     )
-                    parse_warnings.extend(_parse_warning_messages(live_index.warnings))
+                    parse_warnings.extend(_live_parse_warning_messages(live_index.warnings))
             else:
                 graph = _graph_from_index(
                     index,
@@ -638,6 +639,13 @@ def _local_dependencies(
 
 def _parse_warning_messages(warnings: Iterable[ParseWarning]) -> list[str]:
     return [f"skipped {warning.source_path}: {warning.reason}" for warning in warnings]
+
+
+def _live_parse_warning_messages(warnings: Iterable[LiveParseWarning]) -> list[str]:
+    return [
+        f"skipped {warning.repo}@{warning.ref} {warning.source_path}: {warning.reason}"
+        for warning in warnings
+    ]
 
 
 def _graph_from_index(
