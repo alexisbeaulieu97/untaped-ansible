@@ -118,6 +118,32 @@ def test_live_parse_warnings_use_skipped_dependency_file_payload() -> None:
     )
 
 
+def test_live_wrong_shaped_dependency_section_uses_skipped_dependency_file_payload() -> None:
+    class WrongShapeDependencyGithub(StubGithub):
+        def get_raw_content(self, owner: str, repo: str, path: str, *, ref: str) -> str:
+            assert (owner, repo, path, ref) == ("acme", "site", "roles/requirements.yml", "main")
+            return "roles: not-a-list\n"
+
+    index = GithubDependencyIndex(
+        github=WrongShapeDependencyGithub(),
+        wrapped=EmptyIndex(),
+        aliases={},
+        dependency_paths=["roles/requirements.yml"],
+    )
+
+    edges = index.dependencies("acme/site", None, source_key=None)
+
+    assert edges == []
+    assert index.warnings == (
+        SkippedDependencyFile(
+            repo="acme/site",
+            ref="main",
+            source_path="roles/requirements.yml",
+            reason="expected list at roles",
+        ),
+    )
+
+
 def test_dependencies_batch_reads_live_per_pair_and_augments_cached_ref_reads() -> None:
     index = GithubDependencyIndex(
         github=StubGithub(),

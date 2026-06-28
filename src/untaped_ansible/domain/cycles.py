@@ -47,10 +47,8 @@ def _detect_relation_cycles(
     cycles: list[GraphCycle] = []
     warnings: list[CycleWarning] = []
     for component in _strongly_connected_components(nodes, adjacency):
-        if len(component) == 1:
-            node = next(iter(component))
-            if node not in adjacency.get(node, ()):
-                continue
+        if not _has_cycle(component, adjacency):
+            continue
 
         component_cycles, overflow = _bounded_simple_cycles(
             component,

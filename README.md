@@ -153,11 +153,11 @@ instead of failing the whole repo. Empty files, whitespace-only files, and
 present non-list values warn and are skipped. Malformed YAML, templated YAML
 that is not valid YAML, or recognized dependency files with an unsupported
 shape produce `warning: skipped PATH: REASON` in local graph output and
-`warning: skipped REPO@REF PATH: REASON` in live graph output. During
-`source refresh`, the same condition is printed to stderr with the live
-`REPO@REF` form; skipped files are included in the refresh result for that run
-but are not persisted into SQLite, so later cached graph output does not invent
-past parse warnings.
+`warning: skipped REPO@REF PATH: REASON` in live graph output when a ref is
+known. During `source refresh`, the same condition is printed to stderr with
+the same repo/ref form when a ref is present; skipped files are included in the
+refresh result for that run but are not persisted into SQLite, so later cached
+graph output does not invent past parse warnings.
 
 In `auto` mode, primary GraphQL rate-limit exhaustion falls back to Git
 `ls-remote` for the whole active probe target set. Secondary rate limiting,
