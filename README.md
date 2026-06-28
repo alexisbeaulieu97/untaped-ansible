@@ -53,6 +53,16 @@ remote, with `--target-repo owner/name` available as an override. `--ref`
 selects the branch, tag, or SHA used for live dependency reads and cached
 upstream lookups.
 
+Graph JSON includes stable edge IDs and detected cycles. Each edge carries
+`id: "edge:<digest>"`, where the digest is the first 16 hex characters of
+`sha256(relation + NUL + source_id + NUL + target_id)`. `cycles` contains
+records with `direction`, `node_ids`, and `edge_ids`, detected separately for
+downstream `requires` and upstream `impacts` edges. Cycle detection runs only
+on the graph that was emitted, so `--depth` can hide a longer cycle whose
+closing edge is outside the traversal horizon. Mermaid output emits every
+edge in the graph and includes cycle comments when cycles are known. Tree
+output keeps rendering cycles as path-local `(cycle)` markers.
+
 Use relationship flags in user terms:
 
 - `--downstream`: dependencies used by the target.
@@ -130,6 +140,16 @@ batches use `ansible.source_refresh_repo_batch_size` (default `100`).
 accept `--concurrency N` as a per-run override for fetch/parse work.
 Refresh progress is reported on stderr with repo/ref counts, changed and
 unchanged refs, edge count, elapsed time, and the Git concurrency used.
+
+Dependency files that cannot be parsed are skipped with an explicit warning
+instead of failing the whole repo. Empty files, whitespace-only files, and
+`---`-only YAML documents stay warning-free. Malformed YAML, templated YAML
+that is not valid YAML, or recognized dependency files with an unsupported
+top-level shape produce `warning: skipped PATH: REASON` in graph output for
+local/live reads. During `source refresh`, the same condition is printed to
+stderr as `warning: skipped REPO@REF PATH: REASON`; skipped files are included
+in the refresh result for that run but are not persisted into SQLite, so later
+cached graph output does not invent past parse warnings.
 
 In `auto` mode, primary GraphQL rate-limit exhaustion falls back to Git
 `ls-remote` for the whole active probe target set. Secondary rate limiting,

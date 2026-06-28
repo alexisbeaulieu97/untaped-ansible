@@ -69,6 +69,7 @@ def run_source_refresh(
         err=True,
     )
     warn_low_rate_limit(result, threshold=settings.source_refresh_rate_limit_floor)
+    warn_skipped_files(result)
     warn_probe_fallbacks(result)
     return result
 
@@ -193,6 +194,16 @@ def warn_probe_fallbacks(result: RefreshResult) -> None:
             "warning: "
             f"{pluralize(unknown, 'repo')} fell back to git ls-remote for "
             f"unrecognized fallback reason(s): {reasons}",
+            err=True,
+        )
+
+
+def warn_skipped_files(result: RefreshResult) -> None:
+    """Warn when dependency files were skipped during parsing."""
+    for skipped in result.skipped_files:
+        ref = f"@{skipped.ref}" if skipped.ref is not None else ""
+        echo(
+            f"warning: skipped {skipped.repo}{ref} {skipped.source_path}: {skipped.reason}",
             err=True,
         )
 

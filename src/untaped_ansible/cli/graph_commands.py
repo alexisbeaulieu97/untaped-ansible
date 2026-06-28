@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from configparser import ConfigParser
 from dataclasses import dataclass
 from pathlib import Path
@@ -25,7 +26,7 @@ from untaped_ansible.application.refresh_index import RefreshResult
 from untaped_ansible.cli._refresh import pluralize, run_source_refresh
 from untaped_ansible.domain.graph import DependencyGraph
 from untaped_ansible.domain.identity import IdentityResolver
-from untaped_ansible.domain.models import DependencyDeclaration
+from untaped_ansible.domain.models import DependencyDeclaration, ParseWarning
 from untaped_ansible.domain.parser import parse_dependency_file
 from untaped_ansible.domain.payloads import IndexedDependency
 from untaped_ansible.domain.renderers import GraphFormat, render_graph
@@ -293,19 +294,21 @@ def graph_command(
             direction=direction,
         )
         refresh_hint = _refresh_hint(graph_source)
+        parse_warnings: list[str] = []
 
         target_path = Path(target).expanduser()
         if target_path.exists():
-            local_edges = _local_dependencies(
+            local_dependencies = _local_dependencies(
                 target_path,
                 repo=target_repo_name,
                 ref=ref,
                 aliases=aliases,
                 dependency_paths=settings.dependency_paths,
             )
+            parse_warnings.extend(local_dependencies.warnings)
             index = OverlayDependencyIndex(
                 index,
-                local_edges,
+                local_dependencies.edges,
                 authoritative_sources={(target_repo_name, ref)},
             )
             graph = _graph_from_index(
@@ -326,14 +329,14 @@ def graph_command(
             ):
                 github_settings = get_config_section("github", GithubSettings)
                 with GithubClient(github_settings, http=ctx.http) as github:
-                    index = GithubDependencyIndex(
+                    live_index = GithubDependencyIndex(
                         github=github,
                         wrapped=index,
                         aliases=aliases,
                         dependency_paths=settings.dependency_paths,
                     )
                     graph = _graph_from_index(
-                        index,
+                        live_index,
                         repo=target_repo_name,
                         ref=ref,
                         source_key=graph_source.key,
@@ -342,6 +345,7 @@ def graph_command(
                         stale_after=settings.stale_after,
                         refresh_hint=refresh_hint,
                     )
+                    parse_warnings.extend(_parse_warning_messages(live_index.warnings))
             else:
                 graph = _graph_from_index(
                     index,
@@ -359,6 +363,7 @@ def graph_command(
             [
                 *refresh_warnings,
                 *graph_warnings,
+                *parse_warnings,
                 *_empty_graph_warnings(
                     graph,
                     direction=direction,
@@ -383,6 +388,12 @@ class _GraphSource:
     key: str | None
     label: str | None
     saved: bool
+
+
+@dataclass(frozen=True)
+class _LocalDependencies:
+    edges: list[IndexedDependency]
+    warnings: list[str]
 
 
 def _graph_direction(*, upstream: bool, downstream: bool, both: bool) -> GraphDirection:
@@ -599,14 +610,16 @@ def _local_dependencies(
     ref: str | None,
     aliases: dict[str, str],
     dependency_paths: list[str],
-) -> list[IndexedDependency]:
+) -> _LocalDependencies:
     edges: list[IndexedDependency] = []
+    warnings: list[str] = []
     resolver = IdentityResolver(aliases)
     for relative in dependency_paths:
         dep_path = path / relative
         if not dep_path.is_file():
             continue
         report = parse_dependency_file(relative, dep_path.read_text())
+        warnings.extend(_parse_warning_messages(report.warnings))
         for declaration in report.dependencies:
             resolved = resolver.resolve(declaration)
             edges.append(
@@ -620,7 +633,11 @@ def _local_dependencies(
                     unresolved=resolved.unresolved,
                 )
             )
-    return edges
+    return _LocalDependencies(edges=edges, warnings=warnings)
+
+
+def _parse_warning_messages(warnings: Iterable[ParseWarning]) -> list[str]:
+    return [f"skipped {warning.source_path}: {warning.reason}" for warning in warnings]
 
 
 def _graph_from_index(

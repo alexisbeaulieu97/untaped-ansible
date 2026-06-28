@@ -376,6 +376,37 @@ def test_probe_failure_skips_repo_without_git_work_and_records_failure(tmp_path:
     assert index.dependents("acme/base", None, source_key="source:prod")
 
 
+def test_parse_warnings_are_reported_as_skipped_files_without_failing_repo(
+    tmp_path: Path,
+) -> None:
+    github = FakeGitHub()
+    git = FakeGitCache()
+    probe = FakeRefProbe()
+    probe.refs["acme/site"] = [GitRef(kind="heads", name="main", sha="sha-main")]
+    git.files[("site", "sha-main", "roles/requirements.yml")] = (
+        "---\ngalaxy_info:\n  role_name: {@ role_slug @}\n"
+    )
+    index = SqliteDependencyIndex(tmp_path / "index.sqlite3")
+
+    result = _make_refresh(github=github, git=git, probe=probe, index=index, tmp_path=tmp_path)(
+        SourceDefinition(name="prod", repos=["acme/site"]),
+        source_key="source:prod",
+    )
+
+    assert result.failures == ()
+    assert [
+        (skipped.repo, skipped.ref, skipped.source_path, skipped.reason)
+        for skipped in result.skipped_files
+    ] == [
+        (
+            "acme/site",
+            "main",
+            "roles/requirements.yml",
+            "could not parse dependency YAML",
+        )
+    ]
+
+
 def test_fetch_failure_keeps_other_repos_and_previously_cached_refs(tmp_path: Path) -> None:
     github = FakeGitHub()
     git = FakeGitCache()

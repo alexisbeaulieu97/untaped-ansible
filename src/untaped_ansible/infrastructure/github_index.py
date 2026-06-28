@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from untaped_ansible.domain.identity import IdentityResolver
+from untaped_ansible.domain.models import ParseWarning
 from untaped_ansible.domain.parser import parse_dependency_file
 from untaped_ansible.domain.payloads import CachedRef, IndexedDependency
 
@@ -30,6 +31,12 @@ class GithubDependencyIndex:
         self._aliases = aliases
         self._dependency_paths = dependency_paths
         self._cache: dict[tuple[str, str | None], list[IndexedDependency]] = {}
+        self._warnings: list[ParseWarning] = []
+
+    @property
+    def warnings(self) -> tuple[ParseWarning, ...]:
+        """Parse warnings accumulated during live dependency reads."""
+        return tuple(self._warnings)
 
     def dependencies(
         self,
@@ -125,6 +132,7 @@ class GithubDependencyIndex:
                 path,
                 self._github.get_raw_content(owner, name, path, ref=read_ref),
             )
+            self._warnings.extend(report.warnings)
             for declaration in report.dependencies:
                 resolved = resolver.resolve(declaration)
                 edges.append(

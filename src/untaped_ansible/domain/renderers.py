@@ -65,6 +65,10 @@ def _render_mermaid(graph: DependencyGraph) -> str:
         lines.append(f'  {_mermaid_id(node.id)}["{_escape_mermaid(node.label)}"]')
     for edge in graph.edges:
         lines.append(f"  {_mermaid_id(edge.source_id)} --> {_mermaid_id(edge.target_id)}")
+    lines.extend(
+        f"  %% cycle {cycle.direction}: {_escape_mermaid_comment(' -> '.join(cycle.node_ids))}"
+        for cycle in graph.cycles
+    )
     lines.extend(f"  %% warning: {_escape_mermaid_comment(warning)}" for warning in graph.warnings)
     return "\n".join(lines)
 

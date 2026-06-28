@@ -65,7 +65,17 @@ def test_parse_meta_main_dependencies_from_simple_and_complex_entries() -> None:
 
 def test_parse_empty_or_unknown_yaml_shape_returns_empty_report() -> None:
     assert parse_dependency_file("README.yml", "name: not a dependency file").dependencies == ()
-    assert parse_dependency_file("roles/requirements.yml", "").dependencies == ()
+    report = parse_dependency_file("roles/requirements.yml", "")
+    assert report.dependencies == ()
+    assert report.warnings == ()
+
+
+def test_parse_yaml_none_document_returns_empty_report_without_warning() -> None:
+    report = parse_dependency_file("meta/main.yml", "---\n")
+
+    assert report.dependencies == ()
+    assert report.ignored_collections == ()
+    assert report.warnings == ()
 
 
 def test_parse_invalid_templated_yaml_returns_empty_report() -> None:
@@ -80,3 +90,26 @@ def test_parse_invalid_templated_yaml_returns_empty_report() -> None:
 
     assert report.dependencies == ()
     assert report.ignored_collections == ()
+    assert [(warning.source_path, warning.reason) for warning in report.warnings] == [
+        ("meta/main.yml", "could not parse dependency YAML")
+    ]
+
+
+def test_parse_meta_main_list_shape_returns_warning_instead_of_crashing() -> None:
+    report = parse_dependency_file("meta/main.yml", "- common\n")
+
+    assert report.dependencies == ()
+    assert report.ignored_collections == ()
+    assert [(warning.source_path, warning.reason) for warning in report.warnings] == [
+        ("meta/main.yml", "expected mapping at top level")
+    ]
+
+
+def test_parse_recognized_scalar_yaml_returns_warning() -> None:
+    report = parse_dependency_file("requirements.yml", "42\n")
+
+    assert report.dependencies == ()
+    assert report.ignored_collections == ()
+    assert [(warning.source_path, warning.reason) for warning in report.warnings] == [
+        ("requirements.yml", "expected mapping or list at top level")
+    ]

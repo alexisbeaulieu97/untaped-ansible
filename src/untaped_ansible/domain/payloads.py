@@ -90,6 +90,17 @@ class RepoFailure(BaseModel):
     reason: str
 
 
+class SkippedDependencyFile(BaseModel):
+    """One dependency file skipped during a source refresh."""
+
+    model_config = ConfigDict(frozen=True)
+
+    repo: str
+    ref: str | None
+    source_path: str
+    reason: str
+
+
 class RefreshProgressEvent(BaseModel):
     """Live progress for one source refresh phase."""
 

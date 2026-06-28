@@ -31,7 +31,7 @@ from untaped_ansible.application.source_refs import (
 )
 from untaped_ansible.domain.errors import GitCacheError
 from untaped_ansible.domain.identity import IdentityResolver
-from untaped_ansible.domain.models import ParseReport
+from untaped_ansible.domain.models import ParseReport, ParseWarning
 from untaped_ansible.domain.parser import parse_dependency_file
 from untaped_ansible.domain.payloads import (
     GitRef,
@@ -44,6 +44,7 @@ from untaped_ansible.domain.payloads import (
     RefScanMetadata,
     RefScanTouch,
     RepoFailure,
+    SkippedDependencyFile,
     SourceRepoMetadata,
 )
 from untaped_ansible.domain.repo_targets import remote_url_for
@@ -97,6 +98,7 @@ class _RepoRefreshResult:
     touches: tuple[RefScanTouch, ...]
     repo_metadata: SourceRepoMetadata
     ignored_collections: frozenset[str]
+    skipped_files: tuple[SkippedDependencyFile, ...]
 
 
 @dataclass(frozen=True)
@@ -110,6 +112,7 @@ class _RepoRefreshTask:
 class _ParsedDependencyFiles:
     reports: tuple[tuple[str, ParseReport], ...]
     ignored_collections: frozenset[str]
+    warnings: tuple[ParseWarning, ...]
 
 
 class RefreshGitSourceIndex:
@@ -183,6 +186,7 @@ class RefreshGitSourceIndex:
         pending_repos = [repo for repo in repos if repo.full_name not in successful_repos]
         selected: set[tuple[str, str, str]] = set()
         ignored_collections: set[str] = set()
+        skipped_files: list[SkippedDependencyFile] = []
         checked_at = datetime.now(UTC)
         changed_refs = 0
         unchanged_refs = 0
@@ -234,6 +238,7 @@ class RefreshGitSourceIndex:
                 batch_statuses[full_name] = "success"
                 batch_selected.update(outcome.selected)
                 ignored_collections.update(outcome.ignored_collections)
+                skipped_files.extend(outcome.skipped_files)
                 batch_scans.extend(outcome.scans)
                 batch_touches.extend(outcome.touches)
                 batch_repo_metadata.append(outcome.repo_metadata)
@@ -267,6 +272,7 @@ class RefreshGitSourceIndex:
                     repos=repos,
                     selected=selected,
                     ignored_collections=ignored_collections,
+                    skipped_files=skipped_files,
                     changed_refs=changed_refs,
                     unchanged_refs=unchanged_refs,
                     failures=failures,
@@ -295,6 +301,7 @@ class RefreshGitSourceIndex:
             repos=repos,
             selected=selected,
             ignored_collections=ignored_collections,
+            skipped_files=skipped_files,
             changed_refs=changed_refs,
             unchanged_refs=unchanged_refs,
             failures=failures,
@@ -312,6 +319,7 @@ class RefreshGitSourceIndex:
         repos: list[ProbeTarget],
         selected: set[tuple[str, str, str]],
         ignored_collections: set[str],
+        skipped_files: list[SkippedDependencyFile],
         changed_refs: int,
         unchanged_refs: int,
         failures: dict[str, str],
@@ -338,6 +346,7 @@ class RefreshGitSourceIndex:
             failures=tuple(
                 RepoFailure(repo=repo, reason=failures[repo]) for repo in sorted(failures)
             ),
+            skipped_files=_dedupe_skipped_files(skipped_files),
             probe_fallbacks=probe_fallbacks,
             rate_limit_cost=rate_limit_cost,
             rate_limit_remaining=rate_limit_remaining,
@@ -487,6 +496,7 @@ class RefreshGitSourceIndex:
                 touches=tuple(pending_touches),
                 repo_metadata=repo_metadata,
                 ignored_collections=frozenset(),
+                skipped_files=(),
             )
 
         bare = self._git.ensure_bare(
@@ -503,6 +513,7 @@ class RefreshGitSourceIndex:
         )
         parsed_by_sha: dict[str, _ParsedDependencyFiles] = {}
         resolver = IdentityResolver(self._aliases)
+        repo_skipped_files: list[SkippedDependencyFile] = []
         for ref in changed_refs:
             parsed = parsed_by_sha.get(ref.sha)
             if parsed is None:
@@ -513,6 +524,15 @@ class RefreshGitSourceIndex:
                 )
                 parsed_by_sha[ref.sha] = parsed
             ignored_collections.update(parsed.ignored_collections)
+            repo_skipped_files.extend(
+                SkippedDependencyFile(
+                    repo=repo.full_name,
+                    ref=ref.name,
+                    source_path=warning.source_path,
+                    reason=warning.reason,
+                )
+                for warning in parsed.warnings
+            )
             edges = self._edges_from_reports(
                 parsed,
                 repo=repo.full_name,
@@ -542,6 +562,7 @@ class RefreshGitSourceIndex:
             touches=tuple(pending_touches),
             repo_metadata=repo_metadata,
             ignored_collections=frozenset(ignored_collections),
+            skipped_files=_dedupe_skipped_files(repo_skipped_files),
         )
 
     def _expand_repos(self, source: SourceDefinition) -> list[ProbeTarget]:
@@ -599,6 +620,7 @@ class RefreshGitSourceIndex:
     ) -> _ParsedDependencyFiles:
         reports: list[tuple[str, ParseReport]] = []
         ignored_collections: set[str] = set()
+        warnings: list[ParseWarning] = []
         for path in paths:
             content = self._git.read_file(
                 bare,
@@ -610,10 +632,12 @@ class RefreshGitSourceIndex:
                 continue
             report = parse_dependency_file(path, content)
             ignored_collections.update(report.ignored_collections)
+            warnings.extend(report.warnings)
             reports.append((path, report))
         return _ParsedDependencyFiles(
             reports=tuple(reports),
             ignored_collections=frozenset(ignored_collections),
+            warnings=tuple(warnings),
         )
 
     def _edges_from_reports(
@@ -647,6 +671,22 @@ class RefreshGitSourceIndex:
 def _exact_refspec(ref: GitRef) -> str:
     full_ref = f"refs/{ref.kind}/{ref.name}"
     return f"+{full_ref}:{full_ref}"
+
+
+def _dedupe_skipped_files(
+    skipped_files: Iterable[SkippedDependencyFile],
+) -> tuple[SkippedDependencyFile, ...]:
+    by_key = {_skipped_file_key(skipped): skipped for skipped in skipped_files}
+    return tuple(by_key[key] for key in sorted(by_key))
+
+
+def _skipped_file_key(skipped: SkippedDependencyFile) -> tuple[str, str, str, str]:
+    return (
+        skipped.repo,
+        skipped.ref or "",
+        skipped.source_path,
+        skipped.reason,
+    )
 
 
 def _repo_candidate(row: dict[str, object], *, fallback: str | None) -> ProbeTarget:

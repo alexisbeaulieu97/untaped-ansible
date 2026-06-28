@@ -6,15 +6,20 @@ from typing import Any
 
 import yaml
 
-from untaped_ansible.domain.models import DependencyDeclaration, ParseReport
+from untaped_ansible.domain.models import DependencyDeclaration, ParseReport, ParseWarning
 
 
 def parse_dependency_file(path: str, text: str) -> ParseReport:
     """Parse supported Ansible dependency files into role declarations."""
-    data = _load_yaml(text)
-    if data is None:
+    parsed = _load_yaml(text)
+    if parsed.status == "empty":
         return ParseReport()
+    if parsed.status == "invalid":
+        return _warning_report(path, "could not parse dependency YAML")
+    data = parsed.data
     if path.endswith("meta/main.yml"):
+        if not isinstance(data, dict):
+            return _warning_report(path, "expected mapping at top level")
         return ParseReport(dependencies=_parse_entries(data.get("dependencies"), path))
     if _is_requirements_path(path):
         if isinstance(data, list):
@@ -24,23 +29,38 @@ def parse_dependency_file(path: str, text: str) -> ParseReport:
                 dependencies=_parse_entries(data.get("roles"), path),
                 ignored_collections=_parse_collections(data.get("collections")),
             )
+        return _warning_report(path, "expected mapping or list at top level")
     return ParseReport()
 
 
-def _load_yaml(text: str) -> Any:
+class _LoadedYaml:
+    def __init__(
+        self,
+        status: str,
+        data: Any = None,
+    ) -> None:
+        self.status = status
+        self.data = data
+
+
+def _load_yaml(text: str) -> _LoadedYaml:
     if not text.strip():
-        return None
+        return _LoadedYaml("empty")
     try:
         data = yaml.safe_load(text)
     except yaml.YAMLError:
-        return None
-    if isinstance(data, list | dict):
-        return data
-    return None
+        return _LoadedYaml("invalid")
+    if data is None:
+        return _LoadedYaml("empty")
+    return _LoadedYaml("parsed", data)
 
 
 def _is_requirements_path(path: str) -> bool:
     return path.endswith("requirements.yml") or path.endswith("requirements.yaml")
+
+
+def _warning_report(path: str, reason: str) -> ParseReport:
+    return ParseReport(warnings=(ParseWarning(source_path=path, reason=reason),))
 
 
 def _parse_entries(raw: Any, source_path: str) -> tuple[DependencyDeclaration, ...]:

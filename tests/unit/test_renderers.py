@@ -3,9 +3,15 @@
 from __future__ import annotations
 
 import json
+from hashlib import sha256
 
-from untaped_ansible.domain.graph import DependencyGraph, GraphEdge, GraphNode
+from untaped_ansible.domain.graph import DependencyGraph, GraphCycle, GraphEdge, GraphNode
 from untaped_ansible.domain.renderers import render_graph
+
+
+def _edge_id(relation: str, source_id: str, target_id: str) -> str:
+    digest = sha256(f"{relation}\0{source_id}\0{target_id}".encode()).hexdigest()[:16]
+    return f"edge:{digest}"
 
 
 def _graph() -> DependencyGraph:
@@ -59,6 +65,35 @@ def test_tree_renderer_nests_transitive_downstream_paths() -> None:
     assert "|   +-- acme/base@v1" in rendered
     assert "|       +-- acme/users@main" in rendered
     assert "|           +-- acme/common@main" in rendered
+
+
+def test_tree_renderer_keeps_path_guard_for_cycles() -> None:
+    graph = DependencyGraph(
+        target_id="target",
+        nodes=(
+            GraphNode(id="target", label="acme/base@v1", repo="acme/base", ref="v1"),
+            GraphNode(id="users", label="acme/users@main", repo="acme/users", ref="main"),
+        ),
+        edges=(
+            GraphEdge(source_id="target", target_id="users", relation="requires"),
+            GraphEdge(source_id="users", target_id="target", relation="requires"),
+        ),
+        cycles=(
+            GraphCycle(
+                direction="requires",
+                node_ids=("target", "users", "target"),
+                edge_ids=(
+                    _edge_id("requires", "target", "users"),
+                    _edge_id("requires", "users", "target"),
+                ),
+            ),
+        ),
+    )
+
+    rendered = render_graph(graph, "tree")
+
+    assert "|       +-- acme/users@main" in rendered
+    assert "|           +-- acme/base@v1 (cycle)" in rendered
 
 
 def test_tree_renderer_renders_same_node_in_upstream_and_downstream_sections() -> None:
@@ -289,6 +324,36 @@ def test_mermaid_renderer_emits_directional_edges() -> None:
     assert "%% warning: source data is stale" in rendered
 
 
+def test_mermaid_renderer_emits_cycle_comments() -> None:
+    graph = DependencyGraph(
+        target_id="target",
+        nodes=(
+            GraphNode(id="target", label="acme/base@v1", repo="acme/base", ref="v1"),
+            GraphNode(id="users", label="acme/users@main", repo="acme/users", ref="main"),
+        ),
+        edges=(
+            GraphEdge(source_id="target", target_id="users", relation="requires"),
+            GraphEdge(source_id="users", target_id="target", relation="requires"),
+        ),
+        cycles=(
+            GraphCycle(
+                direction="requires",
+                node_ids=("target", "users", "target"),
+                edge_ids=(
+                    _edge_id("requires", "target", "users"),
+                    _edge_id("requires", "users", "target"),
+                ),
+            ),
+        ),
+    )
+
+    rendered = render_graph(graph, "mermaid")
+
+    assert "target --> users" in rendered
+    assert "users --> target" in rendered
+    assert "%% cycle requires: target -> users -> target" in rendered
+
+
 def test_json_renderer_emits_structured_graph() -> None:
     data = json.loads(render_graph(_graph(), "json"))
 
@@ -297,5 +362,7 @@ def test_json_renderer_emits_structured_graph() -> None:
     assert "kind" not in data["nodes"][0]
     assert "ref_kind" not in data["nodes"][0]
     assert "default_branch" not in data["nodes"][0]
+    assert data["edges"][0]["id"] == _edge_id("requires", "target", "users")
     assert data["edges"][0]["relation"] == "requires"
+    assert data["cycles"] == []
     assert data["warnings"] == ["source data is stale"]
