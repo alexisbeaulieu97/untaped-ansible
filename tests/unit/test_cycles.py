@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from hashlib import sha256
 
 import pytest
@@ -19,6 +20,15 @@ def _edge_id(relation: str, source_id: str, target_id: str) -> str:
 
 def _edge(source_id: str, target_id: str, relation: str = "requires") -> GraphEdge:
     return GraphEdge(source_id=source_id, target_id=target_id, relation=relation)
+
+
+def _complete_digraph_edges(nodes: tuple[str, ...]) -> list[GraphEdge]:
+    return [
+        GraphEdge(source_id=source, target_id=target, relation="requires")
+        for source in nodes
+        for target in nodes
+        if source != target
+    ]
 
 
 def test_overlapping_simple_cycles_are_reported_as_elementary_cycles() -> None:
@@ -109,7 +119,7 @@ def test_cycle_cap_overflow_emits_deterministic_scc_group(monkeypatch) -> None:
 
 
 def test_large_sparse_cycle_does_not_overflow_recursion_limit() -> None:
-    size = 1200
+    size = sys.getrecursionlimit() + 25
     graph_cycles, warnings = detect_cycles(
         [_edge(f"node-{index:04d}", f"node-{(index + 1) % size:04d}") for index in range(size)]
     )
@@ -141,11 +151,44 @@ def test_both_relations_keep_scc_groups_distinct(monkeypatch) -> None:
         ("scc_group", "requires", ("a", "b", "c")),
     ]
     assert warnings == (
-        "cycle output for requires component starting at a exceeded 1 cycles; "
-        "reported 3-node/4-edge SCC group instead",
         "cycle output for impacts component starting at x exceeded 1 cycles; "
         "reported 3-node/4-edge SCC group instead",
+        "cycle output for requires component starting at a exceeded 1 cycles; "
+        "reported 3-node/4-edge SCC group instead",
     )
+
+
+def test_complete_k4_emits_canonical_deterministic_cycles() -> None:
+    graph_cycles, warnings = detect_cycles(_complete_digraph_edges(("a", "b", "c", "d")))
+
+    expected_node_ids = [
+        ("a", "b", "a"),
+        ("a", "b", "c", "a"),
+        ("a", "b", "c", "d", "a"),
+        ("a", "b", "d", "a"),
+        ("a", "b", "d", "c", "a"),
+        ("a", "c", "a"),
+        ("a", "c", "b", "a"),
+        ("a", "c", "b", "d", "a"),
+        ("a", "c", "d", "a"),
+        ("a", "c", "d", "b", "a"),
+        ("a", "d", "a"),
+        ("a", "d", "b", "a"),
+        ("a", "d", "b", "c", "a"),
+        ("a", "d", "c", "a"),
+        ("a", "d", "c", "b", "a"),
+        ("b", "c", "b"),
+        ("b", "c", "d", "b"),
+        ("b", "d", "b"),
+        ("b", "d", "c", "b"),
+        ("c", "d", "c"),
+    ]
+
+    assert warnings == ()
+    assert [cycle.node_ids for cycle in graph_cycles] == expected_node_ids
+    assert len(graph_cycles) == 20
+    assert all(cycle.kind == "cycle" and cycle.relation == "requires" for cycle in graph_cycles)
+    assert all(cycle.node_ids[0] == min(cycle.node_ids[:-1]) for cycle in graph_cycles)
 
 
 def test_graph_cycle_model_validates_kind_specific_node_shape() -> None:

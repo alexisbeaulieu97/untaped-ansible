@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from untaped_ansible.domain.payloads import CachedRef, IndexedDependency
+from untaped_ansible.domain.payloads import CachedRef, IndexedDependency, SkippedDependencyFile
 from untaped_ansible.infrastructure.github_index import GithubDependencyIndex
 
 
@@ -90,6 +90,32 @@ def test_live_dependencies_without_ref_keep_default_branch_as_source_ref() -> No
     assert [(edge.source_repo, edge.source_ref, edge.dependency_repo) for edge in edges] == [
         ("acme/site", "main", "acme/base")
     ]
+
+
+def test_live_parse_warnings_use_skipped_dependency_file_payload() -> None:
+    class InvalidDependencyGithub(StubGithub):
+        def get_raw_content(self, owner: str, repo: str, path: str, *, ref: str) -> str:
+            assert (owner, repo, path, ref) == ("acme", "site", "roles/requirements.yml", "main")
+            return "---\ngalaxy_info:\n  role_name: {@ role_slug @}\n"
+
+    index = GithubDependencyIndex(
+        github=InvalidDependencyGithub(),
+        wrapped=EmptyIndex(),
+        aliases={},
+        dependency_paths=["roles/requirements.yml"],
+    )
+
+    edges = index.dependencies("acme/site", None, source_key=None)
+
+    assert edges == []
+    assert index.warnings == (
+        SkippedDependencyFile(
+            repo="acme/site",
+            ref="main",
+            source_path="roles/requirements.yml",
+            reason="could not parse dependency YAML",
+        ),
+    )
 
 
 def test_dependencies_batch_reads_live_per_pair_and_augments_cached_ref_reads() -> None:

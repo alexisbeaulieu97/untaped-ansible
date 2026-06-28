@@ -76,17 +76,26 @@ def _parse_list_section(
     key: str,
     source_path: str,
 ) -> tuple[tuple[DependencyDeclaration, ...], tuple[ParseWarning, ...]]:
-    if key not in data or data[key] is None:
-        return (), ()
-    raw = data[key]
-    if not isinstance(raw, list):
-        return (), (ParseWarning(source_path=source_path, reason=f"expected list at {key}"),)
+    raw, warnings = _section_list(data, key, source_path)
+    if warnings:
+        return (), warnings
     return _parse_entries(raw, source_path), ()
 
 
-def _parse_entries(raw: Any, source_path: str) -> tuple[DependencyDeclaration, ...]:
+def _section_list(
+    data: dict[Any, Any],
+    key: str,
+    source_path: str,
+) -> tuple[list[Any], tuple[ParseWarning, ...]]:
+    raw = data.get(key)
+    if raw is None:
+        return [], ()
     if not isinstance(raw, list):
-        return ()
+        return [], (ParseWarning(source_path=source_path, reason=f"expected list at {key}"),)
+    return raw, ()
+
+
+def _parse_entries(raw: list[Any], source_path: str) -> tuple[DependencyDeclaration, ...]:
     declarations: list[DependencyDeclaration] = []
     for entry in raw:
         declaration = _parse_entry(entry, source_path)
@@ -125,11 +134,9 @@ def _parse_collection_section(
     key: str,
     source_path: str,
 ) -> tuple[tuple[str, ...], tuple[ParseWarning, ...]]:
-    if key not in data or data[key] is None:
-        return (), ()
-    raw = data[key]
-    if not isinstance(raw, list):
-        return (), (ParseWarning(source_path=source_path, reason=f"expected list at {key}"),)
+    raw, warnings = _section_list(data, key, source_path)
+    if warnings:
+        return (), warnings
     names: list[str] = []
     for entry in raw:
         if isinstance(entry, str):

@@ -2,27 +2,16 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from untaped_ansible.domain.identity import IdentityResolver
 from untaped_ansible.domain.parser import parse_dependency_file
-from untaped_ansible.domain.payloads import CachedRef, IndexedDependency
+from untaped_ansible.domain.payloads import CachedRef, IndexedDependency, SkippedDependencyFile
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from untaped_ansible.application.ports import DependencyIndex, GitHubDependencyReader
-
-
-@dataclass(frozen=True)
-class LiveParseWarning:
-    """Parse warning with live repo/ref context."""
-
-    repo: str
-    ref: str
-    source_path: str
-    reason: str
 
 
 class GithubDependencyIndex:
@@ -41,10 +30,10 @@ class GithubDependencyIndex:
         self._aliases = aliases
         self._dependency_paths = dependency_paths
         self._cache: dict[tuple[str, str | None], list[IndexedDependency]] = {}
-        self._warnings: list[LiveParseWarning] = []
+        self._warnings: list[SkippedDependencyFile] = []
 
     @property
-    def warnings(self) -> tuple[LiveParseWarning, ...]:
+    def warnings(self) -> tuple[SkippedDependencyFile, ...]:
         """Parse warnings accumulated during live dependency reads."""
         return tuple(self._warnings)
 
@@ -144,7 +133,7 @@ class GithubDependencyIndex:
                 self._github.get_raw_content(owner, name, path, ref=read_ref),
             )
             self._warnings.extend(
-                LiveParseWarning(
+                SkippedDependencyFile(
                     repo=repo,
                     ref=source_ref,
                     source_path=warning.source_path,

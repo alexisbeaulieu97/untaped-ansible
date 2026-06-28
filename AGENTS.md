@@ -384,13 +384,14 @@ rate-limit fallbacks can be much slower because Git probing runs one network
 subprocess per repo. The graph refresh path instead prepends a graph warning
 and proceeds with possibly stale data for failed repos.
 
-Local graph parsing and live GitHub downstream parsing surface `ParseWarning`
-through `DependencyGraph.warnings` as `skipped PATH: REASON`. The
-`DependencyIndex` port remains a dependency-edge reader only; do not widen it
-for parser warnings. Local graph warnings are collected by
-`cli/graph_commands.py` before overlaying local edges. Live graph warnings are
-accumulated on `GithubDependencyIndex` while traversal lazily reads raw files
-and are merged after graph construction.
+Local graph parsing and live GitHub downstream parsing surface dependency-file
+parse skips through `DependencyGraph.warnings`. Local graph warnings render as
+`skipped PATH: REASON`; live graph warnings render as
+`skipped REPO@REF PATH: REASON` when a ref is known. The `DependencyIndex` port
+remains a dependency-edge reader only; do not widen it for parser warnings.
+Local graph warnings are collected by `cli/graph_commands.py` before overlaying
+local edges. Live graph warnings are accumulated on `GithubDependencyIndex`
+while traversal lazily reads raw files and are merged after graph construction.
 
 Large refreshes are resumable. SQLite stores `source_refresh_progress` rows
 for successful repos in the active source fingerprint. If the GraphQL budget

@@ -17,6 +17,7 @@ from untaped_ansible.domain.payloads import (
     GRAPHQL_RATE_LIMIT_FALLBACK,
     GRAPHQL_TRANSIENT_FALLBACK,
     RefreshProgressEvent,
+    SkippedDependencyFile,
 )
 from untaped_ansible.infrastructure import (
     AutoRefProbe,
@@ -201,11 +202,13 @@ def warn_probe_fallbacks(result: RefreshResult) -> None:
 def warn_skipped_files(result: RefreshResult) -> None:
     """Warn when dependency files were skipped during parsing."""
     for skipped in result.skipped_files:
-        ref = f"@{skipped.ref}" if skipped.ref is not None else ""
-        echo(
-            f"warning: skipped {skipped.repo}{ref} {skipped.source_path}: {skipped.reason}",
-            err=True,
-        )
+        echo(f"warning: {format_skipped_dependency_file(skipped)}", err=True)
+
+
+def format_skipped_dependency_file(skipped: SkippedDependencyFile) -> str:
+    """Render a skipped dependency file warning body."""
+    ref = f"@{skipped.ref}" if skipped.ref is not None else ""
+    return f"skipped {skipped.repo}{ref} {skipped.source_path}: {skipped.reason}"
 
 
 def pluralize(count: int, noun: str) -> str:

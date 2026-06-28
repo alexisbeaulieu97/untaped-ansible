@@ -9,6 +9,8 @@ from typing import get_args
 from untaped_ansible.domain.graph import EdgeRelation, GraphCycle, GraphEdge
 
 MAX_CYCLES_PER_COMPONENT = 100
+CycleKey = tuple[str, str, tuple[str, ...], tuple[str, ...]]
+CycleWarning = tuple[CycleKey, str]
 
 
 def detect_cycles(
@@ -16,19 +18,21 @@ def detect_cycles(
 ) -> tuple[tuple[GraphCycle, ...], tuple[str, ...]]:
     """Find deterministic cycle records in the emitted graph edges."""
     cycles: list[GraphCycle] = []
-    warnings: list[str] = []
+    warnings: list[CycleWarning] = []
     for relation in get_args(EdgeRelation):
         relation_edges = [edge for edge in edges if edge.relation == relation]
         relation_cycles, relation_warnings = _detect_relation_cycles(relation, relation_edges)
         cycles.extend(relation_cycles)
         warnings.extend(relation_warnings)
-    return tuple(sorted(cycles, key=_cycle_key)), tuple(warnings)
+    return tuple(sorted(cycles, key=_cycle_key)), tuple(
+        warning for _, warning in sorted(warnings, key=lambda item: item[0])
+    )
 
 
 def _detect_relation_cycles(
     relation: EdgeRelation,
     edges: Sequence[GraphEdge],
-) -> tuple[list[GraphCycle], list[str]]:
+) -> tuple[list[GraphCycle], list[CycleWarning]]:
     adjacency: dict[str, list[str]] = {}
     edge_ids: dict[tuple[str, str], str] = {}
     nodes: set[str] = set()
@@ -41,11 +45,12 @@ def _detect_relation_cycles(
         adjacency[source_id] = sorted(set(adjacency[source_id]))
 
     cycles: list[GraphCycle] = []
-    warnings: list[str] = []
+    warnings: list[CycleWarning] = []
     for component in _strongly_connected_components(nodes, adjacency):
-        component_edges = _component_edges(component, adjacency)
-        if len(component) == 1 and not any(source == target for source, target in component_edges):
-            continue
+        if len(component) == 1:
+            node = next(iter(component))
+            if node not in adjacency.get(node, ()):
+                continue
 
         component_cycles, overflow = _bounded_simple_cycles(
             component,
@@ -53,18 +58,21 @@ def _detect_relation_cycles(
             limit=MAX_CYCLES_PER_COMPONENT,
         )
         if overflow:
-            cycles.append(
-                GraphCycle(
-                    kind="scc_group",
-                    relation=relation,
-                    node_ids=tuple(sorted(component)),
-                    edge_ids=tuple(sorted(edge_ids[edge] for edge in component_edges)),
-                )
+            component_edges = _component_edges(component, adjacency)
+            scc_group = GraphCycle(
+                kind="scc_group",
+                relation=relation,
+                node_ids=tuple(sorted(component)),
+                edge_ids=tuple(sorted(edge_ids[edge] for edge in component_edges)),
             )
+            cycles.append(scc_group)
             warnings.append(
-                f"cycle output for {relation} component starting at {min(component)} "
-                f"exceeded {MAX_CYCLES_PER_COMPONENT} cycles; reported "
-                f"{len(component)}-node/{len(component_edges)}-edge SCC group instead"
+                (
+                    _cycle_key(scc_group),
+                    f"cycle output for {relation} component starting at {min(component)} "
+                    f"exceeded {MAX_CYCLES_PER_COMPONENT} cycles; reported "
+                    f"{len(component)}-node/{len(component_edges)}-edge SCC group instead",
+                )
             )
             continue
 
@@ -123,8 +131,6 @@ def _strongly_connected_components(
                     lowlinks=lowlinks,
                     components=components,
                 )
-                continue
-            if target not in nodes:
                 continue
             if target not in indexes:
                 push(target, frames)
@@ -288,5 +294,5 @@ def _unblock(
         blocked_by[current].clear()
 
 
-def _cycle_key(cycle: GraphCycle) -> tuple[str, str, tuple[str, ...], tuple[str, ...]]:
+def _cycle_key(cycle: GraphCycle) -> CycleKey:
     return cycle.kind, cycle.relation, cycle.node_ids, cycle.edge_ids

@@ -23,12 +23,16 @@ import untaped_ansible.cli.source_commands as source_commands
 from untaped_ansible.application import BuildGraph, GraphRequest
 from untaped_ansible.application.ports import DependencyIndex
 from untaped_ansible.application.refresh_index import RefreshResult
-from untaped_ansible.cli._refresh import pluralize, run_source_refresh
+from untaped_ansible.cli._refresh import (
+    format_skipped_dependency_file,
+    pluralize,
+    run_source_refresh,
+)
 from untaped_ansible.domain.graph import DependencyGraph
 from untaped_ansible.domain.identity import IdentityResolver
 from untaped_ansible.domain.models import DependencyDeclaration, ParseWarning
 from untaped_ansible.domain.parser import parse_dependency_file
-from untaped_ansible.domain.payloads import IndexedDependency
+from untaped_ansible.domain.payloads import IndexedDependency, SkippedDependencyFile
 from untaped_ansible.domain.renderers import GraphFormat, render_graph
 from untaped_ansible.infrastructure import (
     AliasRepository,
@@ -38,7 +42,6 @@ from untaped_ansible.infrastructure import (
     SourceRepository,
     SqliteDependencyIndex,
 )
-from untaped_ansible.infrastructure.github_index import LiveParseWarning
 from untaped_ansible.settings import AnsibleSettings, SourceDefinition
 
 GraphDirection = Literal["deps", "impact", "both"]
@@ -641,11 +644,8 @@ def _parse_warning_messages(warnings: Iterable[ParseWarning]) -> list[str]:
     return [f"skipped {warning.source_path}: {warning.reason}" for warning in warnings]
 
 
-def _live_parse_warning_messages(warnings: Iterable[LiveParseWarning]) -> list[str]:
-    return [
-        f"skipped {warning.repo}@{warning.ref} {warning.source_path}: {warning.reason}"
-        for warning in warnings
-    ]
+def _live_parse_warning_messages(warnings: Iterable[SkippedDependencyFile]) -> list[str]:
+    return [format_skipped_dependency_file(warning) for warning in warnings]
 
 
 def _graph_from_index(

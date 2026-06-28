@@ -91,7 +91,7 @@ class RepoFailure(BaseModel):
 
 
 class SkippedDependencyFile(BaseModel):
-    """One dependency file skipped during a source refresh."""
+    """One dependency file skipped during parsing."""
 
     model_config = ConfigDict(frozen=True)
 
