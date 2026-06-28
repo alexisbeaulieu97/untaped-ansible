@@ -2,50 +2,100 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 
-from untaped_ansible.domain.models import DependencyDeclaration, ParseReport
+from untaped_ansible.domain.models import DependencyDeclaration, ParseReport, ParseWarning
 
 
 def parse_dependency_file(path: str, text: str) -> ParseReport:
     """Parse supported Ansible dependency files into role declarations."""
-    data = _load_yaml(text)
-    if data is None:
+    parsed = _load_yaml(text)
+    if parsed.status == "empty":
         return ParseReport()
+    if parsed.status == "invalid":
+        return _warning_report(path, "could not parse dependency YAML")
+    data = parsed.data
     if path.endswith("meta/main.yml"):
-        return ParseReport(dependencies=_parse_entries(data.get("dependencies"), path))
+        if not isinstance(data, dict):
+            return _warning_report(path, "expected mapping at top level")
+        dependencies, warnings = _parse_list_section(data, "dependencies", path)
+        return ParseReport(dependencies=dependencies, warnings=warnings)
     if _is_requirements_path(path):
         if isinstance(data, list):
             return ParseReport(dependencies=_parse_entries(data, path))
         if isinstance(data, dict):
-            return ParseReport(
-                dependencies=_parse_entries(data.get("roles"), path),
-                ignored_collections=_parse_collections(data.get("collections")),
+            dependencies, dependency_warnings = _parse_list_section(data, "roles", path)
+            collections, collection_warnings = _parse_collection_section(
+                data,
+                "collections",
+                path,
             )
+            return ParseReport(
+                dependencies=dependencies,
+                ignored_collections=collections,
+                warnings=(*dependency_warnings, *collection_warnings),
+            )
+        return _warning_report(path, "expected mapping or list at top level")
     return ParseReport()
 
 
-def _load_yaml(text: str) -> Any:
+class _LoadedYaml:
+    def __init__(
+        self,
+        status: Literal["empty", "invalid", "parsed"],
+        data: Any = None,
+    ) -> None:
+        self.status = status
+        self.data = data
+
+
+def _load_yaml(text: str) -> _LoadedYaml:
     if not text.strip():
-        return None
+        return _LoadedYaml("empty")
     try:
         data = yaml.safe_load(text)
     except yaml.YAMLError:
-        return None
-    if isinstance(data, list | dict):
-        return data
-    return None
+        return _LoadedYaml("invalid")
+    if data is None:
+        return _LoadedYaml("empty")
+    return _LoadedYaml("parsed", data)
 
 
 def _is_requirements_path(path: str) -> bool:
     return path.endswith("requirements.yml") or path.endswith("requirements.yaml")
 
 
-def _parse_entries(raw: Any, source_path: str) -> tuple[DependencyDeclaration, ...]:
+def _warning_report(path: str, reason: str) -> ParseReport:
+    return ParseReport(warnings=(ParseWarning(source_path=path, reason=reason),))
+
+
+def _parse_list_section(
+    data: dict[Any, Any],
+    key: str,
+    source_path: str,
+) -> tuple[tuple[DependencyDeclaration, ...], tuple[ParseWarning, ...]]:
+    raw, warnings = _section_list(data, key, source_path)
+    if warnings:
+        return (), warnings
+    return _parse_entries(raw, source_path), ()
+
+
+def _section_list(
+    data: dict[Any, Any],
+    key: str,
+    source_path: str,
+) -> tuple[list[Any], tuple[ParseWarning, ...]]:
+    raw = data.get(key)
+    if raw is None:
+        return [], ()
     if not isinstance(raw, list):
-        return ()
+        return [], (ParseWarning(source_path=source_path, reason=f"expected list at {key}"),)
+    return raw, ()
+
+
+def _parse_entries(raw: list[Any], source_path: str) -> tuple[DependencyDeclaration, ...]:
     declarations: list[DependencyDeclaration] = []
     for entry in raw:
         declaration = _parse_entry(entry, source_path)
@@ -79,9 +129,14 @@ def _parse_entry(entry: Any, source_path: str) -> DependencyDeclaration | None:
     )
 
 
-def _parse_collections(raw: Any) -> tuple[str, ...]:
-    if not isinstance(raw, list):
-        return ()
+def _parse_collection_section(
+    data: dict[Any, Any],
+    key: str,
+    source_path: str,
+) -> tuple[tuple[str, ...], tuple[ParseWarning, ...]]:
+    raw, warnings = _section_list(data, key, source_path)
+    if warnings:
+        return (), warnings
     names: list[str] = []
     for entry in raw:
         if isinstance(entry, str):
@@ -92,7 +147,7 @@ def _parse_collections(raw: Any) -> tuple[str, ...]:
             name = ""
         if name:
             names.append(name)
-    return tuple(names)
+    return tuple(names), ()
 
 
 def _string(value: Any) -> str | None:

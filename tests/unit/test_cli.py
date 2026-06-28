@@ -198,6 +198,22 @@ class _SeedGitCache:
         return None
 
 
+class _InvalidDependencyGitCache(_SeedGitCache):
+    """Git transport stub that returns a templated dependency file."""
+
+    def read_file(
+        self,
+        bare_path: Path,
+        sha: str,
+        path: str,
+        *,
+        auth_header: str | None,
+    ) -> str | None:
+        if path == "roles/requirements.yml":
+            return "---\ngalaxy_info:\n  role_name: {@ role_slug @}\n"
+        return None
+
+
 class _NoGitFetchCache:
     """Git transport stub that proves unchanged repos do not fetch."""
 
@@ -810,6 +826,81 @@ def test_graph_downstream_reads_remote_dependencies_without_source(
     assert "|   +-- acme/site@main" in result.stdout
     assert "|       +-- acme/base" in result.stdout
     assert "upstream omitted" not in result.stdout
+
+
+def test_graph_live_downstream_surfaces_parse_warnings(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    cfg = _write_config(
+        tmp_path,
+        index_path=tmp_path / "index.sqlite3",
+        extra_profile={"github": {"token": "ghp_test"}},
+    )
+    monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
+
+    with respx.mock(base_url="https://api.github.com") as mock:
+        _mock_dependency_file(
+            mock,
+            "acme/site",
+            content="---\ngalaxy_info:\n  role_name: {@ role_slug @}\n",
+        )
+        result = CliInvoker().invoke(
+            app,
+            ["graph", "acme/site", "--downstream", "--depth", "1"],
+        )
+
+    assert result.exit_code == 0, result.output
+    assert (
+        "warning: skipped acme/site@main roles/requirements.yml: could not parse dependency YAML"
+    ) in result.stdout
+
+
+def test_graph_live_transitive_parse_warnings_keep_repo_ref_context(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    cfg = _write_config(
+        tmp_path,
+        index_path=tmp_path / "index.sqlite3",
+        extra_profile={"github": {"token": "ghp_test"}},
+    )
+    monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
+
+    with respx.mock(base_url="https://api.github.com") as mock:
+        _mock_dependency_file(
+            mock,
+            "acme/site",
+            content="\n".join(
+                [
+                    "- src: https://github.com/acme/one",
+                    "- src: https://github.com/acme/two",
+                    "",
+                ]
+            ),
+        )
+        _mock_dependency_file(
+            mock,
+            "acme/one",
+            content="---\ngalaxy_info:\n  role_name: {@ role_slug @}\n",
+        )
+        _mock_dependency_file(
+            mock,
+            "acme/two",
+            content="---\ngalaxy_info:\n  role_name: {@ role_slug @}\n",
+        )
+        result = CliInvoker().invoke(
+            app,
+            ["graph", "acme/site", "--downstream", "--depth", "2"],
+        )
+
+    assert result.exit_code == 0, result.output
+    assert (
+        "warning: skipped acme/one@main roles/requirements.yml: could not parse dependency YAML"
+    ) in result.stdout
+    assert (
+        "warning: skipped acme/two@main roles/requirements.yml: could not parse dependency YAML"
+    ) in result.stdout
 
 
 def test_graph_tree_ignores_global_collection_view_list(
@@ -1911,6 +2002,30 @@ def test_graph_local_target_prefers_origin_remote_for_identity(
 
     assert result.exit_code == 0, result.output
     assert result.stdout.startswith("acme/origin-role\n")
+
+
+def test_graph_local_target_surfaces_parse_warnings(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    target = tmp_path / "role"
+    (target / "roles").mkdir(parents=True)
+    (target / ".git").mkdir()
+    (target / ".git" / "config").write_text(
+        '[remote "origin"]\n  url = https://github.com/acme/origin-role.git\n'
+    )
+    (target / "roles" / "requirements.yml").write_text(
+        "---\ngalaxy_info:\n  role_name: {@ role_slug @}\n"
+    )
+    cfg = _write_config(tmp_path, index_path=tmp_path / "index.sqlite3")
+    monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
+
+    result = CliInvoker().invoke(app, ["graph", str(target), "--downstream"])
+
+    assert result.exit_code == 0, result.output
+    assert (
+        "warning: skipped roles/requirements.yml: could not parse dependency YAML" in result.stdout
+    )
 
 
 def test_graph_empty_local_dependency_result_explains_checked_paths(
@@ -3057,6 +3172,29 @@ def test_source_refresh_partial_failure_exits_nonzero_and_saves_successes(
     assert SqliteDependencyIndex(index_path).ref_scans(
         "source:prod", "acme/ok", [("heads", "main")]
     )
+
+
+def test_source_refresh_prints_skipped_dependency_files(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    cfg = _write_config(
+        tmp_path,
+        index_path=tmp_path / "index.sqlite3",
+        extra_profile={"github": {"token": "ghp_test"}},
+        top_level_ansible={"sources": [{"name": "prod", "repos": ["acme/site"]}]},
+    )
+    monkeypatch.setenv("UNTAPED_CONFIG", str(cfg))
+    monkeypatch.setattr(_refresh, "GitRepositoryCache", _InvalidDependencyGitCache)
+
+    with respx.mock(base_url="https://api.github.com") as mock:
+        _mock_refresh_repos(mock, {"acme/site": "sha-site"})
+        result = CliInvoker().invoke(app, ["source", "refresh", "prod", "--backend", "graphql"])
+
+    assert result.exit_code == 0, result.output
+    assert (
+        "warning: skipped acme/site@main roles/requirements.yml: could not parse dependency YAML"
+    ) in result.stderr
 
 
 def test_source_refresh_transient_probe_failure_prints_safe_rerun_hint(

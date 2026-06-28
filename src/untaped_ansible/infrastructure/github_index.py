@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 
 from untaped_ansible.domain.identity import IdentityResolver
 from untaped_ansible.domain.parser import parse_dependency_file
-from untaped_ansible.domain.payloads import CachedRef, IndexedDependency
+from untaped_ansible.domain.payloads import CachedRef, IndexedDependency, SkippedDependencyFile
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -30,6 +30,12 @@ class GithubDependencyIndex:
         self._aliases = aliases
         self._dependency_paths = dependency_paths
         self._cache: dict[tuple[str, str | None], list[IndexedDependency]] = {}
+        self._warnings: list[SkippedDependencyFile] = []
+
+    @property
+    def warnings(self) -> tuple[SkippedDependencyFile, ...]:
+        """Parse warnings accumulated during live dependency reads."""
+        return tuple(self._warnings)
 
     def dependencies(
         self,
@@ -115,6 +121,7 @@ class GithubDependencyIndex:
     def _live_dependencies(self, repo: str, ref: str | None) -> list[IndexedDependency]:
         owner, name = _split_repo(repo)
         read_ref = self._read_ref(owner, name, ref)
+        source_ref = ref or read_ref
         paths = self._tree_paths(owner, name, read_ref)
         resolver = IdentityResolver(self._aliases)
         edges: list[IndexedDependency] = []
@@ -125,12 +132,21 @@ class GithubDependencyIndex:
                 path,
                 self._github.get_raw_content(owner, name, path, ref=read_ref),
             )
+            self._warnings.extend(
+                SkippedDependencyFile(
+                    repo=repo,
+                    ref=source_ref,
+                    source_path=warning.source_path,
+                    reason=warning.reason,
+                )
+                for warning in report.warnings
+            )
             for declaration in report.dependencies:
                 resolved = resolver.resolve(declaration)
                 edges.append(
                     IndexedDependency(
                         source_repo=repo,
-                        source_ref=ref or read_ref,
+                        source_ref=source_ref,
                         dependency_repo=resolved.repo,
                         dependency_name=declaration.name,
                         dependency_version=declaration.version,

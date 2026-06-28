@@ -146,6 +146,22 @@ bypasses `render_rows`, so it carries no typed-pipe envelope or `kind` tag.
   aliases. Unknown declarations stay in the graph as unresolved nodes.
 - The domain emits a graph model first; tree, Mermaid, and JSON are renderers
   over that model.
+- `GraphEdge.id` is public JSON identity: `edge:` plus the first 16 hex
+  characters of `sha256(relation + NUL + source_id + NUL + target_id)`. Do
+  not change this format without treating it as a graph contract change. This
+  is topological identity, not physical declaration identity: duplicate
+  declarations with the same relation/source/target collapse to one
+  representative graph edge.
+- Graph cycles are detected after graph construction over the emitted,
+  depth-bounded edge set. Cycle-closing edges must be emitted before traversal
+  stops on a per-path cycle guard, otherwise cycle output hides the actual
+  dependency relation. `DependencyGraph.cycles` records `kind`, `relation`,
+  `node_ids`, and `edge_ids` separately for `requires` and `impacts`, including
+  self-loops. `kind="cycle"` stores a closed ordered `node_ids` path and the
+  corresponding path `edge_ids`. `kind="scc_group"` stores a sorted open SCC
+  node set and sorted internal SCC edge IDs when elementary cycle enumeration
+  exceeds the deterministic cap. Never emit a nondeterministic partial cycle
+  list for a dense component.
 - Tree output renders nested traversal paths for downstream and upstream
   independently. Each direction starts with the target node for that direction;
   when the requested target omits `--ref`, tree output should preserve concrete
@@ -153,10 +169,22 @@ bypasses `render_rows`, so it carries no typed-pipe envelope or `kind` tag.
   under the repo-only target. Do not flatten both directions into shared
   buckets; a node that appears in both directions should be visible in both
   sections.
+- Tree rendering must keep its path-set guard as the loop breaker and
+  user-facing `(cycle)` marker. Structured cycles are a graph-model contract
+  for JSON and optional Mermaid comments; they are not a substitute for the
+  tree renderer's recursion guard.
 - Tree output is the human report. It sorts refs with branches before tags,
   promotes the repo's exact cached default branch first, sorts remaining
   branches naturally, sorts semver tags newest-first, and leaves refs without
   branch/tag metadata last. Mermaid and JSON keep graph model order.
+- Parser reports distinguish empty YAML documents, valid mapping/list
+  dependency documents, unsupported top-level shapes, and YAML parse errors.
+  Empty, whitespace-only, and `---`-only files remain warning-free. Malformed
+  or templated YAML and recognized dependency files with unsupported top-level
+  shape return empty dependencies plus `ParseWarning`; they are visibility
+  warnings, not repo failures. Recognized nested sections (`dependencies`,
+  `roles`, `collections`) are warning-free when missing, null, or empty lists;
+  present non-list values warn and are skipped.
 
 ## Cached Source Data
 
@@ -334,7 +362,10 @@ phases:
    `ansible.git_fetch_concurrency` / `--concurrency`), reads dependency
    files with Git object plumbing, and commits each processed repo batch
    without updating the source-wide completed baseline until the expanded repo
-   queue is exhausted. The source-refresh repo batch size comes from
+   queue is exhausted. Parse warnings from dependency files are returned as
+   `RefreshResult.skipped_files` and rendered on stderr by the CLI; they are
+   not persisted to SQLite and must not reappear later as cached graph
+   warnings. The source-refresh repo batch size comes from
    `ansible.source_refresh_repo_batch_size` (default 100).
 
 Refresh is resilient to per-repo failures. Probe misses (missing or
@@ -352,6 +383,15 @@ and reason, and the CLI prints a stderr warning with the fallback count. Large
 rate-limit fallbacks can be much slower because Git probing runs one network
 subprocess per repo. The graph refresh path instead prepends a graph warning
 and proceeds with possibly stale data for failed repos.
+
+Local graph parsing and live GitHub downstream parsing surface dependency-file
+parse skips through `DependencyGraph.warnings`. Local graph warnings render as
+`skipped PATH: REASON`; live graph warnings render as
+`skipped REPO@REF PATH: REASON` when a ref is known. The `DependencyIndex` port
+remains a dependency-edge reader only; do not widen it for parser warnings.
+Local graph warnings are collected by `cli/graph_commands.py` before overlaying
+local edges. Live graph warnings are accumulated on `GithubDependencyIndex`
+while traversal lazily reads raw files and are merged after graph construction.
 
 Large refreshes are resumable. SQLite stores `source_refresh_progress` rows
 for successful repos in the active source fingerprint. If the GraphQL budget

@@ -8,6 +8,7 @@ from typing import Literal, NamedTuple, Protocol, assert_never
 from pydantic import BaseModel, ConfigDict
 
 from untaped_ansible.application.ports import DependencyIndex
+from untaped_ansible.domain.cycles import detect_cycles
 from untaped_ansible.domain.graph import DependencyGraph, GraphEdge, GraphNode
 from untaped_ansible.domain.payloads import CachedRef, IndexedDependency
 from untaped_ansible.domain.ref_display import RefDisplay, sort_ref_displays
@@ -141,10 +142,13 @@ class _GraphBuilder:
                 )
             )
         warnings.extend(self._warnings)
+        cycles, cycle_warnings = detect_cycles(self._edges)
+        warnings.extend(cycle_warnings)
         return DependencyGraph(
             target_id=target_id,
             nodes=tuple(self._nodes.values()),
             edges=tuple(self._edges),
+            cycles=cycles,
             warnings=tuple(warnings),
         )
 
@@ -185,9 +189,9 @@ class _GraphBuilder:
             source_stack = {*entry.stack, source_id}
             target_id = _dependency_target_id(indexed)
             entry.items.append(_AddTargetItem(indexed))
+            entry.items.append(_AddEdgeItem(source_id, target_id, "requires", indexed))
             if target_id in source_stack:
                 continue
-            entry.items.append(_AddEdgeItem(source_id, target_id, "requires", indexed))
             if indexed.dependency_repo is None:
                 continue
             child = _Walk(
@@ -214,9 +218,9 @@ class _GraphBuilder:
             entry.items.append(
                 _AddNodeItem(indexed.source_repo, indexed.source_ref, indexed.source_ref_kind)
             )
+            entry.items.append(_AddEdgeItem(source_id, target_id, "impacts", indexed))
             if source_id in target_stack:
                 continue
-            entry.items.append(_AddEdgeItem(source_id, target_id, "impacts", indexed))
             child = _Walk(
                 indexed.source_repo,
                 indexed.source_ref,
@@ -228,9 +232,15 @@ class _GraphBuilder:
         return children
 
     def _replay(self, entry: _Walk) -> None:
-        for item in entry.items:
+        stack = [iter(entry.items)]
+        while stack:
+            try:
+                item = next(stack[-1])
+            except StopIteration:
+                stack.pop()
+                continue
             if isinstance(item, _Walk):
-                self._replay(item)
+                stack.append(iter(item.items))
             elif isinstance(item, _AddNodeItem):
                 self._add_node(item.repo, item.ref, ref_kind=item.ref_kind)
             elif isinstance(item, _AddTargetItem):

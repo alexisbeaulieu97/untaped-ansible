@@ -26,6 +26,15 @@ class ResolvedDependency(BaseModel):
     unresolved: str | None = None
 
 
+class ParseWarning(BaseModel):
+    """One dependency file skipped or partially ignored by the parser."""
+
+    model_config = ConfigDict(frozen=True)
+
+    source_path: str
+    reason: str
+
+
 class ParseReport(BaseModel):
     """Parsed dependencies plus ignored non-v1 declarations."""
 
@@ -33,3 +42,4 @@ class ParseReport(BaseModel):
 
     dependencies: tuple[DependencyDeclaration, ...] = ()
     ignored_collections: tuple[str, ...] = ()
+    warnings: tuple[ParseWarning, ...] = ()
