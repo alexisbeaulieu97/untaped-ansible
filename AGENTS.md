@@ -34,9 +34,8 @@ HTTP/TLS primitives, profile selection, and shared errors.
 4. **Import the SDK from `untaped.api`.** Core helpers (`create_app`,
    `report_errors`, `render_rows`, `get_config_section`, `app_context`,
    errors, options, …) come from `untaped.api`, never from core internals. The
-   only exception is `untaped.config_file`, which the config repositories use
-   for tool-owned state reads/writes (`mutate_tool_state` / `read_tool_state`);
-   `untaped.testing` stays test-only. Command bodies read typed settings with
+   tool-owned state helpers (`mutate_tool_state` / `read_tool_state`) also come
+   from `untaped.api`; `untaped.testing` stays test-only. Command bodies read typed settings with
    `get_config_section("ansible", AnsibleSettings)` for the tool's own section
    and `get_config_section("github", GithubSettings)` for the foreign GitHub
    section — `get_config_section` builds the one-off section model directly, so

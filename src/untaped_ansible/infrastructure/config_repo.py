@@ -13,8 +13,7 @@ from __future__ import annotations
 from typing import Any
 
 from pydantic import ValidationError
-from untaped.api import ConfigError, first_validation_error
-from untaped.config_file import mutate_tool_state, read_tool_state
+from untaped.api import ConfigError, first_validation_error, mutate_tool_state, read_tool_state
 
 from untaped_ansible.settings import SourceDefinition
 
