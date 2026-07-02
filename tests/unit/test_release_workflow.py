@@ -18,18 +18,16 @@ import yaml
 # The ONLY block that varies between tools.
 DIST_NAME = "untaped-ansible"
 CONSOLE_SCRIPT = "untaped-ansible"
-EXPECTED_VERSION = "0.11.1"
+EXPECTED_VERSION = "0.11.2"
 # Internal untaped-ecosystem deps, as (PEP 508 requirement, uv-source rev or None).
 #   rev = "vX.Y.Z" when the dep is git-sourced in [tool.uv.sources].
 #   None when it installs from PyPI.
 INTERNAL_DEPS: list[tuple[str, str | None]] = [
-    ("untaped>=2.4.4,<3", "v2.4.4"),
+    ("untaped>=2.4.4,<3", None),
     ("untaped-github>=0.12.2", None),
 ]
 # Docs that must steer users to PyPI install (repo-relative paths); [] to skip the docs check.
-PYPI_INSTALL_DOCS: list[str] = [
-    "README.md",
-]
+PYPI_INSTALL_DOCS: list[str] = []
 # ========================================================================
 
 CORE_RELEASE_TOOL_SHA = "07116cc11d4217283ad42badea4f5d5744542f2a"

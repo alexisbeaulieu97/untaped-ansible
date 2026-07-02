@@ -677,7 +677,7 @@ wheels = [
 [[package]]
 name = "untaped"
 version = "2.4.4"
-source = { git = "https://github.com/alexisbeaulieu97/untaped.git?rev=v2.4.4#e9a0560ad39a11d6d145f44e177df5ad650e06bf" }
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "cyclopts" },
     { name = "filelock" },
@@ -689,10 +689,14 @@ dependencies = [
     { name = "rich" },
     { name = "truststore" },
 ]
+sdist = { url = "https://files.pythonhosted.org/packages/ed/08/4846e16233853f1430006c1768a449ea0d927db7792a518c882b9a7079e2/untaped-2.4.4.tar.gz", hash = "sha256:7a1a153099efe7f609f2cdc42d4adbd27fb9f0cbccffbb46e2e55e7cb456101a", size = 69472, upload-time = "2026-07-01T18:55:32.375Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/8a/f0/739c38dc49700538d040bd76eff79f26f9959b717cef97c5de57777f77bc/untaped-2.4.4-py3-none-any.whl", hash = "sha256:838097528a191b4f98d82dcf04507107397df3fc3f9fbb4f540648706f0a2ace", size = 90368, upload-time = "2026-07-01T18:55:31.214Z" },
+]
 
 [[package]]
 name = "untaped-ansible"
-version = "0.11.1"
+version = "0.11.2"
 source = { editable = "." }
 dependencies = [
     { name = "cyclopts" },
@@ -718,7 +722,7 @@ requires-dist = [
     { name = "cyclopts", specifier = ">=4.16.0,<5" },
     { name = "pydantic", specifier = ">=2.13.3" },
     { name = "pyyaml", specifier = ">=6.0.3" },
-    { name = "untaped", git = "https://github.com/alexisbeaulieu97/untaped.git?rev=v2.4.4" },
+    { name = "untaped", specifier = ">=2.4.4,<3" },
     { name = "untaped-github", specifier = ">=0.12.2" },
 ]
 
