@@ -437,3 +437,8 @@ uv run ruff check --fix
 uv run ruff format
 uv run untaped-ansible --help
 ```
+
+The test suite has duplicate test-file basenames across directories, so
+pytest must run with `--import-mode=importlib` (already configured in
+`pyproject.toml` `addopts`). Do not run tests with `-o addopts=""` — that
+drops the flag and collection fails on colliding module names.
