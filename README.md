@@ -9,6 +9,7 @@ groups every untaped tool ships.
 ## Install
 
 ```bash
+uv tool install untaped-ansible
 uv tool install git+https://github.com/alexisbeaulieu97/untaped-ansible.git
 ```
 
