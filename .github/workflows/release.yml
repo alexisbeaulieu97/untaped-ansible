@@ -1,0 +1,241 @@
+name: Release
+
+"on":
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version to publish, without leading v.
+        required: true
+        type: string
+      index:
+        description: Package index to publish to.
+        required: true
+        type: choice
+        options:
+          - testpypi
+          - pypi
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.index }}-${{ inputs.version }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      RELEASE_INDEX: ${{ inputs.index }}
+      RELEASE_VERSION: ${{ inputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
+
+      - name: Checkout release tooling
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          repository: alexisbeaulieu97/untaped
+          ref: 07116cc11d4217283ad42badea4f5d5744542f2a
+          path: .release-tool
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39
+        with:
+          version: "0.11.26"
+          enable-cache: true
+
+      - name: Cache pre-commit hook envs
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: ~/.cache/pre-commit
+          key: pre-commit-${{ runner.os }}-${{ hashFiles('.pre-commit-config.yaml') }}
+          restore-keys: |
+            pre-commit-${{ runner.os }}-
+
+      - name: Guard production publish
+        if: inputs.index == 'pypi'
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+            echo "::error::Production PyPI publishes must run from refs/heads/main; got $GITHUB_REF."
+            exit 1
+          fi
+
+      - name: Verify release version
+        run: |
+          set -euo pipefail
+          python3 .release-tool/.github/release/release.py verify-version "$RELEASE_VERSION" \
+            --pyproject "$GITHUB_WORKSPACE/pyproject.toml"
+
+      - name: Verify production release target is unused
+        if: inputs.index == 'pypi'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 .release-tool/.github/release/release.py verify-target-unused "$RELEASE_VERSION"
+
+      - name: Verify internal dependencies resolve from selected index
+        run: |
+          set -euo pipefail
+          python3 .release-tool/.github/release/release.py verify-internal-dependencies-published \
+            --index "$RELEASE_INDEX" \
+            --pyproject "$GITHUB_WORKSPACE/pyproject.toml"
+
+      - name: Sync project
+        run: uv sync --frozen
+
+      - name: Pre-commit hooks
+        run: uv run pre-commit run --all-files --show-diff-on-failure
+
+      - name: mypy
+        run: uv run mypy
+
+      - name: Pytest
+        env:
+          TERM: dumb
+          NO_COLOR: "1"
+          COLUMNS: "200"
+        run: uv run pytest
+
+      - name: Build package
+        run: uv build --no-sources
+
+      - name: Smoke local wheel
+        run: |
+          set -euo pipefail
+          uv venv --python 3.14 "$RUNNER_TEMP/local-wheel"
+          uv pip install --python "$RUNNER_TEMP/local-wheel/bin/python" dist/*.whl
+
+          python3 .release-tool/.github/release/release.py smoke-console \
+            --package untaped-ansible \
+            --version "$RELEASE_VERSION" \
+            --venv "$RUNNER_TEMP/local-wheel" \
+            --console-script untaped-ansible
+
+      - name: Upload package artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: python-package-distributions
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: ${{ inputs.index }}
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Download package artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: python-package-distributions
+          path: dist/
+
+      - name: Publish package to TestPyPI
+        if: inputs.index == 'testpypi'
+        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b
+        with:
+          packages-dir: dist/
+          repository-url: https://test.pypi.org/legacy/
+          print-hash: true
+          attestations: true
+
+      - name: Publish package to PyPI
+        if: inputs.index == 'pypi'
+        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b
+        with:
+          packages-dir: dist/
+          print-hash: true
+          attestations: true
+
+  smoke-published:
+    needs: publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    env:
+      RELEASE_INDEX: ${{ inputs.index }}
+      RELEASE_VERSION: ${{ inputs.version }}
+    steps:
+      - name: Checkout release tooling
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          repository: alexisbeaulieu97/untaped
+          ref: 07116cc11d4217283ad42badea4f5d5744542f2a
+          path: .release-tool
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39
+        with:
+          version: "0.11.26"
+          enable-cache: true
+
+      - name: Smoke published package
+        run: |
+          set -euo pipefail
+          if [ "$RELEASE_INDEX" = "testpypi" ]; then
+            export UV_INDEX=https://test.pypi.org/simple/
+            export UV_INDEX_STRATEGY=unsafe-best-match
+          fi
+
+          published_venv="$RUNNER_TEMP/published-wheel"
+          uv venv --python 3.14 "$published_venv"
+          installed=0
+          for attempt in 1 2 3 4 5 6 7 8 9 10 11 12; do
+            if uv pip install --python "$published_venv/bin/python" --refresh-package untaped-ansible "untaped-ansible==$RELEASE_VERSION"; then
+              installed=1
+              break
+            fi
+            echo "Package not visible on $RELEASE_INDEX yet; retry $attempt/12."
+            sleep 10
+          done
+
+          if [ "$installed" != "1" ]; then
+            echo "::error::Published package smoke failed. The version may be burned if upload succeeded; bump patch before retrying."
+            exit 1
+          fi
+
+          if ! python3 .release-tool/.github/release/release.py smoke-console \
+            --package untaped-ansible \
+            --version "$RELEASE_VERSION" \
+            --venv "$published_venv" \
+            --console-script untaped-ansible; then
+            echo "::error::Published package smoke failed."
+            echo "::error::The version may be burned if upload succeeded; bump patch before retrying."
+            exit 1
+          fi
+
+  github-release:
+    needs: smoke-published
+    if: inputs.index == 'pypi'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    env:
+      RELEASE_VERSION: ${{ inputs.version }}
+    steps:
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release create "v$RELEASE_VERSION" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "untaped-ansible v$RELEASE_VERSION" \
+            --notes "PyPI release for untaped-ansible $RELEASE_VERSION."

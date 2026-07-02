@@ -676,8 +676,8 @@ wheels = [
 
 [[package]]
 name = "untaped"
-version = "2.4.0"
-source = { git = "https://github.com/alexisbeaulieu97/untaped.git?rev=v2.4.0#6afaef770fd242838d2ba23ccfd465bcb02a6508" }
+version = "2.4.4"
+source = { git = "https://github.com/alexisbeaulieu97/untaped.git?rev=v2.4.4#e9a0560ad39a11d6d145f44e177df5ad650e06bf" }
 dependencies = [
     { name = "cyclopts" },
     { name = "filelock" },
@@ -692,7 +692,7 @@ dependencies = [
 
 [[package]]
 name = "untaped-ansible"
-version = "0.11.0"
+version = "0.11.1"
 source = { editable = "." }
 dependencies = [
     { name = "cyclopts" },
@@ -718,8 +718,8 @@ requires-dist = [
     { name = "cyclopts", specifier = ">=4.16.0,<5" },
     { name = "pydantic", specifier = ">=2.13.3" },
     { name = "pyyaml", specifier = ">=6.0.3" },
-    { name = "untaped", git = "https://github.com/alexisbeaulieu97/untaped.git?rev=v2.4.0" },
-    { name = "untaped-github", git = "https://github.com/alexisbeaulieu97/untaped-github.git?rev=v0.12.2" },
+    { name = "untaped", git = "https://github.com/alexisbeaulieu97/untaped.git?rev=v2.4.4" },
+    { name = "untaped-github", specifier = ">=0.12.2" },
 ]
 
 [package.metadata.requires-dev]
@@ -735,12 +735,16 @@ dev = [
 
 [[package]]
 name = "untaped-github"
-version = "0.12.2"
-source = { git = "https://github.com/alexisbeaulieu97/untaped-github.git?rev=v0.12.2#37908aeae3c8ca6b24413c1bfd85d52757b80311" }
+version = "0.12.5"
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "cyclopts" },
     { name = "pydantic" },
     { name = "untaped" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/62/3c/aa2a5f804170a08eb7e05616b58e1a55333281fa0d7cd3256663797dff92/untaped_github-0.12.5.tar.gz", hash = "sha256:95b91d540cd3c050534f0439f47b446a095c68eeb5d60af07a98dee198b4dc69", size = 38888, upload-time = "2026-07-02T12:18:15.962Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/48/2e/57deec5f39f307320efb9c2d3ac1f4e5294b30ecc76e19498e63a7139bfc/untaped_github-0.12.5-py3-none-any.whl", hash = "sha256:54c1e7d43f9077c811f0aaa4fcac44fea6e12a045f144eab3648393513e3e0e6", size = 53222, upload-time = "2026-07-02T12:18:14.776Z" },
 ]
 
 [[package]]

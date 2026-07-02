@@ -1,8 +1,10 @@
 [project]
 name = "untaped-ansible"
-version = "0.11.0"
+version = "0.11.1"
 description = "Ansible dependency graph CLI built on the untaped SDK."
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [
     { name = "Alexis Beaulieu", email = "alexisbeaulieu97@gmail.com" }
 ]
@@ -11,7 +13,7 @@ dependencies = [
     "cyclopts>=4.16.0,<5",
     "pydantic>=2.13.3",
     "pyyaml>=6.0.3",
-    "untaped>=2.4.0,<3",
+    "untaped>=2.4.4,<3",
     "untaped-github>=0.12.2",
 ]
 
@@ -110,5 +112,4 @@ exclude_also = [
 ]
 
 [tool.uv.sources]
-untaped = { git = "https://github.com/alexisbeaulieu97/untaped.git", rev = "v2.4.0" }
-untaped-github = { git = "https://github.com/alexisbeaulieu97/untaped-github.git", rev = "v0.12.2" }
+untaped = { git = "https://github.com/alexisbeaulieu97/untaped.git", rev = "v2.4.4" }
