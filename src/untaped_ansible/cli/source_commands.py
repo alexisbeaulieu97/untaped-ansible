@@ -16,7 +16,6 @@ from untaped.api import (
     echo,
     emit,
     get_config_section,
-    render_rows,
     report_errors,
 )
 from untaped_github import GithubSettings
@@ -235,15 +234,13 @@ def source_list_command(*, fmt: FormatOption = "table", columns: ColumnsOption =
     """List saved sources."""
     with report_errors():
         rows = [_source_row(source) for source in SourceRepository().entries()]
-        rendered = render_rows(
+        emit(
             rows,
             fmt=fmt,
             columns=columns,
             kind="ansible.source",
             empty="No sources configured. Add one with `untaped-ansible source save <name>`.",
         )
-        if rendered:
-            echo(rendered)
 
 
 @app.command(name="show")
@@ -298,15 +295,13 @@ def source_status_command(
             )
             for source_name in names
         ]
-        rendered = render_rows(
+        emit(
             rows,
             fmt=fmt,
             columns=columns,
-            kind="ansible.source-status",
+            kind="ansible.source_status",
             empty="No sources scanned yet. Run `untaped-ansible source refresh <name>`.",
         )
-        if rendered:
-            echo(rendered)
 
 
 @app.command(name="refresh")

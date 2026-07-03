@@ -10,14 +10,13 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal, Protocol
 
-from untaped.api import UntapedError
+from untaped.api import UntapedError, bounded_map
 from untaped_github import (
     RepositoryInventoryScope,
     ResolveRepositoryInventory,
     normalize_team_scopes,
 )
 
-from untaped_ansible._concurrency import bounded_map
 from untaped_ansible.application.ports import (
     GitHubDependencyReader,
     IncrementalDependencyIndexWriter,

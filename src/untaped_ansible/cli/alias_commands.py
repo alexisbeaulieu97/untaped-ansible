@@ -11,7 +11,7 @@ from untaped.api import (
     UntapedError,
     create_app,
     echo,
-    render_rows,
+    emit,
     report_errors,
 )
 
@@ -39,7 +39,7 @@ def alias_list_command(*, fmt: FormatOption = "table", columns: ColumnsOption = 
             {"alias": alias, "repo": repo}
             for alias, repo in sorted(AliasRepository().entries().items())
         ]
-        rendered = render_rows(
+        emit(
             rows,
             fmt=fmt,
             columns=columns,
@@ -47,8 +47,6 @@ def alias_list_command(*, fmt: FormatOption = "table", columns: ColumnsOption = 
             empty="No dependency aliases configured. Map one with "
             "`untaped-ansible alias add <name> <repo>`.",
         )
-        if rendered:
-            echo(rendered)
 
 
 @app.command(name="remove")
