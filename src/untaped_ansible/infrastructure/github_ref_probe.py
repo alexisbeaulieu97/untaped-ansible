@@ -5,10 +5,9 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Literal, Protocol
 
-from untaped.api import HttpError, UntapedError
+from untaped.api import HttpError, UntapedError, bounded_map
 from untaped_github import GithubGraphqlError
 
-from untaped_ansible._concurrency import bounded_map
 from untaped_ansible.domain.payloads import (
     GitRef,
     ProbedRepo,

@@ -4,6 +4,11 @@ Single source of truth for this standalone CLI repo. If you change
 architecture, command behavior, settings behavior, or the development
 workflow, update this file in the same commit.
 
+Shared SDK and fleet conventions live in the core docs:
+https://github.com/alexisbeaulieu97/untaped/blob/main/docs/plugins.md and
+https://github.com/alexisbeaulieu97/untaped/blob/main/docs/tool-conventions.md.
+This file only records `untaped-ansible`-specific contracts.
+
 ## Mission
 
 `untaped-ansible` is a standalone CLI built on the `untaped` SDK. It owns the
@@ -19,55 +24,9 @@ HTTP/TLS primitives, profile selection, and shared errors.
    changes, new command patterns, settings changes, and major graph/source
    workflow changes must be documented here and in
    `src/untaped_ansible/skills/untaped-ansible/SKILL.md`.
-2. **Prefer `uv` commands over manual dependency edits.** Use `uv add` and
-   `uv add --group dev` when resolution permits; hand-edit tool config only.
-3. **Expose the CLI through the `untaped-ansible` console script.**
-   `untaped-ansible = "untaped_ansible.__main__:main"` in `[project.scripts]`
-   is the public entry point. `main()` hands the Cyclopts `app` and a
-   `ToolSpec(command="untaped-ansible", section="ansible",
-   profile_model=AnsibleSettings, state_model=AnsibleState, skills=...)` to the
-   SDK's `run_tool`, which mounts the shared `config` / `profile` / `skills`
-   command groups and runs under the SDK error contract. The package
-   `__init__.py` re-exports `app` lazily (PEP 562 `__getattr__`) so importing
-   `untaped_ansible` never drags the whole CLI tree onto the import path before
-   it is needed.
-4. **Import the SDK from `untaped.api`.** Core helpers (`create_app`,
-   `report_errors`, `render_rows`, `get_config_section`, `app_context`,
-   errors, options, …) come from `untaped.api`, never from core internals. The
-   tool-owned state helpers (`mutate_tool_state` / `read_tool_state`) also come
-   from `untaped.api`; `untaped.testing` stays test-only. Command bodies read typed settings with
-   `get_config_section("ansible", AnsibleSettings)` for the tool's own section
-   and `get_config_section("github", GithubSettings)` for the foreign GitHub
-   section — `get_config_section` builds the one-off section model directly, so
-   the CLI app can be exercised in tests without going through `run_tool`, and
-   the unregistered `github` section still resolves under the shared config's
-   `extra="ignore"` contract. Use `app_context()` only for `ctx.http` /
-   `ctx.ui(...)`. Profile selection is owned by the built-in `--profile`
-   option, which works in any token position; commands declare no command-local
-   `--profile`. Helpers like `cli/_refresh.py`'s `refresh_source` receive
-   resolved GitHub/HTTP settings as arguments instead of reading ambient
-   config.
-5. **Use the 4-layer DDD layout.** `cli -> application -> domain`, with
-   `infrastructure -> domain`; `application` and `infrastructure` must not
-   import each other at runtime.
-6. **Declare ports in `application/ports.py`.** Use cases depend on the
-   narrowest `Protocol`; concrete adapters satisfy ports structurally.
-7. **Use absolute imports.** `from untaped_ansible...`, never relative imports.
-8. **Every source module has a module docstring.** Re-export `__init__.py`
-   files are exempt.
-9. **Cyclopts command signatures are explicit.** Use
-   `Annotated[..., Parameter(...)]` and name documented commands/options
-   explicitly. Required inputs are required positional-only params
-   (`Parameter(help=...)` before `/`); a missing value renders
-   `error: ... requires an argument` (exit 2) automatically — never an
-   optional default plus a manual help dance.
-10. **stdout is data only.** Prompts, progress, and status messages go to
-    stderr via `echo(..., err=True)`.
-11. **GitHub behavior belongs in `untaped-github`.** If this tool needs a
-    missing GitHub operation, add an intentional public API there and test it.
-    Do not reach into private internals or duplicate GitHub clients here.
-12. **Finish with verification.** Run `uv run ruff check --fix`,
-    `uv run ruff format`, `uv run mypy`, and `uv run pytest`.
+2. **GitHub behavior belongs in `untaped-github`.** If this tool needs a
+   missing GitHub operation, add an intentional public API there and test it.
+   Do not reach into private internals or duplicate GitHub clients here.
 
 ## Architecture
 
@@ -76,7 +35,6 @@ src/untaped_ansible/
 ├── __init__.py           # lazy PEP 562 re-export of app
 ├── __main__.py           # console-script entry point: run_tool(app, SPEC)
 ├── settings.py           # tool-owned profile + state models
-├── _concurrency.py       # bounded_map thread-pool helper shared by application and infrastructure
 ├── cli/                  # Cyclopts composition root plus concern-specific commands
 ├── application/          # use cases and ports
 ├── domain/               # pure models, parser, graph, renderers
@@ -107,13 +65,6 @@ instead of reaching into each other's helpers.
 
 ## CLI Output Contracts
 
-Alias and source commands that emit row-style collections render through
-`untaped.render_rows`. For `--format table`, row collections honor the
-per-profile `ui:` settings and SDK built-in themes. For `--format json`,
-`yaml`, and `raw`, row collections bypass configured themes with a plain
-`UiContext()` so missing or invalid configured themes cannot break structured
-or pipe-oriented output.
-
 The first key in each raw row remains load-bearing: `alias list --format raw`
 must emit aliases first, and source row commands must emit source names first
 unless the user explicitly passes `--columns`. Keep those contracts stable for
@@ -127,10 +78,10 @@ without sniffing fields. Each producer tags its envelope with a namespaced
 
 - `alias list` → `ansible.alias`
 - `source list` and `source show` → `ansible.source`
-- `source status` → `ansible.source-status`
+- `source status` → `ansible.source_status`
 
-Any new row-style producer that calls `render_rows` must pass a matching
-`kind="ansible.<entity>"` (lowercase, kebab-case for multiword entities).
+Any new row-style producer must pass a matching `kind="ansible.<entity>"`
+(lowercase snake_case for multiword entities).
 
 `graph` output is not a UI collection. Tree, Mermaid, and JSON graph output
 are domain renderers over the graph model and must not be routed through the
@@ -427,16 +378,7 @@ Saving or editing a source clears cached source data only when the saved
 definition changes. Re-saving or editing to an identical source must preserve
 refreshed cache data.
 
-## Development Workflow
-
-```bash
-uv sync
-uv run pytest
-uv run mypy
-uv run ruff check --fix
-uv run ruff format
-uv run untaped-ansible --help
-```
+## Test Collection Gotcha
 
 The test suite has duplicate test-file basenames across directories, so
 pytest must run with `--import-mode=importlib` (already configured in

@@ -5,7 +5,8 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from typing import Literal, Protocol
 
-from untaped_ansible._concurrency import bounded_map
+from untaped.api import bounded_map
+
 from untaped_ansible.domain.errors import GitCacheError
 from untaped_ansible.domain.payloads import (
     GitRef,

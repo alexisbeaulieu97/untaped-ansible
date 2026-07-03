@@ -99,5 +99,5 @@ def test_source_status_pipe_tags_envelope_with_kind(tmp_path: Path, monkeypatch)
     assert result.exit_code == 0, result.output
     envelope = json.loads(result.stdout.strip())
     assert envelope["untaped"] == "1"
-    assert envelope["kind"] == "ansible.source-status"
+    assert envelope["kind"] == "ansible.source_status"
     assert envelope["record"]["source"] == "prod"
