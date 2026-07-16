@@ -1,0 +1,19 @@
+schema = "untaped.orchestration.store/v1"
+id = "sto_019f6ae01dc675ad9f55c72663f92498"
+name = "untaped-ansible"
+visibility = "public"
+timezone = "UTC"
+
+[capabilities]
+active_tasks = false
+
+[curation]
+inbox_review_days = 7
+in_progress_review_days = 14
+
+[brief]
+pinned_decisions = []
+max_decision_body_bytes = 4096
+max_total_body_bytes = 16384
+max_rows_per_section = 10
+max_total_bytes = 32768

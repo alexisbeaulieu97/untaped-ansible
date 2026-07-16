@@ -13,3 +13,14 @@ wheels/
 # Virtual environments
 .venv
 .uv-cache/
+
+# Orchestration runtime and editor noise
+.untaped/orchestration/**/.lock
+.untaped/orchestration/**/.DS_Store
+.untaped/orchestration/**/.*.untaped-tmp-*
+.untaped/orchestration/**/*~
+.untaped/orchestration/**/*.swp
+.untaped/orchestration/**/*.swo
+.untaped/orchestration/**/*.tmp
+.untaped/orchestration/**/.#*
+.untaped/orchestration/**/#*

@@ -1,0 +1,45 @@
+name: Orchestration
+
+on:
+  pull_request:
+    paths:
+      - ".untaped/orchestration/**"
+      - ".github/workflows/orchestration.yml"
+      - ".gitignore"
+      - "AGENTS.md"
+      - "docs/decisions.md"
+      - "tests/unit/test_orchestration_adoption.py"
+  push:
+    branches: [main]
+    paths:
+      - ".untaped/orchestration/**"
+      - ".github/workflows/orchestration.yml"
+      - ".gitignore"
+      - "AGENTS.md"
+      - "docs/decisions.md"
+      - "tests/unit/test_orchestration_adoption.py"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: orchestration-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e
+        with:
+          version: "0.11.19"
+      - name: Validate local store
+        run: uvx --python 3.14 --from 'untaped-orchestration==0.1.0' untaped-orchestration check --local
+      - name: Check canonical formatting
+        run: uvx --python 3.14 --from 'untaped-orchestration==0.1.0' untaped-orchestration fmt --check --local
+      - name: Check generated views
+        run: uvx --python 3.14 --from 'untaped-orchestration==0.1.0' untaped-orchestration render --check
