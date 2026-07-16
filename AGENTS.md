@@ -384,3 +384,15 @@ The test suite has duplicate test-file basenames across directories, so
 pytest must run with `--import-mode=importlib` (already configured in
 `pyproject.toml` `addopts`). Do not run tests with `-o addopts=""` — that
 drops the flag and collection fails on colliding module names.
+
+## Orchestration store
+
+Durable architecture decisions and rationale are owned by
+[docs/decisions.md](./docs/decisions.md). The repository has a public decision-only
+orchestration store; it is the empty initial store, and tasks are forbidden. Use
+`untaped-orchestration` for canonical reads and mutations, including revision guards on
+every mutation. Agents never use `--force-current`.
+
+Committed views are generated human output and never tool input. Validate with
+`untaped-orchestration check --local`, `untaped-orchestration fmt --check --local`, and
+`untaped-orchestration render --check`. Recover through `check` and `render`, not hand edits.
